@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main, release]
   push:
-    branches: [main, 'release/**']
+    branches: [main, release]
   workflow_dispatch:
 
 permissions:
@@ -18,8 +18,8 @@ jobs:
   work:
     name: work checks
     if: >-
-      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.stack.base.ref || github.base_ref, 'release/')) ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/'))
+      (github.event_name == 'pull_request' && (github.event.pull_request.stack.base.ref || github.base_ref) == 'release') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/release')
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
