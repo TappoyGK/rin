@@ -1,3 +1,5 @@
+//! バイトコード VM の実行環境 `Machine` と `Runner` を定義する。
+
 mod builtins;
 mod ops;
 mod vm;
@@ -13,13 +15,13 @@ use crate::parser::parse_program;
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
-/// Evaluates Rin source code using the default `HeapAllocator`.
+/// 既定の `HeapAllocator` を用いて Rin ソースを評価する。
 pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
 }
 
-/// Evaluates Rin source code using a caller-provided `Allocator`.
+/// 呼び出し側が指定した `Allocator` を用いて Rin ソースを評価する。
 pub fn eval_with_allocator(
     source: &str,
     bindings: &[(&str, Value)],
@@ -33,11 +35,10 @@ pub fn eval_with_allocator(
     machine.eval(source)
 }
 
-/// Persistent Rin execution environment backed by a caller-provided `Allocator`.
+/// 呼び出し側の `Allocator` 上で動作する永続的な Rin 実行環境。
 ///
-/// Top-level definitions (`def` / `defn`) persist across `eval` calls, while
-/// temporary values created during evaluation are reclaimed via reference
-/// counting and reused from the pool's free-list.
+/// トップレベル定義（`def` / `defn`）は `eval` 呼び出しをまたいで保持され、
+/// 評価中に作られた一時値は参照カウントとフリーリストで即座に再利用する。
 pub struct Machine<'a> {
     limits: Limits,
     pool: Pool<'a>,
@@ -92,7 +93,7 @@ impl<'a> Machine<'a> {
         self.pool.live_bytes()
     }
 
-    /// Loads and evaluates a named module from host-provided source.
+    /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         let with_mod = |mut err: Error| {
             err.resolve_module(Some(name.to_string()));
@@ -176,7 +177,7 @@ impl<'a> Machine<'a> {
         Ok(exported)
     }
 
-    /// Calls a previously defined global function directly without re-parsing source.
+    /// 定義済みの大域関数をソース再解析なしで直接呼び出す。
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
         let Some(callee) = self
             .syms
@@ -191,7 +192,7 @@ impl<'a> Machine<'a> {
         self.call_rval(callee, args)
     }
 
-    /// Calls an exported function from a loaded module directly without re-parsing source.
+    /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
     pub fn call_in(
         &mut self,
         mod_name: &str,

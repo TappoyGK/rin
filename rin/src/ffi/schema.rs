@@ -1,3 +1,5 @@
+//! C FFI 向けのスキーマ解析・検証 API を実装する。
+
 use std::ffi::{CStr, c_char};
 
 use super::RinValue;
@@ -5,16 +7,16 @@ use crate::schema::Schema;
 
 pub struct RinSchema(pub Schema);
 
-/// Parses a Rin schema DSL string into an opaque `RinSchema*`, or returns NULL on parse error.
+/// スキーマ DSL 文字列を解析して `RinSchema*` を返す。構文エラー時は `NULL` を返す。
 ///
 /// # Safety
-/// `src` must be a valid NUL-terminated UTF-8 string.
+/// `src` は有効な NUL 終端 UTF-8 文字列でなければならない。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_schema(src: *const c_char) -> *mut RinSchema {
     if src.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: Caller guarantees NUL-terminated string.
+    // SAFETY: 呼び出し側が有効な NUL 終端文字列を保証する。
     let Ok(text) = unsafe { CStr::from_ptr(src) }.to_str() else {
         return std::ptr::null_mut();
     };
@@ -25,46 +27,46 @@ pub unsafe extern "C" fn rin_schema(src: *const c_char) -> *mut RinSchema {
 }
 
 /// # Safety
-/// `schema` must be null or a pointer returned by `rin_schema`.
+/// `schema` は `NULL` または `rin_schema` が返したポインタでなければならない。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_schema_free(schema: *mut RinSchema) {
     if !schema.is_null() {
-        // SAFETY: `schema` was allocated with `Box::into_raw`.
+        // SAFETY: `schema` は `Box::into_raw` で確保したポインタ。
         unsafe { drop(Box::from_raw(schema)) };
     }
 }
 
-/// Validates `val` against a compiled `RinSchema*`.
+/// `val` がコンパイル済み `RinSchema*` に適合するか検証する。
 ///
 /// # Safety
-/// `val` and `schema` must be valid pointers.
+/// `val` と `schema` は有効なポインタでなければならない。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_check(val: *const RinValue, schema: *const RinSchema) -> bool {
     if val.is_null() || schema.is_null() {
         return false;
     }
-    // SAFETY: Caller guarantees valid pointers.
+    // SAFETY: 呼び出し側が有効なポインタを保証する。
     let v = unsafe { &(*val).0 };
     let s = unsafe { &(*schema).0 };
     s.check(v).is_ok()
 }
 
-/// Parses `schema_src` and validates `val` in one step.
+/// `schema_src` の解析と `val` の検証を 1 回で行う。
 ///
 /// # Safety
-/// `val` must be a valid `RinValue*` and `schema_src` a valid NUL-terminated UTF-8 string.
+/// `val` は有効な `RinValue*`、`schema_src` は有効な NUL 終端 UTF-8 文字列でなければならない。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_check_str(val: *const RinValue, schema_src: *const c_char) -> bool {
     if val.is_null() || schema_src.is_null() {
         return false;
     }
-    // SAFETY: Caller guarantees valid pointers.
+    // SAFETY: 呼び出し側が有効なポインタを保証する。
     let Ok(text) = unsafe { CStr::from_ptr(schema_src) }.to_str() else {
         return false;
     };
     let Ok(schema) = Schema::parse(text) else {
         return false;
     };
-    // SAFETY: Caller guarantees valid `RinValue*`.
+    // SAFETY: 呼び出し側が有効な `RinValue*` を保証する。
     schema.check(unsafe { &(*val).0 }).is_ok()
 }

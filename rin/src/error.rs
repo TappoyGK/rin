@@ -1,6 +1,8 @@
+//! ソース位置、資源上限、エラー型、および呼び出し履歴フレームを定義する。
+
 use std::fmt;
 
-/// Source position (1-based line and column).
+/// ソース内の 1 始まりの行・列位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
     pub line: usize,
@@ -19,7 +21,7 @@ impl fmt::Display for Span {
     }
 }
 
-/// Resource limits for a single Rin evaluation.
+/// 1 回の評価における資源上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub steps: usize,
@@ -142,7 +144,7 @@ impl fmt::Display for StackFrame {
 
 const MAX_BACKTRACE_SIDE: usize = 32;
 
-/// Error returned by lexing, parsing, or evaluating Rin code.
+/// 字句解析・構文解析・コンパイル・評価で返すエラー。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,

@@ -1,3 +1,5 @@
+//! バイトコード VM の命令列、定数チャンク、関数プロトタイプ、シンボルテーブルを定義する。
+
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -303,7 +305,7 @@ impl Chunk {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
-    Tick(u32, u32), // (tick_spans_start, count)
+    Tick(u32, u32), // (tick_spans 開始添字, 式数)
     Void,
     Int(i64),
     Float(u32),
@@ -318,7 +320,7 @@ pub(crate) enum Op {
     GetCapture(u32),
     GetGlobal(u32),
     DefGlobal(u32),
-    DefFn(u32, u32), // (name_str_idx, proto_idx)
+    DefFn(u32, u32), // (名前シンボルID, プロトタイプ添字)
 
     MakeList(u32),
     MakeTuple(u32),

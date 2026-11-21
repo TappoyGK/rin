@@ -7,7 +7,7 @@ fn c_program_links_librin_and_runs_e2e() {
     let workspace_root = manifest_dir.parent().unwrap();
     let target_dir = workspace_root.join("target/c_ffi_link_build");
 
-    // Build staticlib in an isolated target-dir so we do not deadlock on Cargo's lockfile.
+    // Cargo のロックファイル競合を避けるため、独立した target-dir で staticlib をビルドする。
     let status = Command::new(env!("CARGO"))
         .args(["build", "--manifest-path"])
         .arg(manifest_dir.join("Cargo.toml"))

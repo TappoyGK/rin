@@ -1,3 +1,5 @@
+//! 字句トークン列から AST を構築する。
+
 use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
 use crate::error::{Error, Span};
 use crate::lexer::{Token, TokenKind, tokenize};
@@ -219,7 +221,7 @@ impl Parser {
             return Err(Error::parse(start, "empty '()' is not a valid expression"));
         }
 
-        // Check special forms when first token is an identifier not followed by '.' or '['
+        // 先頭が '.' や '[' に続かない識別子の場合は特殊形式を確認する。
         if let TokenKind::Ident(head) = &self.peek().kind {
             let is_plain_head = !matches!(
                 self.peek_next().map(|t| &t.kind),

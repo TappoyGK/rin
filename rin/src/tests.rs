@@ -538,11 +538,11 @@ fn modules_import_export_isolation_and_ffi_call_in() {
         )
         .unwrap();
 
-    // Private helper inside `base` is not exported or leaked
+    // `base` 内部の非公開関数 helper は外部に公開・漏洩しない。
     assert!(machine.eval("(import base) (base.helper 1)").is_err());
     assert!(machine.eval("(helper 1)").is_err());
 
-    // `ember.on_play` calls `base.deal_damage`, which calls `base`'s private `helper`
+    // `ember.on_play` は `base.deal_damage` 経由で `base` の非公開 `helper` を呼び出す。
     let res = machine
         .call_in("ember", "on_play", &[Value::Int(1)])
         .unwrap();
@@ -684,7 +684,7 @@ fn tail_call_optimization_and_with_eval_order() {
         },
         &mut alloc,
     );
-    // Depth is 10, yet 500 tail-recursive calls succeed without TooDeep
+    // depth 上限 10 でも 500 回の末尾再帰呼び出しが TooDeep にならず完了する。
     let sum = m
         .eval(
             r#"
@@ -696,7 +696,7 @@ fn tail_call_optimization_and_with_eval_order() {
         .unwrap();
     assert_eq!(sum, Value::Int(125_250));
 
-    // `with` checks struct type first, then each field existence before evaluating value
+    // `with` は式の評価前に構造体型検査と各フィールド存在検査を行う。
     let err1 = eval("(with 1 { a: nosuch })").unwrap_err();
     assert!(err1.message.contains("requires a struct"), "{err1}");
 
@@ -706,7 +706,7 @@ fn tail_call_optimization_and_with_eval_order() {
 
 #[test]
 fn memory_limit_does_not_double_free_shared_values_or_modules() {
-    // Repro 1: sharing a global string in a list that exceeds memory_bytes
+    // 再現 1: memory_bytes 上限超過時に共有された大域文字列を二重解放しない。
     let mut alloc = HeapAllocator;
     let mut m = Machine::new(
         Limits {
@@ -722,7 +722,7 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
     assert_eq!(err.kind, ErrorKind::TooMuchMemory);
     assert_eq!(m.eval("s").unwrap(), Value::str("hello"));
 
-    // Repro 2: load_module failing at memory_bytes limit must not corrupt globals
+    // 再現 2: memory_bytes 上限で失敗した load_module が大域環境を壊さない。
     let mut alloc2 = HeapAllocator;
     let mut m2 = Machine::new(
         Limits {

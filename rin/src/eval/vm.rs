@@ -1,3 +1,5 @@
+//! バイトコード命令の実行ループとスタックフレーム巻き戻し処理を実装する。
+
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -451,7 +453,7 @@ impl Runner<'_, '_> {
                                     ));
                                 }
                                 self.enter_depth(span)?;
-                                // Leave callee at arg_start - 1 so args stay in place (no memmove).
+                                // 呼び出し対象を arg_start - 1 に残し、引数の memmove を避ける。
                                 let child_base = arg_start;
                                 let child_locals = proto.local_count as usize;
                                 self.stack.resize(child_base + child_locals, RVal::Void);
@@ -513,7 +515,7 @@ impl Runner<'_, '_> {
                                         format!("expected {} arguments, got {}", proto.arity, argc),
                                     ));
                                 }
-                                // Release old frame's locals and any temporaries below `arg_start - 1`
+                                // 旧フレームのローカル変数と `arg_start - 1` 未満の一時値を解放する。
                                 for i in base..(arg_start - 1) {
                                     let old = self.stack[i];
                                     self.pool.release_val(old);
@@ -538,7 +540,7 @@ impl Runner<'_, '_> {
                                 self.stack.push(res?);
                             }
                             _ => {
-                                // Fallback for non-closure or top-level
+                                // クロージャ以外の呼び出し対象に対するエラー経路。
                                 return Err(Error::runtime(
                                     span,
                                     format!(
@@ -737,7 +739,7 @@ impl Runner<'_, '_> {
             }
             _ => {
                 let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
-                self.stack.pop(); // callee
+                self.stack.pop(); // 呼び出し対象を除去
                 let res = self.apply_builtin(b, &args, span);
                 self.release_all(args);
                 res

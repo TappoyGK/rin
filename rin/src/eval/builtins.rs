@@ -1,3 +1,5 @@
+//! 組み込み関数および高階リスト・配列演算を実装する。
+
 use crate::bytecode::BuiltinId;
 use crate::error::{Error, Span};
 use crate::pool::{Obj, RVal};
