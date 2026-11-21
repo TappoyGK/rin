@@ -73,7 +73,7 @@
 **入力：**
 
 ```rin
-(defn deep (n) (deep (+ n 1)))
+(defn deep (n) (+ 1 (deep (+ n 1))))
 (deep 0)
 ```
 

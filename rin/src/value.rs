@@ -2,19 +2,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::ast::Expr;
-
-/// Lexical environment captured by a closure or defined at top level.
-pub type Env = Rc<BTreeMap<String, Value>>;
-
-#[derive(Debug, Clone)]
-pub struct Closure {
-    pub name: Option<String>,
-    pub params: Vec<String>,
-    pub body: Vec<Expr>,
-    pub env: Env,
-}
-
 /// Persistent cons-cell linked list with O(1) cons, car, cdr, and len.
 #[derive(Debug, Clone)]
 pub enum ListNode {
@@ -154,7 +141,6 @@ pub enum Value {
     Some(Rc<Value>),
     Ok(Rc<Value>),
     Err(Rc<Value>),
-    Fn(Rc<Closure>),
     Builtin(&'static str),
 }
 
@@ -223,12 +209,9 @@ impl Value {
                 variant,
                 data,
             } => {
-                32 + type_name.len()
-                    + variant.len()
-                    + data.as_ref().map_or(0, |d| d.approx_bytes())
+                32 + type_name.len() + variant.len() + data.as_ref().map_or(0, |d| d.approx_bytes())
             }
             Value::Some(v) | Value::Ok(v) | Value::Err(v) => 16 + v.approx_bytes(),
-            Value::Fn(c) => 48 + c.params.len() * 16 + c.body.len() * 32,
         }
     }
 
@@ -247,7 +230,7 @@ impl Value {
             Value::Variant { type_name, .. } => type_name.as_str(),
             Value::None | Value::Some(_) => "option",
             Value::Ok(_) | Value::Err(_) => "result",
-            Value::Fn(_) | Value::Builtin(_) => "fn",
+            Value::Builtin(_) => "fn",
         }
     }
 }
@@ -360,10 +343,6 @@ impl fmt::Display for Value {
             Value::Some(v) => write!(f, "some({v})"),
             Value::Ok(v) => write!(f, "ok({v})"),
             Value::Err(v) => write!(f, "err({v})"),
-            Value::Fn(c) => match &c.name {
-                Some(name) => write!(f, "<fn {name}>"),
-                None => write!(f, "<fn>"),
-            },
             Value::Builtin(name) => write!(f, "<builtin {name}>"),
         }
     }

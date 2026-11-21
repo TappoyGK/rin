@@ -70,11 +70,7 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
     while i < lines.len() {
         let line = lines[i].trim();
         if let Some(heading) = line.strip_prefix("### ") {
-            let id = heading
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let id = heading.split_whitespace().next().unwrap_or("").to_string();
             assert!(
                 !id.is_empty(),
                 "{file_label}:{}: missing case ID in heading",
@@ -89,7 +85,9 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
                 if cur.trim_start().starts_with("```") {
                     in_fence = !in_fence;
                 }
-                if !in_fence && (cur.starts_with("# ") || cur.starts_with("## ") || cur.starts_with("### ")) {
+                if !in_fence
+                    && (cur.starts_with("# ") || cur.starts_with("## ") || cur.starts_with("### "))
+                {
                     break;
                 }
                 section_lines.push(cur);
@@ -122,9 +120,13 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                 buf.push(lines[idx]);
                 idx += 1;
             }
-            assert!(idx < lines.len(), "{file_label} ({id}): unclosed ```rin block");
+            assert!(
+                idx < lines.len(),
+                "{file_label} ({id}): unclosed ```rin block"
+            );
             source = Some(buf.join("\n"));
-        } else if trimmed.starts_with("|") && !trimmed.contains("---") && !trimmed.contains("上限") {
+        } else if trimmed.starts_with("|") && !trimmed.contains("---") && !trimmed.contains("上限")
+        {
             let cols: Vec<&str> = trimmed
                 .split('|')
                 .map(str::trim)
@@ -182,7 +184,10 @@ fn run_case(case: &SpecCase) {
         "値" => {
             let actual = result.unwrap_or_else(|e| panic!("{}: unexpected error: {e}", case.id));
             let expected = eval(&case.expected_value).unwrap_or_else(|e| {
-                panic!("{}: failed to eval expected '{}': {e}", case.id, case.expected_value)
+                panic!(
+                    "{}: failed to eval expected '{}': {e}",
+                    case.id, case.expected_value
+                )
             });
             assert_eq!(actual, expected, "{}: value mismatch", case.id);
         }
@@ -223,7 +228,10 @@ fn verify_all_spec_cases() {
 
     let index_md = fs::read_to_string(docs.join("spec-cases.md")).unwrap();
     let index = parse_index_counts(&index_md);
-    assert!(!index.is_empty(), "no category table found in docs/spec-cases.md");
+    assert!(
+        !index.is_empty(),
+        "no category table found in docs/spec-cases.md"
+    );
 
     let mut seen_ids = BTreeSet::new();
     for (prefix, (rel_file, expected_count)) in &index {
