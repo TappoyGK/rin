@@ -16,11 +16,38 @@ impl Expr {
 
 impl Drop for Expr {
     fn drop(&mut self) {
-        let mut work = Vec::new();
+        if !has_expr_children(&self.kind) {
+            return;
+        }
+        let mut work = Vec::with_capacity(8);
         take_expr_children(&mut self.kind, &mut work);
         while let Some(mut child) = work.pop() {
             take_expr_children(&mut child.kind, &mut work);
         }
+    }
+}
+
+#[inline(always)]
+fn has_expr_children(kind: &ExprKind) -> bool {
+    !matches!(
+        kind,
+        ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Char(_)
+            | ExprKind::Str(_)
+            | ExprKind::None
+            | ExprKind::Ident(_)
+            | ExprKind::Import { .. }
+            | ExprKind::Export { .. }
+            | ExprKind::Variant { data: None, .. }
+    )
+}
+
+#[inline(always)]
+fn push_if_non_leaf(expr: Expr, out: &mut Vec<Expr>) {
+    if has_expr_children(&expr.kind) {
+        out.push(expr);
     }
 }
 
@@ -34,11 +61,16 @@ fn take_expr_children(kind: &mut ExprKind, out: &mut Vec<Expr>) {
         | ExprKind::None
         | ExprKind::Ident(_)
         | ExprKind::Import { .. }
-        | ExprKind::Export { .. } => {}
-        ExprKind::List(items) | ExprKind::Tuple(items) => out.extend(items),
+        | ExprKind::Export { .. }
+        | ExprKind::Variant { data: None, .. } => {}
+        ExprKind::List(items) | ExprKind::Tuple(items) => {
+            for item in items {
+                push_if_non_leaf(item, out);
+            }
+        }
         ExprKind::Struct { fields, .. } => {
             for (_, v) in fields {
-                out.push(v);
+                push_if_non_leaf(v, out);
             }
         }
         ExprKind::Variant { data: Some(d), .. }
@@ -46,47 +78,58 @@ fn take_expr_children(kind: &mut ExprKind, out: &mut Vec<Expr>) {
         | ExprKind::Ok(d)
         | ExprKind::Err(d)
         | ExprKind::Field { target: d, .. }
-        | ExprKind::Def { value: d, .. } => out.push(*d),
-        ExprKind::Variant { data: None, .. } => {}
+        | ExprKind::Def { value: d, .. } => push_if_non_leaf(*d, out),
         ExprKind::Index { target, index } => {
-            out.push(*target);
-            out.push(*index);
+            push_if_non_leaf(*target, out);
+            push_if_non_leaf(*index, out);
         }
         ExprKind::With { target, fields } => {
-            out.push(*target);
+            push_if_non_leaf(*target, out);
             for (_, v) in fields {
-                out.push(v);
+                push_if_non_leaf(v, out);
             }
         }
-        ExprKind::Defn { body, .. } | ExprKind::Fn { body, .. } => out.extend(body),
+        ExprKind::Defn { body, .. } | ExprKind::Fn { body, .. } => {
+            for item in body {
+                push_if_non_leaf(item, out);
+            }
+        }
         ExprKind::Let { bindings, body } => {
             for (_, v) in bindings {
-                out.push(v);
+                push_if_non_leaf(v, out);
             }
-            out.extend(body);
+            for item in body {
+                push_if_non_leaf(item, out);
+            }
         }
         ExprKind::If {
             cond,
             then_branch,
             else_branch,
         } => {
-            out.push(*cond);
-            out.push(*then_branch);
-            out.push(*else_branch);
+            push_if_non_leaf(*cond, out);
+            push_if_non_leaf(*then_branch, out);
+            push_if_non_leaf(*else_branch, out);
         }
         ExprKind::When { cond, body } => {
-            out.push(*cond);
-            out.extend(body);
+            push_if_non_leaf(*cond, out);
+            for item in body {
+                push_if_non_leaf(item, out);
+            }
         }
         ExprKind::Match { scrutinee, arms } => {
-            out.push(*scrutinee);
+            push_if_non_leaf(*scrutinee, out);
             for arm in arms {
-                out.extend(arm.body);
+                for item in arm.body {
+                    push_if_non_leaf(item, out);
+                }
             }
         }
         ExprKind::Call { callee, args } => {
-            out.push(*callee);
-            out.extend(args);
+            push_if_non_leaf(*callee, out);
+            for arg in args {
+                push_if_non_leaf(arg, out);
+            }
         }
     }
 }

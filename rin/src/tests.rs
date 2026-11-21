@@ -971,3 +971,37 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         crate::ffi::rin_free(cm);
     }
 }
+
+#[test]
+fn empty_bodies_and_def_errors_and_frame_sizes() {
+    for bad in [
+        "(fn ())",
+        "(defn f ())",
+        "(let (x 1))",
+        "(when true)",
+        "(match 1 (x))",
+        "[1 (when true) 3]",
+        "(let (g (fn (a))) [7 (g 1) 8])",
+    ] {
+        let err = eval(bad).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "expected Parse for {bad}");
+        assert_eq!(err.message, "body cannot be empty", "for {bad}");
+    }
+
+    for bad_def in ["(def)", "(def 1 2)"] {
+        let err = eval(bad_def).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.message, "expected variable name");
+    }
+
+    assert!(
+        crate::parser::parse_frame_size() <= 64,
+        "ParseFrame size: {}",
+        crate::parser::parse_frame_size()
+    );
+    assert!(
+        crate::compiler::step_size() <= 48,
+        "Step size: {}",
+        crate::compiler::step_size()
+    );
+}

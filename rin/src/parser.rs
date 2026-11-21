@@ -12,7 +12,11 @@ pub(crate) const MAX_SYNTAX_NESTING: usize = 256;
 /// Rin ソース文字列を解析し、トップレベル式の列を返す。
 pub fn parse_program(input: &str) -> Result<Vec<Expr>, Error> {
     let tokens = tokenize(input)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        frames: Vec::with_capacity(16),
+    };
     let mut exprs = Vec::new();
     while !parser.at_eof() {
         exprs.push(parser.parse_expr_iter()?);
@@ -23,6 +27,7 @@ pub fn parse_program(input: &str) -> Result<Vec<Expr>, Error> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    frames: Vec<ParseFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +42,49 @@ enum BodyTarget {
     Fn { params: Vec<String> },
     Let { bindings: Vec<(String, Expr)> },
     When { cond: Box<Expr> },
+}
+
+struct StructFieldFrame {
+    brace_start: Span,
+    span: Span,
+    name: String,
+    fields: Vec<(String, Expr)>,
+    key: String,
+    max_child: usize,
+}
+
+struct BodyFrame {
+    start: Span,
+    body: Vec<Expr>,
+    max_child: usize,
+    target: BodyTarget,
+}
+
+struct LetBindFrame {
+    start: Span,
+    bind_start: Span,
+    bindings: Vec<(String, Expr)>,
+    key: String,
+    max_child: usize,
+}
+
+struct WithFieldFrame {
+    start: Span,
+    brace_start: Span,
+    target: Box<Expr>,
+    fields: Vec<(String, Expr)>,
+    key: String,
+    max_child: usize,
+}
+
+struct MatchArmFrame {
+    start: Span,
+    scrutinee: Box<Expr>,
+    arms: Vec<MatchArm>,
+    arm_start: Span,
+    pattern: Pattern,
+    body: Vec<Expr>,
+    max_child: usize,
 }
 
 enum ParseFrame {
@@ -67,14 +115,7 @@ enum ParseFrame {
         span: Span,
         kind: WrapKind,
     },
-    StructField {
-        brace_start: Span,
-        span: Span,
-        name: String,
-        fields: Vec<(String, Expr)>,
-        key: String,
-        max_child: usize,
-    },
+    StructField(Box<StructFieldFrame>),
     VariantData {
         span: Span,
         type_name: String,
@@ -84,19 +125,8 @@ enum ParseFrame {
         start: Span,
         name: String,
     },
-    Body {
-        start: Span,
-        body: Vec<Expr>,
-        max_child: usize,
-        target: BodyTarget,
-    },
-    LetBindVal {
-        start: Span,
-        bind_start: Span,
-        bindings: Vec<(String, Expr)>,
-        key: String,
-        max_child: usize,
-    },
+    Body(Box<BodyFrame>),
+    LetBindVal(Box<LetBindFrame>),
     IfCond {
         start: Span,
     },
@@ -117,26 +147,16 @@ enum ParseFrame {
     WithTarget {
         start: Span,
     },
-    WithFieldVal {
-        start: Span,
-        brace_start: Span,
-        target: Box<Expr>,
-        fields: Vec<(String, Expr)>,
-        key: String,
-        max_child: usize,
-    },
+    WithFieldVal(Box<WithFieldFrame>),
     MatchScrutinee {
         start: Span,
     },
-    MatchArmBody {
-        start: Span,
-        scrutinee: Box<Expr>,
-        arms: Vec<MatchArm>,
-        arm_start: Span,
-        pattern: Pattern,
-        body: Vec<Expr>,
-        max_child: usize,
-    },
+    MatchArmBody(Box<MatchArmFrame>),
+}
+
+#[cfg(test)]
+pub(crate) fn parse_frame_size() -> usize {
+    std::mem::size_of::<ParseFrame>()
 }
 
 enum NextStep {
@@ -145,31 +165,40 @@ enum NextStep {
 }
 
 impl Parser {
+    #[inline(always)]
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
+    #[inline(always)]
     fn peek_next(&self) -> Option<&Token> {
         self.tokens.get(self.pos + 1)
     }
 
+    #[inline(always)]
     fn at_eof(&self) -> bool {
         self.peek().kind == TokenKind::Eof
     }
 
-    fn bump(&mut self) -> Token {
-        let tok = self.tokens[self.pos].clone();
+    #[inline(always)]
+    fn advance(&mut self) {
         if !self.at_eof() {
             self.pos += 1;
         }
+    }
+
+    fn bump(&mut self) -> Token {
+        let tok = self.tokens[self.pos].clone();
+        self.advance();
         tok
     }
 
-    fn expect(&mut self, expected: TokenKind, what: &str) -> Result<Token, Error> {
-        let tok = self.peek().clone();
+    fn expect(&mut self, expected: TokenKind, what: &str) -> Result<Span, Error> {
+        let tok = self.peek();
         if tok.kind == expected {
-            self.pos += 1;
-            Ok(tok)
+            let span = tok.span;
+            self.advance();
+            Ok(span)
         } else {
             Err(Error::parse(tok.span, format!("expected {what}")))
         }
@@ -194,15 +223,15 @@ impl Parser {
     }
 
     fn parse_expr_iter(&mut self) -> Result<Expr, Error> {
-        let mut frames: Vec<ParseFrame> = Vec::new();
+        self.frames.clear();
         let mut next = NextStep::StartExpr;
 
         'outer: loop {
             match next {
                 NextStep::StartExpr => {
                     let tok_span = self.peek().span;
-                    Self::check_nesting(frames.len() + 1, tok_span)?;
-                    next = self.start_primary(&mut frames)?;
+                    Self::check_nesting(self.frames.len() + 1, tok_span)?;
+                    next = self.start_primary()?;
                 }
                 NextStep::HaveExpr(mut expr, mut depth) => {
                     // 後置アクセス（`.` と隣接 `[`）はここで処理する。
@@ -211,8 +240,8 @@ impl Parser {
                         let next_span = self.peek().span;
                         let next_attached = self.peek().attached;
                         if *next_kind == TokenKind::Dot {
-                            Self::check_nesting(frames.len() + depth + 1, next_span)?;
-                            self.bump();
+                            Self::check_nesting(self.frames.len() + depth + 1, next_span)?;
+                            self.advance();
                             let (field, _) = self.expect_ident("field name after '.'")?;
                             let span = expr.span;
                             expr = Expr::new(
@@ -224,9 +253,9 @@ impl Parser {
                             );
                             depth += 1;
                         } else if *next_kind == TokenKind::LBracket && next_attached {
-                            Self::check_nesting(frames.len() + depth + 1, next_span)?;
-                            self.bump();
-                            frames.push(ParseFrame::PostfixIndex {
+                            Self::check_nesting(self.frames.len() + depth + 1, next_span)?;
+                            self.advance();
+                            self.frames.push(ParseFrame::PostfixIndex {
                                 target: Box::new(expr),
                                 target_depth: depth,
                             });
@@ -237,78 +266,65 @@ impl Parser {
                         }
                     }
 
-                    let Some(frame) = frames.pop() else {
+                    let Some(frame) = self.frames.pop() else {
                         return Ok(expr);
                     };
-                    next = self.resume_frame(frame, expr, depth, &mut frames)?;
+                    next = self.resume_frame(frame, expr, depth)?;
                 }
             }
         }
     }
 
-    fn start_primary(&mut self, frames: &mut Vec<ParseFrame>) -> Result<NextStep, Error> {
-        let tok = self.peek().clone();
-        match &tok.kind {
+    fn start_primary(&mut self) -> Result<NextStep, Error> {
+        let span = self.peek().span;
+        match &self.peek().kind {
             TokenKind::Int(n) => {
-                self.bump();
-                Ok(NextStep::HaveExpr(
-                    Expr::new(tok.span, ExprKind::Int(*n)),
-                    1,
-                ))
+                let n = *n;
+                self.advance();
+                Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Int(n)), 1))
             }
             TokenKind::Float(x) => {
-                self.bump();
-                Ok(NextStep::HaveExpr(
-                    Expr::new(tok.span, ExprKind::Float(*x)),
-                    1,
-                ))
+                let x = *x;
+                self.advance();
+                Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Float(x)), 1))
             }
             TokenKind::Str(s) => {
-                self.bump();
-                Ok(NextStep::HaveExpr(
-                    Expr::new(tok.span, ExprKind::Str(s.clone())),
-                    1,
-                ))
+                let s = s.clone();
+                self.advance();
+                Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Str(s)), 1))
             }
             TokenKind::Char(c) => {
-                self.bump();
-                Ok(NextStep::HaveExpr(
-                    Expr::new(tok.span, ExprKind::Char(*c)),
-                    1,
-                ))
+                let c = *c;
+                self.advance();
+                Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Char(c)), 1))
             }
             TokenKind::LBracket => {
-                let start = self.bump().span;
+                self.advance();
                 if self.peek().kind == TokenKind::RBracket {
-                    self.bump();
+                    self.advance();
                     return Ok(NextStep::HaveExpr(
-                        Expr::new(start, ExprKind::List(Vec::new())),
+                        Expr::new(span, ExprKind::List(Vec::new())),
                         1,
                     ));
                 }
-                frames.push(ParseFrame::List {
-                    start,
+                self.frames.push(ParseFrame::List {
+                    start: span,
                     items: Vec::new(),
                     max_child: 0,
                 });
                 Ok(NextStep::StartExpr)
             }
-            TokenKind::LParen => self.start_paren(frames),
-            TokenKind::Ident(name) => self.start_ident(name.clone(), tok.span, frames),
-            _ => Err(Error::parse(
-                tok.span,
-                format!("unexpected token {:?}", tok.kind),
-            )),
+            TokenKind::LParen => self.start_paren(),
+            TokenKind::Ident(name) => {
+                let name = name.clone();
+                self.start_ident(name, span)
+            }
+            other => Err(Error::parse(span, format!("unexpected token {other:?}"))),
         }
     }
 
-    fn start_ident(
-        &mut self,
-        name: String,
-        span: Span,
-        frames: &mut Vec<ParseFrame>,
-    ) -> Result<NextStep, Error> {
-        self.bump();
+    fn start_ident(&mut self, name: String, span: Span) -> Result<NextStep, Error> {
+        self.advance();
         match name.as_str() {
             "true" => return Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Bool(true)), 1)),
             "false" => {
@@ -331,24 +347,24 @@ impl Parser {
                 ));
             }
             "some" if self.peek().kind == TokenKind::LParen && self.peek().attached => {
-                self.bump();
-                frames.push(ParseFrame::BuiltinWrap {
+                self.advance();
+                self.frames.push(ParseFrame::BuiltinWrap {
                     span,
                     kind: WrapKind::Some,
                 });
                 return Ok(NextStep::StartExpr);
             }
             "ok" if self.peek().kind == TokenKind::LParen && self.peek().attached => {
-                self.bump();
-                frames.push(ParseFrame::BuiltinWrap {
+                self.advance();
+                self.frames.push(ParseFrame::BuiltinWrap {
                     span,
                     kind: WrapKind::Ok,
                 });
                 return Ok(NextStep::StartExpr);
             }
             "err" if self.peek().kind == TokenKind::LParen && self.peek().attached => {
-                self.bump();
-                frames.push(ParseFrame::BuiltinWrap {
+                self.advance();
+                self.frames.push(ParseFrame::BuiltinWrap {
                     span,
                     kind: WrapKind::Err,
                 });
@@ -359,9 +375,10 @@ impl Parser {
 
         let is_upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
         if is_upper && self.peek().kind == TokenKind::LBrace {
-            let brace_start = self.bump().span;
+            let brace_start = self.peek().span;
+            self.advance();
             if self.peek().kind == TokenKind::RBrace {
-                self.bump();
+                self.advance();
                 return Ok(NextStep::HaveExpr(
                     Expr::new(
                         span,
@@ -375,23 +392,24 @@ impl Parser {
             }
             let (key, _) = self.expect_ident("field name")?;
             self.expect(TokenKind::Colon, "':'")?;
-            frames.push(ParseFrame::StructField {
-                brace_start,
-                span,
-                name,
-                fields: Vec::new(),
-                key,
-                max_child: 0,
-            });
+            self.frames
+                .push(ParseFrame::StructField(Box::new(StructFieldFrame {
+                    brace_start,
+                    span,
+                    name,
+                    fields: Vec::new(),
+                    key,
+                    max_child: 0,
+                })));
             return Ok(NextStep::StartExpr);
         }
 
         if is_upper && self.peek().kind == TokenKind::Dot {
-            self.bump();
+            self.advance();
             let (variant, _) = self.expect_ident("variant name after '.'")?;
             if self.peek().kind == TokenKind::LParen && self.peek().attached {
-                self.bump();
-                frames.push(ParseFrame::VariantData {
+                self.advance();
+                self.frames.push(ParseFrame::VariantData {
                     span,
                     type_name: name,
                     variant,
@@ -417,8 +435,8 @@ impl Parser {
         ))
     }
 
-    fn start_paren(&mut self, frames: &mut Vec<ParseFrame>) -> Result<NextStep, Error> {
-        let start = self.expect(TokenKind::LParen, "'('")?.span;
+    fn start_paren(&mut self) -> Result<NextStep, Error> {
+        let start = self.expect(TokenKind::LParen, "'('")?;
         if self.peek().kind == TokenKind::RParen {
             return Err(Error::parse(start, "empty '()' is not a valid expression"));
         }
@@ -448,13 +466,13 @@ impl Parser {
         if let Some(head) = special {
             match head.as_str() {
                 "def" => {
-                    self.bump(); // def
-                    let (name, _) = self.expect_ident("variable name in def")?;
-                    frames.push(ParseFrame::Def { start, name });
+                    self.advance(); // def
+                    let (name, _) = self.expect_ident("variable name")?;
+                    self.frames.push(ParseFrame::Def { start, name });
                     return Ok(NextStep::StartExpr);
                 }
                 "import" => {
-                    self.bump(); // import
+                    self.advance(); // import
                     let (name, _) = self.expect_ident("module name")?;
                     self.expect(TokenKind::RParen, "')'")?;
                     return Ok(NextStep::HaveExpr(
@@ -463,7 +481,7 @@ impl Parser {
                     ));
                 }
                 "export" => {
-                    self.bump(); // export
+                    self.advance(); // export
                     let mut names = Vec::new();
                     while self.peek().kind != TokenKind::RParen {
                         if self.at_eof() {
@@ -472,134 +490,90 @@ impl Parser {
                         let (name, _) = self.expect_ident("exported symbol name")?;
                         names.push(name);
                     }
-                    self.bump();
+                    self.advance();
                     return Ok(NextStep::HaveExpr(
                         Expr::new(start, ExprKind::Export { names }),
                         1,
                     ));
                 }
                 "defn" => {
-                    self.bump(); // defn
+                    self.advance(); // defn
                     let (name, _) = self.expect_ident("function name")?;
                     let params = self.parse_param_list()?;
-                    if self.peek().kind == TokenKind::RParen {
-                        self.bump();
-                        return Ok(NextStep::HaveExpr(
-                            Expr::new(
-                                start,
-                                ExprKind::Defn {
-                                    name,
-                                    params,
-                                    body: Vec::new(),
-                                },
-                            ),
-                            1,
-                        ));
-                    }
-                    frames.push(ParseFrame::Body {
-                        start,
-                        body: Vec::new(),
-                        max_child: 0,
-                        target: BodyTarget::Defn { name, params },
-                    });
-                    return Ok(NextStep::StartExpr);
+                    return self.start_nonempty_body(start, 0, BodyTarget::Defn { name, params });
                 }
                 "fn" => {
-                    self.bump(); // fn
+                    self.advance(); // fn
                     let params = self.parse_param_list()?;
-                    if self.peek().kind == TokenKind::RParen {
-                        self.bump();
-                        return Ok(NextStep::HaveExpr(
-                            Expr::new(
-                                start,
-                                ExprKind::Fn {
-                                    params,
-                                    body: Vec::new(),
-                                },
-                            ),
-                            1,
-                        ));
-                    }
-                    frames.push(ParseFrame::Body {
-                        start,
-                        body: Vec::new(),
-                        max_child: 0,
-                        target: BodyTarget::Fn { params },
-                    });
-                    return Ok(NextStep::StartExpr);
+                    return self.start_nonempty_body(start, 0, BodyTarget::Fn { params });
                 }
                 "let" => {
-                    self.bump(); // let
-                    let bind_start = self.expect(TokenKind::LParen, "let bindings '('")?.span;
+                    self.advance(); // let
+                    let bind_start = self.expect(TokenKind::LParen, "let bindings '('")?;
                     if self.peek().kind == TokenKind::RParen {
-                        self.bump();
-                        return self.start_body_or_finish(
+                        self.advance();
+                        return self.start_nonempty_body(
                             start,
                             0,
                             BodyTarget::Let {
                                 bindings: Vec::new(),
                             },
-                            frames,
                         );
                     }
                     let (key, _) = self.expect_ident("binding name")?;
-                    frames.push(ParseFrame::LetBindVal {
-                        start,
-                        bind_start,
-                        bindings: Vec::new(),
-                        key,
-                        max_child: 0,
-                    });
+                    self.frames
+                        .push(ParseFrame::LetBindVal(Box::new(LetBindFrame {
+                            start,
+                            bind_start,
+                            bindings: Vec::new(),
+                            key,
+                            max_child: 0,
+                        })));
                     return Ok(NextStep::StartExpr);
                 }
                 "if" => {
-                    self.bump(); // if
-                    frames.push(ParseFrame::IfCond { start });
+                    self.advance(); // if
+                    self.frames.push(ParseFrame::IfCond { start });
                     return Ok(NextStep::StartExpr);
                 }
                 "when" => {
-                    self.bump(); // when
-                    frames.push(ParseFrame::WhenCond { start });
+                    self.advance(); // when
+                    self.frames.push(ParseFrame::WhenCond { start });
                     return Ok(NextStep::StartExpr);
                 }
                 "with" => {
-                    self.bump(); // with
-                    frames.push(ParseFrame::WithTarget { start });
+                    self.advance(); // with
+                    self.frames.push(ParseFrame::WithTarget { start });
                     return Ok(NextStep::StartExpr);
                 }
                 "match" => {
-                    self.bump(); // match
-                    frames.push(ParseFrame::MatchScrutinee { start });
+                    self.advance(); // match
+                    self.frames.push(ParseFrame::MatchScrutinee { start });
                     return Ok(NextStep::StartExpr);
                 }
                 _ => {}
             }
         }
 
-        frames.push(ParseFrame::ParenFirst { start });
+        self.frames.push(ParseFrame::ParenFirst { start });
         Ok(NextStep::StartExpr)
     }
 
-    fn start_body_or_finish(
+    fn start_nonempty_body(
         &mut self,
         start: Span,
         max_child: usize,
         target: BodyTarget,
-        frames: &mut Vec<ParseFrame>,
     ) -> Result<NextStep, Error> {
         if self.peek().kind == TokenKind::RParen {
-            self.bump();
-            return Ok(NextStep::HaveExpr(
-                Self::finish_body(start, Vec::new(), target),
-                1 + max_child,
-            ));
+            return Err(Error::parse(start, "body cannot be empty"));
         }
-        frames.push(ParseFrame::Body {
+        self.frames.push(ParseFrame::Body(Box::new(BodyFrame {
             start,
             body: Vec::new(),
             max_child,
             target,
-        });
+        })));
         Ok(NextStep::StartExpr)
     }
 
@@ -617,33 +591,26 @@ impl Parser {
         &mut self,
         start: Span,
         scrutinee: Box<Expr>,
-        mut arms: Vec<MatchArm>,
+        arms: Vec<MatchArm>,
         max_child: usize,
-        frames: &mut Vec<ParseFrame>,
     ) -> Result<NextStep, Error> {
-        loop {
-            if self.peek().kind == TokenKind::RParen {
-                self.bump();
-                return Ok(NextStep::HaveExpr(
-                    Expr::new(start, ExprKind::Match { scrutinee, arms }),
-                    1 + max_child,
-                ));
-            }
-            if self.at_eof() {
-                return Err(Error::parse(start, "unterminated match"));
-            }
-            let arm_start = self.expect(TokenKind::LParen, "match arm '('")?.span;
-            let pattern = self.parse_pattern()?;
-            if self.peek().kind == TokenKind::RParen {
-                self.bump();
-                arms.push(MatchArm {
-                    span: arm_start,
-                    pattern,
-                    body: Vec::new(),
-                });
-                continue;
-            }
-            frames.push(ParseFrame::MatchArmBody {
+        if self.peek().kind == TokenKind::RParen {
+            self.advance();
+            return Ok(NextStep::HaveExpr(
+                Expr::new(start, ExprKind::Match { scrutinee, arms }),
+                1 + max_child,
+            ));
+        }
+        if self.at_eof() {
+            return Err(Error::parse(start, "unterminated match"));
+        }
+        let arm_start = self.expect(TokenKind::LParen, "match arm '('")?;
+        let pattern = self.parse_pattern()?;
+        if self.peek().kind == TokenKind::RParen {
+            return Err(Error::parse(arm_start, "body cannot be empty"));
+        }
+        self.frames
+            .push(ParseFrame::MatchArmBody(Box::new(MatchArmFrame {
                 start,
                 scrutinee,
                 arms,
@@ -651,9 +618,8 @@ impl Parser {
                 pattern,
                 body: Vec::new(),
                 max_child,
-            });
-            return Ok(NextStep::StartExpr);
-        }
+            })));
+        Ok(NextStep::StartExpr)
     }
 
     fn resume_frame(
@@ -661,7 +627,6 @@ impl Parser {
         frame: ParseFrame,
         expr: Expr,
         depth: usize,
-        frames: &mut Vec<ParseFrame>,
     ) -> Result<NextStep, Error> {
         match frame {
             ParseFrame::PostfixIndex {
@@ -670,7 +635,7 @@ impl Parser {
             } => {
                 self.expect(TokenKind::RBracket, "']'")?;
                 let combined = 1 + target_depth.max(depth);
-                Self::check_nesting(frames.len() + combined, target.span)?;
+                Self::check_nesting(self.frames.len() + combined, target.span)?;
                 let span = target.span;
                 Ok(NextStep::HaveExpr(
                     Expr::new(
@@ -691,10 +656,10 @@ impl Parser {
                 items.push(expr);
                 max_child = max_child.max(depth);
                 if self.peek().kind == TokenKind::Comma {
-                    self.bump();
+                    self.advance();
                 }
                 if self.peek().kind == TokenKind::RBracket {
-                    self.bump();
+                    self.advance();
                     return Ok(NextStep::HaveExpr(
                         Expr::new(start, ExprKind::List(items)),
                         1 + max_child,
@@ -703,7 +668,7 @@ impl Parser {
                 if self.at_eof() {
                     return Err(Error::parse(start, "unterminated '['"));
                 }
-                frames.push(ParseFrame::List {
+                self.frames.push(ParseFrame::List {
                     start,
                     items,
                     max_child,
@@ -712,10 +677,10 @@ impl Parser {
             }
             ParseFrame::ParenFirst { start } => {
                 if self.peek().kind == TokenKind::Comma {
-                    self.bump();
+                    self.advance();
                     let items = vec![expr];
                     if self.peek().kind == TokenKind::RParen {
-                        self.bump();
+                        self.advance();
                         return Ok(NextStep::HaveExpr(
                             Expr::new(start, ExprKind::Tuple(items)),
                             1 + depth,
@@ -724,7 +689,7 @@ impl Parser {
                     if self.at_eof() {
                         return Err(Error::parse(start, "unterminated tuple '('"));
                     }
-                    frames.push(ParseFrame::Tuple {
+                    self.frames.push(ParseFrame::Tuple {
                         start,
                         items,
                         max_child: depth,
@@ -732,7 +697,7 @@ impl Parser {
                     return Ok(NextStep::StartExpr);
                 }
                 if self.peek().kind == TokenKind::RParen {
-                    self.bump();
+                    self.advance();
                     return Ok(NextStep::HaveExpr(
                         Expr::new(
                             start,
@@ -747,7 +712,7 @@ impl Parser {
                 if self.at_eof() {
                     return Err(Error::parse(start, "unterminated '('"));
                 }
-                frames.push(ParseFrame::Call {
+                self.frames.push(ParseFrame::Call {
                     start,
                     callee: Box::new(expr),
                     args: Vec::new(),
@@ -763,9 +728,9 @@ impl Parser {
                 items.push(expr);
                 max_child = max_child.max(depth);
                 if self.peek().kind == TokenKind::Comma {
-                    self.bump();
+                    self.advance();
                     if self.peek().kind == TokenKind::RParen {
-                        self.bump();
+                        self.advance();
                         return Ok(NextStep::HaveExpr(
                             Expr::new(start, ExprKind::Tuple(items)),
                             1 + max_child,
@@ -774,7 +739,7 @@ impl Parser {
                     if self.at_eof() {
                         return Err(Error::parse(start, "unterminated tuple '('"));
                     }
-                    frames.push(ParseFrame::Tuple {
+                    self.frames.push(ParseFrame::Tuple {
                         start,
                         items,
                         max_child,
@@ -796,7 +761,7 @@ impl Parser {
                 args.push(expr);
                 max_child = max_child.max(depth);
                 if self.peek().kind == TokenKind::RParen {
-                    self.bump();
+                    self.advance();
                     return Ok(NextStep::HaveExpr(
                         Expr::new(start, ExprKind::Call { callee, args }),
                         1 + max_child,
@@ -805,7 +770,7 @@ impl Parser {
                 if self.at_eof() {
                     return Err(Error::parse(start, "unterminated '('"));
                 }
-                frames.push(ParseFrame::Call {
+                self.frames.push(ParseFrame::Call {
                     start,
                     callee,
                     args,
@@ -823,39 +788,32 @@ impl Parser {
                 };
                 Ok(NextStep::HaveExpr(Expr::new(span, ek), 1 + depth))
             }
-            ParseFrame::StructField {
-                brace_start,
-                span,
-                name,
-                mut fields,
-                key,
-                mut max_child,
-            } => {
-                fields.push((key, expr));
-                max_child = max_child.max(depth);
+            ParseFrame::StructField(mut sf) => {
+                sf.fields.push((sf.key, expr));
+                sf.max_child = sf.max_child.max(depth);
                 if self.peek().kind == TokenKind::Comma {
-                    self.bump();
+                    self.advance();
                 }
                 if self.peek().kind == TokenKind::RBrace {
-                    self.bump();
+                    self.advance();
                     return Ok(NextStep::HaveExpr(
-                        Expr::new(span, ExprKind::Struct { name, fields }),
-                        1 + max_child,
+                        Expr::new(
+                            sf.span,
+                            ExprKind::Struct {
+                                name: sf.name,
+                                fields: sf.fields,
+                            },
+                        ),
+                        1 + sf.max_child,
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(brace_start, "unterminated '{'"));
+                    return Err(Error::parse(sf.brace_start, "unterminated '{'"));
                 }
                 let (next_key, _) = self.expect_ident("field name")?;
                 self.expect(TokenKind::Colon, "':'")?;
-                frames.push(ParseFrame::StructField {
-                    brace_start,
-                    span,
-                    name,
-                    fields,
-                    key: next_key,
-                    max_child,
-                });
+                sf.key = next_key;
+                self.frames.push(ParseFrame::StructField(sf));
                 Ok(NextStep::StartExpr)
             }
             ParseFrame::VariantData {
@@ -889,65 +847,46 @@ impl Parser {
                     1 + depth,
                 ))
             }
-            ParseFrame::Body {
-                start,
-                mut body,
-                mut max_child,
-                target,
-            } => {
-                body.push(expr);
-                max_child = max_child.max(depth);
+            ParseFrame::Body(mut bf) => {
+                bf.body.push(expr);
+                bf.max_child = bf.max_child.max(depth);
                 if self.peek().kind == TokenKind::RParen {
-                    self.bump();
+                    self.advance();
+                    let mc = bf.max_child;
                     return Ok(NextStep::HaveExpr(
-                        Self::finish_body(start, body, target),
-                        1 + max_child,
+                        Self::finish_body(bf.start, bf.body, bf.target),
+                        1 + mc,
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(start, "unterminated '('"));
+                    return Err(Error::parse(bf.start, "unterminated '('"));
                 }
-                frames.push(ParseFrame::Body {
-                    start,
-                    body,
-                    max_child,
-                    target,
-                });
+                self.frames.push(ParseFrame::Body(bf));
                 Ok(NextStep::StartExpr)
             }
-            ParseFrame::LetBindVal {
-                start,
-                bind_start,
-                mut bindings,
-                key,
-                mut max_child,
-            } => {
-                bindings.push((key, expr));
-                max_child = max_child.max(depth);
+            ParseFrame::LetBindVal(mut lf) => {
+                lf.bindings.push((lf.key, expr));
+                lf.max_child = lf.max_child.max(depth);
                 if self.peek().kind == TokenKind::RParen {
-                    self.bump();
-                    return self.start_body_or_finish(
-                        start,
-                        max_child,
-                        BodyTarget::Let { bindings },
-                        frames,
+                    self.advance();
+                    return self.start_nonempty_body(
+                        lf.start,
+                        lf.max_child,
+                        BodyTarget::Let {
+                            bindings: lf.bindings,
+                        },
                     );
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(bind_start, "unterminated let bindings"));
+                    return Err(Error::parse(lf.bind_start, "unterminated let bindings"));
                 }
                 let (next_key, _) = self.expect_ident("binding name")?;
-                frames.push(ParseFrame::LetBindVal {
-                    start,
-                    bind_start,
-                    bindings,
-                    key: next_key,
-                    max_child,
-                });
+                lf.key = next_key;
+                self.frames.push(ParseFrame::LetBindVal(lf));
                 Ok(NextStep::StartExpr)
             }
             ParseFrame::IfCond { start } => {
-                frames.push(ParseFrame::IfThen {
+                self.frames.push(ParseFrame::IfThen {
                     start,
                     cond: Box::new(expr),
                     max_child: depth,
@@ -965,7 +904,7 @@ impl Parser {
                         "'if' requires 3 arguments (cond, then, else); use 'when' when no value is needed",
                     ));
                 }
-                frames.push(ParseFrame::IfElse {
+                self.frames.push(ParseFrame::IfElse {
                     start,
                     cond,
                     then_branch: Box::new(expr),
@@ -992,19 +931,18 @@ impl Parser {
                     1 + max_child.max(depth),
                 ))
             }
-            ParseFrame::WhenCond { start } => self.start_body_or_finish(
+            ParseFrame::WhenCond { start } => self.start_nonempty_body(
                 start,
                 depth,
                 BodyTarget::When {
                     cond: Box::new(expr),
                 },
-                frames,
             ),
             ParseFrame::WithTarget { start } => {
-                let brace_start = self.expect(TokenKind::LBrace, "'{'")?.span;
+                let brace_start = self.expect(TokenKind::LBrace, "'{'")?;
                 let target = Box::new(expr);
                 if self.peek().kind == TokenKind::RBrace {
-                    self.bump();
+                    self.advance();
                     self.expect(TokenKind::RParen, "')'")?;
                     return Ok(NextStep::HaveExpr(
                         Expr::new(
@@ -1019,94 +957,78 @@ impl Parser {
                 }
                 let (key, _) = self.expect_ident("field name")?;
                 self.expect(TokenKind::Colon, "':'")?;
-                frames.push(ParseFrame::WithFieldVal {
-                    start,
-                    brace_start,
-                    target,
-                    fields: Vec::new(),
-                    key,
-                    max_child: depth,
-                });
+                self.frames
+                    .push(ParseFrame::WithFieldVal(Box::new(WithFieldFrame {
+                        start,
+                        brace_start,
+                        target,
+                        fields: Vec::new(),
+                        key,
+                        max_child: depth,
+                    })));
                 Ok(NextStep::StartExpr)
             }
-            ParseFrame::WithFieldVal {
-                start,
-                brace_start,
-                target,
-                mut fields,
-                key,
-                mut max_child,
-            } => {
-                fields.push((key, expr));
-                max_child = max_child.max(depth);
+            ParseFrame::WithFieldVal(mut wf) => {
+                wf.fields.push((wf.key, expr));
+                wf.max_child = wf.max_child.max(depth);
                 if self.peek().kind == TokenKind::Comma {
-                    self.bump();
+                    self.advance();
                 }
                 if self.peek().kind == TokenKind::RBrace {
-                    self.bump();
+                    self.advance();
                     self.expect(TokenKind::RParen, "')'")?;
+                    let mc = wf.max_child;
                     return Ok(NextStep::HaveExpr(
-                        Expr::new(start, ExprKind::With { target, fields }),
-                        1 + max_child,
+                        Expr::new(
+                            wf.start,
+                            ExprKind::With {
+                                target: wf.target,
+                                fields: wf.fields,
+                            },
+                        ),
+                        1 + mc,
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(brace_start, "unterminated '{'"));
+                    return Err(Error::parse(wf.brace_start, "unterminated '{'"));
                 }
                 let (next_key, _) = self.expect_ident("field name")?;
                 self.expect(TokenKind::Colon, "':'")?;
-                frames.push(ParseFrame::WithFieldVal {
-                    start,
-                    brace_start,
-                    target,
-                    fields,
-                    key: next_key,
-                    max_child,
-                });
+                wf.key = next_key;
+                self.frames.push(ParseFrame::WithFieldVal(wf));
                 Ok(NextStep::StartExpr)
             }
             ParseFrame::MatchScrutinee { start } => {
-                self.start_next_match_arm(start, Box::new(expr), Vec::new(), depth, frames)
+                self.start_next_match_arm(start, Box::new(expr), Vec::new(), depth)
             }
-            ParseFrame::MatchArmBody {
-                start,
-                scrutinee,
-                mut arms,
-                arm_start,
-                pattern,
-                mut body,
-                mut max_child,
-            } => {
-                body.push(expr);
-                max_child = max_child.max(depth);
+            ParseFrame::MatchArmBody(mut mf) => {
+                mf.body.push(expr);
+                mf.max_child = mf.max_child.max(depth);
                 if self.peek().kind == TokenKind::RParen {
-                    self.bump();
-                    arms.push(MatchArm {
-                        span: arm_start,
-                        pattern,
-                        body,
+                    self.advance();
+                    mf.arms.push(MatchArm {
+                        span: mf.arm_start,
+                        pattern: mf.pattern,
+                        body: mf.body,
                     });
-                    return self.start_next_match_arm(start, scrutinee, arms, max_child, frames);
+                    return self.start_next_match_arm(
+                        mf.start,
+                        mf.scrutinee,
+                        mf.arms,
+                        mf.max_child,
+                    );
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(arm_start, "unterminated '('"));
+                    return Err(Error::parse(mf.arm_start, "unterminated '('"));
                 }
-                frames.push(ParseFrame::MatchArmBody {
-                    start,
-                    scrutinee,
-                    arms,
-                    arm_start,
-                    pattern,
-                    body,
-                    max_child,
-                });
+                self.frames.push(ParseFrame::MatchArmBody(mf));
                 Ok(NextStep::StartExpr)
             }
         }
     }
 
     fn parse_param_list(&mut self) -> Result<Vec<String>, Error> {
-        let start = self.expect(TokenKind::LParen, "parameter list '('")?.span;
+        let start = self.expect(TokenKind::LParen, "parameter list '('")?;
         let mut params = Vec::new();
         while self.peek().kind != TokenKind::RParen {
             if self.at_eof() {
@@ -1115,7 +1037,7 @@ impl Parser {
             let (param, _) = self.expect_ident("parameter name")?;
             params.push(param);
         }
-        self.bump();
+        self.advance();
         Ok(params)
     }
 

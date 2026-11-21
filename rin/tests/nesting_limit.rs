@@ -67,6 +67,36 @@ fn nested_schema(depth: usize) -> String {
     s
 }
 
+fn nested_schema_variant(depth: usize) -> String {
+    if depth <= 1 {
+        return "i64".to_string();
+    }
+    let mut s = "(variant V (C ".repeat(depth - 1);
+    s.push_str("i64");
+    s.push_str(&"))".repeat(depth - 1));
+    s
+}
+
+fn nested_schema_struct(depth: usize) -> String {
+    if depth <= 1 {
+        return "i64".to_string();
+    }
+    let mut s = "(struct S (f ".repeat(depth - 1);
+    s.push_str("i64");
+    s.push_str(&"))".repeat(depth - 1));
+    s
+}
+
+fn nested_schema_tuple(depth: usize) -> String {
+    if depth <= 1 {
+        return "i64".to_string();
+    }
+    let mut s = "(tuple i64 ".repeat(depth - 1);
+    s.push_str("i64");
+    s.push_str(&")".repeat(depth - 1));
+    s
+}
+
 fn run_in_small_stack() {
     let handle = std::thread::Builder::new()
         .stack_size(STACK_BYTES)
@@ -83,6 +113,18 @@ fn run_in_small_stack() {
                     Schema::parse(&nested_schema(d)).is_ok(),
                     "schema depth {d} should succeed"
                 );
+            }
+
+            // 上限ちょうどのスキーマ（variant / struct / tuple）で Clone と Debug も溢れないこと。
+            for s_src in [
+                nested_schema_variant(LIMIT),
+                nested_schema_struct(LIMIT),
+                nested_schema_tuple(LIMIT),
+            ] {
+                let s = Schema::parse(&s_src).expect("deep schema should parse");
+                let cloned = s.clone();
+                let dbg = format!("{cloned:?}");
+                assert!(!dbg.is_empty());
             }
 
             // 後置アクセスと括弧の混在（上限ちょうどは成功、超過は構文エラー）。

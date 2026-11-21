@@ -22,7 +22,7 @@ pub(crate) fn compile_program(
     if exprs.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
     } else {
-        let mut steps = Vec::new();
+        let mut steps = Vec::with_capacity(32);
         steps.push(Step::FlushTicks);
         compiler.push_body(&mut steps, exprs, false);
         compiler.run_steps(&mut steps)?;
@@ -87,6 +87,67 @@ impl Scope {
     }
 }
 
+struct IfAfterCondStep<'a> {
+    then_branch: &'a Expr,
+    else_branch: &'a Expr,
+    is_tail: bool,
+    cond_span: Span,
+    span: Span,
+}
+
+struct IfAfterThenStep<'a> {
+    j_else: usize,
+    else_branch: &'a Expr,
+    is_tail: bool,
+    span: Span,
+}
+
+struct MatchArmsStep<'a> {
+    arms: &'a [MatchArm],
+    idx: usize,
+    end_jumps: Vec<usize>,
+    is_tail: bool,
+    span: Span,
+}
+
+struct MatchAfterArmStep<'a> {
+    arms: &'a [MatchArm],
+    idx: usize,
+    try_ip: usize,
+    saved_locals_len: usize,
+    saved_next_slot: u32,
+    end_jumps: Vec<usize>,
+    is_tail: bool,
+    span: Span,
+}
+
+struct ShortCircuitStep<'a> {
+    is_and: bool,
+    args: &'a [Expr],
+    idx: usize,
+    jumps: Vec<usize>,
+    span: Span,
+}
+
+struct FinishStructStep<'a> {
+    name: &'a str,
+    field_names: Vec<Rc<str>>,
+    span: Span,
+}
+
+struct WhenAfterCondStep<'a> {
+    body: &'a [Expr],
+    cond_span: Span,
+    span: Span,
+}
+
+struct FinishFnStep {
+    name: Option<String>,
+    arity: u32,
+    is_defn: bool,
+    span: Span,
+}
+
 enum Step<'a> {
     Expr {
         expr: &'a Expr,
@@ -109,70 +170,30 @@ enum Step<'a> {
         saved_locals_len: usize,
         saved_next_slot: u32,
     },
-    FinishStruct {
-        name: &'a str,
-        field_names: Vec<Rc<str>>,
-        span: Span,
-    },
+    FinishStruct(Box<FinishStructStep<'a>>),
     FinishWith {
         field_names: Vec<Rc<str>>,
         span: Span,
     },
-    FinishFn {
-        name: Option<String>,
-        arity: u32,
-        is_defn: bool,
-        span: Span,
-    },
-    IfAfterCond {
-        then_branch: &'a Expr,
-        else_branch: &'a Expr,
-        is_tail: bool,
-        cond_span: Span,
-        span: Span,
-    },
-    IfAfterThen {
-        j_else: usize,
-        else_branch: &'a Expr,
-        is_tail: bool,
-        span: Span,
-    },
+    FinishFn(Box<FinishFnStep>),
+    IfAfterCond(Box<IfAfterCondStep<'a>>),
+    IfAfterThen(Box<IfAfterThenStep<'a>>),
     PatchJump {
         op_idx: usize,
     },
-    WhenAfterCond {
-        body: &'a [Expr],
-        cond_span: Span,
-        span: Span,
-    },
+    WhenAfterCond(Box<WhenAfterCondStep<'a>>),
     WhenAfterBody {
         j_end: usize,
         span: Span,
     },
-    MatchStartArms {
-        arms: &'a [MatchArm],
-        idx: usize,
-        end_jumps: Vec<usize>,
-        is_tail: bool,
-        span: Span,
-    },
-    MatchAfterArm {
-        arms: &'a [MatchArm],
-        idx: usize,
-        try_ip: usize,
-        saved_locals_len: usize,
-        saved_next_slot: u32,
-        end_jumps: Vec<usize>,
-        is_tail: bool,
-        span: Span,
-    },
-    ShortCircuitAfterArg {
-        is_and: bool,
-        args: &'a [Expr],
-        idx: usize,
-        jumps: Vec<usize>,
-        span: Span,
-    },
+    MatchStartArms(Box<MatchArmsStep<'a>>),
+    MatchAfterArm(Box<MatchAfterArmStep<'a>>),
+    ShortCircuitAfterArg(Box<ShortCircuitStep<'a>>),
+}
+
+#[cfg(test)]
+pub(crate) fn step_size() -> usize {
+    std::mem::size_of::<Step<'_>>()
 }
 
 struct Compiler<'a> {
@@ -304,16 +325,12 @@ impl<'a> Compiler<'a> {
                     scope.locals.truncate(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                 }
-                Step::FinishStruct {
-                    name,
-                    field_names,
-                    span,
-                } => {
+                Step::FinishStruct(fs) => {
                     let s_idx = self.chunk().add_struct(StructDesc {
-                        name: Rc::from(name),
-                        fields: field_names,
+                        name: Rc::from(fs.name),
+                        fields: fs.field_names,
                     });
-                    self.emit(Op::MakeStruct(s_idx), span);
+                    self.emit(Op::MakeStruct(s_idx), fs.span);
                 }
                 Step::FinishWith { field_names, span } => {
                     let s_idx = self.chunk().add_struct(StructDesc {
@@ -322,78 +339,61 @@ impl<'a> Compiler<'a> {
                     });
                     self.emit(Op::WithFinish(s_idx), span);
                 }
-                Step::FinishFn {
-                    name,
-                    arity,
-                    is_defn,
-                    span,
-                } => {
+                Step::FinishFn(ff) => {
                     let finished = self.scopes.pop().unwrap();
                     let captures: Vec<Capture> =
                         finished.captures.into_iter().map(|(_, c)| c).collect();
                     let proto = Rc::new(FnProto {
-                        name: name.clone(),
+                        name: ff.name.clone(),
                         module: finished.module,
-                        arity,
+                        arity: ff.arity,
                         local_count: finished.max_slots,
                         captures,
                         chunk: finished.chunk,
                     });
                     let p_idx = self.chunk().add_proto(proto);
-                    if is_defn {
-                        let n_idx = self.syms.intern(name.as_deref().unwrap());
-                        self.emit(Op::DefFn(n_idx, p_idx), span);
+                    if ff.is_defn {
+                        let n_idx = self.syms.intern(ff.name.as_deref().unwrap());
+                        self.emit(Op::DefFn(n_idx, p_idx), ff.span);
                     } else {
-                        self.emit(Op::MakeClosure(p_idx), span);
+                        self.emit(Op::MakeClosure(p_idx), ff.span);
                     }
                 }
-                Step::IfAfterCond {
-                    then_branch,
-                    else_branch,
-                    is_tail,
-                    cond_span,
-                    span,
-                } => {
-                    let j_else = self.emit(Op::JumpIfFalse(0), cond_span);
-                    steps.push(Step::IfAfterThen {
+                Step::IfAfterCond(ic) => {
+                    let j_else = self.emit(Op::JumpIfFalse(0), ic.cond_span);
+                    steps.push(Step::IfAfterThen(Box::new(IfAfterThenStep {
                         j_else,
-                        else_branch,
-                        is_tail,
-                        span,
-                    });
+                        else_branch: ic.else_branch,
+                        is_tail: ic.is_tail,
+                        span: ic.span,
+                    })));
                     steps.push(Step::Expr {
-                        expr: then_branch,
-                        is_tail,
+                        expr: ic.then_branch,
+                        is_tail: ic.is_tail,
                     });
                 }
-                Step::IfAfterThen {
-                    j_else,
-                    else_branch,
-                    is_tail,
-                    span,
-                } => {
-                    let j_end = self.emit(Op::Jump(0), span);
+                Step::IfAfterThen(it) => {
+                    let j_end = self.emit(Op::Jump(0), it.span);
                     let else_ip = self.chunk().code.len();
-                    self.patch_jump(j_else, else_ip);
+                    self.patch_jump(it.j_else, else_ip);
                     steps.push(Step::PatchJump { op_idx: j_end });
                     steps.push(Step::FlushTicks);
                     steps.push(Step::Expr {
-                        expr: else_branch,
-                        is_tail,
+                        expr: it.else_branch,
+                        is_tail: it.is_tail,
                     });
                 }
                 Step::PatchJump { op_idx } => {
                     let end_ip = self.chunk().code.len();
                     self.patch_jump(op_idx, end_ip);
                 }
-                Step::WhenAfterCond {
-                    body,
-                    cond_span,
-                    span,
-                } => {
-                    let j_end = self.emit(Op::JumpIfFalse(0), cond_span);
-                    steps.push(Step::WhenAfterBody { j_end, span });
-                    self.push_body(steps, body, false);
+                Step::WhenAfterCond(wc) => {
+                    let j_end = self.emit(Op::JumpIfFalse(0), wc.cond_span);
+                    steps.push(Step::WhenAfterBody {
+                        j_end,
+                        span: wc.span,
+                    });
+                    self.push_body(steps, wc.body, false);
                 }
                 Step::WhenAfterBody { j_end, span } => {
                     self.emit(Op::Pop, span);
@@ -401,23 +401,17 @@ impl<'a> Compiler<'a> {
                     self.patch_jump(j_end, end_ip);
                     self.chunk().emit(Op::Void, span);
                 }
-                Step::MatchStartArms {
-                    arms,
-                    idx,
-                    end_jumps,
-                    is_tail,
-                    span,
-                } => {
-                    if idx >= arms.len() {
-                        self.chunk().emit(Op::Pop, span);
-                        self.emit(Op::MatchFail, span);
+                Step::MatchStartArms(ms) => {
+                    if ms.idx >= ms.arms.len() {
+                        self.chunk().emit(Op::Pop, ms.span);
+                        self.emit(Op::MatchFail, ms.span);
                         let end_ip = self.chunk().code.len();
-                        for j in end_jumps {
+                        for j in ms.end_jumps {
                             self.patch_jump(j, end_ip);
                         }
                         continue;
                     }
-                    let arm = &arms[idx];
+                    let arm = &ms.arms[ms.idx];
                     let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
                     let try_ip = self.emit(
                         Op::TryMatch {
@@ -437,74 +431,55 @@ impl<'a> Compiler<'a> {
                         self.chunk().emit(Op::SetLocal(slot), arm.span);
                     }
                     self.chunk().emit(Op::Pop, arm.span);
-                    steps.push(Step::MatchAfterArm {
-                        arms,
-                        idx,
+                    steps.push(Step::MatchAfterArm(Box::new(MatchAfterArmStep {
+                        arms: ms.arms,
+                        idx: ms.idx,
                         try_ip,
                         saved_locals_len,
                         saved_next_slot,
-                        end_jumps,
-                        is_tail,
-                        span,
-                    });
-                    self.push_body(steps, &arm.body, is_tail);
+                        end_jumps: ms.end_jumps,
+                        is_tail: ms.is_tail,
+                        span: ms.span,
+                    })));
+                    self.push_body(steps, &arm.body, ms.is_tail);
                 }
-                Step::MatchAfterArm {
-                    arms,
-                    idx,
-                    try_ip,
-                    saved_locals_len,
-                    saved_next_slot,
-                    mut end_jumps,
-                    is_tail,
-                    span,
-                } => {
-                    let arm = &arms[idx];
+                Step::MatchAfterArm(mut ma) => {
+                    let arm = &ma.arms[ma.idx];
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
-                    scope.next_slot = saved_next_slot;
-                    end_jumps.push(self.emit(Op::Jump(0), arm.span));
+                    scope.locals.truncate(ma.saved_locals_len);
+                    scope.next_slot = ma.saved_next_slot;
+                    ma.end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
-                    self.patch_jump(try_ip, fail_ip);
-                    steps.push(Step::MatchStartArms {
-                        arms,
-                        idx: idx + 1,
-                        end_jumps,
-                        is_tail,
-                        span,
-                    });
+                    self.patch_jump(ma.try_ip, fail_ip);
+                    steps.push(Step::MatchStartArms(Box::new(MatchArmsStep {
+                        arms: ma.arms,
+                        idx: ma.idx + 1,
+                        end_jumps: ma.end_jumps,
+                        is_tail: ma.is_tail,
+                        span: ma.span,
+                    })));
                 }
-                Step::ShortCircuitAfterArg {
-                    is_and,
-                    args,
-                    idx,
-                    mut jumps,
-                    span,
-                } => {
-                    let arg_span = args[idx].span;
-                    let j = if is_and {
+                Step::ShortCircuitAfterArg(mut sc) => {
+                    let arg_span = sc.args[sc.idx].span;
+                    let j = if sc.is_and {
                         self.emit(Op::JumpIfFalsePeek(0), arg_span)
                     } else {
                         self.emit(Op::JumpIfTruePeek(0), arg_span)
                     };
-                    jumps.push(j);
-                    let next_idx = idx + 1;
-                    if next_idx < args.len() {
-                        steps.push(Step::ShortCircuitAfterArg {
-                            is_and,
-                            args,
-                            idx: next_idx,
-                            jumps,
-                            span,
-                        });
+                    sc.jumps.push(j);
+                    let next_idx = sc.idx + 1;
+                    if next_idx < sc.args.len() {
+                        let next_expr = &sc.args[next_idx];
+                        sc.idx = next_idx;
+                        steps.push(Step::ShortCircuitAfterArg(sc));
                         steps.push(Step::Expr {
-                            expr: &args[next_idx],
+                            expr: next_expr,
                             is_tail: false,
                         });
                     } else {
-                        self.chunk().emit(Op::Bool(is_and), span);
+                        self.chunk().emit(Op::Bool(sc.is_and), sc.span);
                         let end_ip = self.chunk().code.len();
-                        for jmp in jumps {
+                        for jmp in sc.jumps {
                             self.patch_jump(jmp, end_ip);
                         }
                     }
@@ -594,11 +569,11 @@ impl<'a> Compiler<'a> {
             ExprKind::Struct { name, fields } => {
                 let field_names: Vec<Rc<str>> =
                     fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
-                steps.push(Step::FinishStruct {
+                steps.push(Step::FinishStruct(Box::new(FinishStructStep {
                     name,
                     field_names,
                     span,
-                });
+                })));
                 for (_, fexpr) in fields.iter().rev() {
                     steps.push(Step::Expr {
                         expr: fexpr,
@@ -726,12 +701,12 @@ impl<'a> Compiler<'a> {
                     inner.alloc_slot(p.clone(), span)?;
                 }
                 self.scopes.push(inner);
-                steps.push(Step::FinishFn {
+                steps.push(Step::FinishFn(Box::new(FinishFnStep {
                     name: Some(name.clone()),
                     arity,
                     is_defn: true,
                     span,
-                });
+                })));
                 self.push_body(steps, body, true);
             }
             ExprKind::Fn { params, body } => {
@@ -742,12 +717,12 @@ impl<'a> Compiler<'a> {
                     inner.alloc_slot(p.clone(), span)?;
                 }
                 self.scopes.push(inner);
-                steps.push(Step::FinishFn {
+                steps.push(Step::FinishFn(Box::new(FinishFnStep {
                     name: None,
                     arity,
                     is_defn: false,
                     span,
-                });
+                })));
                 self.push_body(steps, body, true);
             }
             ExprKind::Let { bindings, body } => {
@@ -774,37 +749,37 @@ impl<'a> Compiler<'a> {
                 then_branch,
                 else_branch,
             } => {
-                steps.push(Step::IfAfterCond {
+                steps.push(Step::IfAfterCond(Box::new(IfAfterCondStep {
                     then_branch,
                     else_branch,
                     is_tail,
                     cond_span: cond.span,
                     span,
-                });
+                })));
                 steps.push(Step::Expr {
                     expr: cond,
                     is_tail: false,
                 });
             }
             ExprKind::When { cond, body } => {
-                steps.push(Step::WhenAfterCond {
+                steps.push(Step::WhenAfterCond(Box::new(WhenAfterCondStep {
                     body,
                     cond_span: cond.span,
                     span,
-                });
+                })));
                 steps.push(Step::Expr {
                     expr: cond,
                     is_tail: false,
                 });
             }
             ExprKind::Match { scrutinee, arms } => {
-                steps.push(Step::MatchStartArms {
+                steps.push(Step::MatchStartArms(Box::new(MatchArmsStep {
                     arms,
                     idx: 0,
                     end_jumps: Vec::with_capacity(arms.len()),
                     is_tail,
                     span,
-                });
+                })));
                 steps.push(Step::Expr {
                     expr: scrutinee,
                     is_tail: false,
@@ -818,13 +793,13 @@ impl<'a> Compiler<'a> {
                     if args.is_empty() {
                         self.emit(if is_and { Op::And } else { Op::Or }, span);
                     } else {
-                        steps.push(Step::ShortCircuitAfterArg {
+                        steps.push(Step::ShortCircuitAfterArg(Box::new(ShortCircuitStep {
                             is_and,
                             args,
                             idx: 0,
                             jumps: Vec::with_capacity(args.len()),
                             span,
-                        });
+                        })));
                         steps.push(Step::Expr {
                             expr: &args[0],
                             is_tail: false,

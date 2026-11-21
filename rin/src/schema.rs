@@ -1,13 +1,13 @@
 //! Rin の値構造を検証するスキーマ DSL の構文解析と照合を実装する。
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::error::{Error, Span};
 use crate::lexer::{Token, TokenKind, tokenize};
 use crate::parser::MAX_SYNTAX_NESTING;
 use crate::value::Value;
 
-#[derive(Debug, Clone)]
 pub enum TypeExpr {
     Any,
     Void,
@@ -33,22 +33,34 @@ pub enum TypeExpr {
     Ref(String),
 }
 
+#[inline(always)]
+fn has_type_children(ty: &TypeExpr) -> bool {
+    !matches!(
+        ty,
+        TypeExpr::Any
+            | TypeExpr::Void
+            | TypeExpr::I64
+            | TypeExpr::F64
+            | TypeExpr::Bool
+            | TypeExpr::Char
+            | TypeExpr::String
+            | TypeExpr::Ref(_)
+    )
+}
+
+#[inline(always)]
+fn push_type_if_non_leaf(ty: TypeExpr, out: &mut Vec<TypeExpr>) {
+    if has_type_children(&ty) {
+        out.push(ty);
+    }
+}
+
 impl Drop for TypeExpr {
     fn drop(&mut self) {
-        if matches!(
-            self,
-            TypeExpr::Any
-                | TypeExpr::Void
-                | TypeExpr::I64
-                | TypeExpr::F64
-                | TypeExpr::Bool
-                | TypeExpr::Char
-                | TypeExpr::String
-                | TypeExpr::Ref(_)
-        ) {
+        if !has_type_children(self) {
             return;
         }
-        let mut work = Vec::new();
+        let mut work = Vec::with_capacity(8);
         take_type_children(self, &mut work);
         while let Some(mut child) = work.pop() {
             take_type_children(&mut child, &mut work);
@@ -67,27 +79,344 @@ fn take_type_children(ty: &mut TypeExpr, out: &mut Vec<TypeExpr>) {
         | TypeExpr::String
         | TypeExpr::Ref(_) => {}
         TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
-            out.push(std::mem::replace(&mut **t, TypeExpr::Any));
+            push_type_if_non_leaf(std::mem::replace(&mut **t, TypeExpr::Any), out);
         }
         TypeExpr::Result(a, b) => {
-            out.push(std::mem::replace(&mut **a, TypeExpr::Any));
-            out.push(std::mem::replace(&mut **b, TypeExpr::Any));
+            push_type_if_non_leaf(std::mem::replace(&mut **a, TypeExpr::Any), out);
+            push_type_if_non_leaf(std::mem::replace(&mut **b, TypeExpr::Any), out);
         }
         TypeExpr::Tuple(elems) => {
-            out.append(elems);
+            for t in std::mem::take(elems) {
+                push_type_if_non_leaf(t, out);
+            }
         }
         TypeExpr::Struct { fields, .. } => {
             for (_, t) in std::mem::take(fields) {
-                out.push(t);
+                push_type_if_non_leaf(t, out);
             }
         }
         TypeExpr::Variant { cases, .. } => {
             for (_, opt) in std::mem::take(cases) {
                 if let Some(t) = opt {
-                    out.push(t);
+                    push_type_if_non_leaf(t, out);
                 }
             }
         }
+    }
+}
+
+impl Clone for TypeExpr {
+    fn clone(&self) -> Self {
+        match self {
+            TypeExpr::Any => return TypeExpr::Any,
+            TypeExpr::Void => return TypeExpr::Void,
+            TypeExpr::I64 => return TypeExpr::I64,
+            TypeExpr::F64 => return TypeExpr::F64,
+            TypeExpr::Bool => return TypeExpr::Bool,
+            TypeExpr::Char => return TypeExpr::Char,
+            TypeExpr::String => return TypeExpr::String,
+            TypeExpr::Ref(s) => return TypeExpr::Ref(s.clone()),
+            _ => {}
+        }
+
+        enum CloneFrame<'a> {
+            Unary(&'static str),
+            ResultFirst(&'a TypeExpr),
+            ResultSecond(Box<TypeExpr>),
+            Tuple {
+                rest: &'a [TypeExpr],
+                done: Vec<TypeExpr>,
+            },
+            Struct {
+                name: &'a str,
+                open: bool,
+                rest: &'a [(String, TypeExpr)],
+                cur_key: &'a str,
+                done: Vec<(String, TypeExpr)>,
+            },
+            Variant {
+                name: &'a str,
+                rest: &'a [(String, Option<TypeExpr>)],
+                cur_key: &'a str,
+                done: Vec<(String, Option<TypeExpr>)>,
+            },
+        }
+        enum CloneNext<'a> {
+            Start(&'a TypeExpr),
+            Have(TypeExpr),
+        }
+
+        let mut frames: Vec<CloneFrame<'_>> = Vec::with_capacity(8);
+        let mut next = CloneNext::Start(self);
+
+        'clone_loop: loop {
+            match next {
+                CloneNext::Start(cur) => match cur {
+                    TypeExpr::Any => next = CloneNext::Have(TypeExpr::Any),
+                    TypeExpr::Void => next = CloneNext::Have(TypeExpr::Void),
+                    TypeExpr::I64 => next = CloneNext::Have(TypeExpr::I64),
+                    TypeExpr::F64 => next = CloneNext::Have(TypeExpr::F64),
+                    TypeExpr::Bool => next = CloneNext::Have(TypeExpr::Bool),
+                    TypeExpr::Char => next = CloneNext::Have(TypeExpr::Char),
+                    TypeExpr::String => next = CloneNext::Have(TypeExpr::String),
+                    TypeExpr::Ref(s) => next = CloneNext::Have(TypeExpr::Ref(s.clone())),
+                    TypeExpr::List(t) => {
+                        frames.push(CloneFrame::Unary("list"));
+                        next = CloneNext::Start(t);
+                    }
+                    TypeExpr::Array(t) => {
+                        frames.push(CloneFrame::Unary("array"));
+                        next = CloneNext::Start(t);
+                    }
+                    TypeExpr::Option(t) => {
+                        frames.push(CloneFrame::Unary("option"));
+                        next = CloneNext::Start(t);
+                    }
+                    TypeExpr::Result(a, b) => {
+                        frames.push(CloneFrame::ResultFirst(b));
+                        next = CloneNext::Start(a);
+                    }
+                    TypeExpr::Tuple(elems) => {
+                        if elems.is_empty() {
+                            next = CloneNext::Have(TypeExpr::Tuple(Vec::new()));
+                        } else {
+                            frames.push(CloneFrame::Tuple {
+                                rest: &elems[1..],
+                                done: Vec::with_capacity(elems.len()),
+                            });
+                            next = CloneNext::Start(&elems[0]);
+                        }
+                    }
+                    TypeExpr::Struct { name, fields, open } => {
+                        if fields.is_empty() {
+                            next = CloneNext::Have(TypeExpr::Struct {
+                                name: name.clone(),
+                                fields: Vec::new(),
+                                open: *open,
+                            });
+                        } else {
+                            frames.push(CloneFrame::Struct {
+                                name,
+                                open: *open,
+                                rest: &fields[1..],
+                                cur_key: &fields[0].0,
+                                done: Vec::with_capacity(fields.len()),
+                            });
+                            next = CloneNext::Start(&fields[0].1);
+                        }
+                    }
+                    TypeExpr::Variant { name, cases } => {
+                        let mut done = Vec::with_capacity(cases.len());
+                        for (idx, (vname, opt)) in cases.iter().enumerate() {
+                            if let Some(pty) = opt {
+                                frames.push(CloneFrame::Variant {
+                                    name,
+                                    rest: &cases[idx + 1..],
+                                    cur_key: vname,
+                                    done,
+                                });
+                                next = CloneNext::Start(pty);
+                                continue 'clone_loop;
+                            }
+                            done.push((vname.clone(), None));
+                        }
+                        next = CloneNext::Have(TypeExpr::Variant {
+                            name: name.clone(),
+                            cases: done,
+                        });
+                    }
+                },
+                CloneNext::Have(val) => {
+                    let Some(frame) = frames.pop() else {
+                        return val;
+                    };
+                    match frame {
+                        CloneFrame::Unary("list") => {
+                            next = CloneNext::Have(TypeExpr::List(Box::new(val)))
+                        }
+                        CloneFrame::Unary("array") => {
+                            next = CloneNext::Have(TypeExpr::Array(Box::new(val)));
+                        }
+                        CloneFrame::Unary("option") => {
+                            next = CloneNext::Have(TypeExpr::Option(Box::new(val)));
+                        }
+                        CloneFrame::Unary(_) => unreachable!(),
+                        CloneFrame::ResultFirst(b) => {
+                            frames.push(CloneFrame::ResultSecond(Box::new(val)));
+                            next = CloneNext::Start(b);
+                        }
+                        CloneFrame::ResultSecond(ok) => {
+                            next = CloneNext::Have(TypeExpr::Result(ok, Box::new(val)));
+                        }
+                        CloneFrame::Tuple { rest, mut done } => {
+                            done.push(val);
+                            if rest.is_empty() {
+                                next = CloneNext::Have(TypeExpr::Tuple(done));
+                            } else {
+                                frames.push(CloneFrame::Tuple {
+                                    rest: &rest[1..],
+                                    done,
+                                });
+                                next = CloneNext::Start(&rest[0]);
+                            }
+                        }
+                        CloneFrame::Struct {
+                            name,
+                            open,
+                            rest,
+                            cur_key,
+                            mut done,
+                        } => {
+                            done.push((cur_key.to_string(), val));
+                            if rest.is_empty() {
+                                next = CloneNext::Have(TypeExpr::Struct {
+                                    name: name.to_string(),
+                                    fields: done,
+                                    open,
+                                });
+                            } else {
+                                frames.push(CloneFrame::Struct {
+                                    name,
+                                    open,
+                                    rest: &rest[1..],
+                                    cur_key: &rest[0].0,
+                                    done,
+                                });
+                                next = CloneNext::Start(&rest[0].1);
+                            }
+                        }
+                        CloneFrame::Variant {
+                            name,
+                            rest,
+                            cur_key,
+                            mut done,
+                        } => {
+                            done.push((cur_key.to_string(), Some(val)));
+                            for (idx, (vname, opt)) in rest.iter().enumerate() {
+                                if let Some(pty) = opt {
+                                    frames.push(CloneFrame::Variant {
+                                        name,
+                                        rest: &rest[idx + 1..],
+                                        cur_key: vname,
+                                        done,
+                                    });
+                                    next = CloneNext::Start(pty);
+                                    continue 'clone_loop;
+                                }
+                                done.push((vname.clone(), None));
+                            }
+                            next = CloneNext::Have(TypeExpr::Variant {
+                                name: name.to_string(),
+                                cases: done,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for TypeExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        enum DebugItem<'a> {
+            Lit(&'static str),
+            Quoted(&'a str),
+            Bool(bool),
+            Ty(&'a TypeExpr),
+        }
+        let mut stack = vec![DebugItem::Ty(self)];
+        while let Some(item) = stack.pop() {
+            match item {
+                DebugItem::Lit(s) => f.write_str(s)?,
+                DebugItem::Quoted(s) => write!(f, "{s:?}")?,
+                DebugItem::Bool(b) => write!(f, "{b:?}")?,
+                DebugItem::Ty(cur) => match cur {
+                    TypeExpr::Any => f.write_str("Any")?,
+                    TypeExpr::Void => f.write_str("Void")?,
+                    TypeExpr::I64 => f.write_str("I64")?,
+                    TypeExpr::F64 => f.write_str("F64")?,
+                    TypeExpr::Bool => f.write_str("Bool")?,
+                    TypeExpr::Char => f.write_str("Char")?,
+                    TypeExpr::String => f.write_str("String")?,
+                    TypeExpr::Ref(s) => {
+                        f.write_str("Ref(")?;
+                        write!(f, "{s:?})")?;
+                    }
+                    TypeExpr::List(t) => {
+                        f.write_str("List(")?;
+                        stack.push(DebugItem::Lit(")"));
+                        stack.push(DebugItem::Ty(t));
+                    }
+                    TypeExpr::Array(t) => {
+                        f.write_str("Array(")?;
+                        stack.push(DebugItem::Lit(")"));
+                        stack.push(DebugItem::Ty(t));
+                    }
+                    TypeExpr::Option(t) => {
+                        f.write_str("Option(")?;
+                        stack.push(DebugItem::Lit(")"));
+                        stack.push(DebugItem::Ty(t));
+                    }
+                    TypeExpr::Result(a, b) => {
+                        f.write_str("Result(")?;
+                        stack.push(DebugItem::Lit(")"));
+                        stack.push(DebugItem::Ty(b));
+                        stack.push(DebugItem::Lit(", "));
+                        stack.push(DebugItem::Ty(a));
+                    }
+                    TypeExpr::Tuple(elems) => {
+                        f.write_str("Tuple([")?;
+                        stack.push(DebugItem::Lit("])"));
+                        for (i, t) in elems.iter().enumerate().rev() {
+                            stack.push(DebugItem::Ty(t));
+                            if i > 0 {
+                                stack.push(DebugItem::Lit(", "));
+                            }
+                        }
+                    }
+                    TypeExpr::Struct { name, fields, open } => {
+                        f.write_str("Struct { name: ")?;
+                        write!(f, "{name:?}")?;
+                        f.write_str(", fields: [")?;
+                        stack.push(DebugItem::Lit(" }"));
+                        stack.push(DebugItem::Bool(*open));
+                        stack.push(DebugItem::Lit("], open: "));
+                        for (i, (k, t)) in fields.iter().enumerate().rev() {
+                            stack.push(DebugItem::Lit(")"));
+                            stack.push(DebugItem::Ty(t));
+                            stack.push(DebugItem::Lit(", "));
+                            stack.push(DebugItem::Quoted(k));
+                            stack.push(DebugItem::Lit("("));
+                            if i > 0 {
+                                stack.push(DebugItem::Lit(", "));
+                            }
+                        }
+                    }
+                    TypeExpr::Variant { name, cases } => {
+                        f.write_str("Variant { name: ")?;
+                        write!(f, "{name:?}")?;
+                        f.write_str(", cases: [")?;
+                        stack.push(DebugItem::Lit("] }"));
+                        for (i, (k, opt)) in cases.iter().enumerate().rev() {
+                            if let Some(t) = opt {
+                                stack.push(DebugItem::Lit("))"));
+                                stack.push(DebugItem::Ty(t));
+                                stack.push(DebugItem::Lit(", Some("));
+                            } else {
+                                stack.push(DebugItem::Lit(", None)"));
+                            }
+                            stack.push(DebugItem::Quoted(k));
+                            stack.push(DebugItem::Lit("("));
+                            if i > 0 {
+                                stack.push(DebugItem::Lit(", "));
+                            }
+                        }
+                    }
+                },
+            }
+        }
+        Ok(())
     }
 }
 
@@ -423,7 +752,7 @@ impl SchemaParser {
             Have(TypeExpr),
         }
 
-        let mut frames: Vec<SchemaFrame> = Vec::new();
+        let mut frames: Vec<SchemaFrame> = Vec::with_capacity(8);
         let mut next = Next::Start;
 
         'main: loop {
