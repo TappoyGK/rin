@@ -48,10 +48,23 @@ fn has_type_children(ty: &TypeExpr) -> bool {
     )
 }
 
+const SHALLOW_TYPE_DEPTH: usize = 32;
+
+#[derive(Clone, Copy)]
+enum UnaryTypeKind {
+    List,
+    Array,
+    Option,
+}
+
 #[inline(always)]
-fn push_type_if_non_leaf(ty: TypeExpr, out: &mut Vec<TypeExpr>) {
+fn push_type_if_non_leaf(ty: TypeExpr, next: &mut Option<TypeExpr>, work: &mut Vec<TypeExpr>) {
     if has_type_children(&ty) {
-        out.push(ty);
+        if next.is_none() {
+            *next = Some(ty);
+        } else {
+            work.push(ty);
+        }
     }
 }
 
@@ -60,15 +73,23 @@ impl Drop for TypeExpr {
         if !has_type_children(self) {
             return;
         }
-        let mut work = Vec::with_capacity(8);
-        take_type_children(self, &mut work);
-        while let Some(mut child) = work.pop() {
-            take_type_children(&mut child, &mut work);
+        let mut next = None;
+        let mut work = Vec::new();
+        take_type_children(self, &mut next, &mut work);
+        loop {
+            let mut cur = match next.take() {
+                Some(c) => c,
+                None => match work.pop() {
+                    Some(c) => c,
+                    None => break,
+                },
+            };
+            take_type_children(&mut cur, &mut next, &mut work);
         }
     }
 }
 
-fn take_type_children(ty: &mut TypeExpr, out: &mut Vec<TypeExpr>) {
+fn take_type_children(ty: &mut TypeExpr, next: &mut Option<TypeExpr>, work: &mut Vec<TypeExpr>) {
     match ty {
         TypeExpr::Any
         | TypeExpr::Void
@@ -79,48 +100,79 @@ fn take_type_children(ty: &mut TypeExpr, out: &mut Vec<TypeExpr>) {
         | TypeExpr::String
         | TypeExpr::Ref(_) => {}
         TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
-            push_type_if_non_leaf(std::mem::replace(&mut **t, TypeExpr::Any), out);
+            push_type_if_non_leaf(std::mem::replace(&mut **t, TypeExpr::Any), next, work);
         }
         TypeExpr::Result(a, b) => {
-            push_type_if_non_leaf(std::mem::replace(&mut **a, TypeExpr::Any), out);
-            push_type_if_non_leaf(std::mem::replace(&mut **b, TypeExpr::Any), out);
+            push_type_if_non_leaf(std::mem::replace(&mut **a, TypeExpr::Any), next, work);
+            push_type_if_non_leaf(std::mem::replace(&mut **b, TypeExpr::Any), next, work);
         }
         TypeExpr::Tuple(elems) => {
             for t in std::mem::take(elems) {
-                push_type_if_non_leaf(t, out);
+                push_type_if_non_leaf(t, next, work);
             }
         }
         TypeExpr::Struct { fields, .. } => {
             for (_, t) in std::mem::take(fields) {
-                push_type_if_non_leaf(t, out);
+                push_type_if_non_leaf(t, next, work);
             }
         }
         TypeExpr::Variant { cases, .. } => {
             for (_, opt) in std::mem::take(cases) {
                 if let Some(t) = opt {
-                    push_type_if_non_leaf(t, out);
+                    push_type_if_non_leaf(t, next, work);
                 }
             }
         }
     }
 }
 
-impl Clone for TypeExpr {
-    fn clone(&self) -> Self {
-        match self {
-            TypeExpr::Any => return TypeExpr::Any,
-            TypeExpr::Void => return TypeExpr::Void,
-            TypeExpr::I64 => return TypeExpr::I64,
-            TypeExpr::F64 => return TypeExpr::F64,
-            TypeExpr::Bool => return TypeExpr::Bool,
-            TypeExpr::Char => return TypeExpr::Char,
-            TypeExpr::String => return TypeExpr::String,
-            TypeExpr::Ref(s) => return TypeExpr::Ref(s.clone()),
-            _ => {}
+impl TypeExpr {
+    fn clone_shallow(&self, depth: usize) -> Self {
+        if depth >= SHALLOW_TYPE_DEPTH {
+            return self.clone_iter();
         }
+        match self {
+            TypeExpr::Any => TypeExpr::Any,
+            TypeExpr::Void => TypeExpr::Void,
+            TypeExpr::I64 => TypeExpr::I64,
+            TypeExpr::F64 => TypeExpr::F64,
+            TypeExpr::Bool => TypeExpr::Bool,
+            TypeExpr::Char => TypeExpr::Char,
+            TypeExpr::String => TypeExpr::String,
+            TypeExpr::Ref(s) => TypeExpr::Ref(s.clone()),
+            TypeExpr::List(t) => TypeExpr::List(Box::new(t.clone_shallow(depth + 1))),
+            TypeExpr::Array(t) => TypeExpr::Array(Box::new(t.clone_shallow(depth + 1))),
+            TypeExpr::Option(t) => TypeExpr::Option(Box::new(t.clone_shallow(depth + 1))),
+            TypeExpr::Result(a, b) => TypeExpr::Result(
+                Box::new(a.clone_shallow(depth + 1)),
+                Box::new(b.clone_shallow(depth + 1)),
+            ),
+            TypeExpr::Tuple(elems) => {
+                TypeExpr::Tuple(elems.iter().map(|t| t.clone_shallow(depth + 1)).collect())
+            }
+            TypeExpr::Struct { name, fields, open } => TypeExpr::Struct {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(k, t)| (k.clone(), t.clone_shallow(depth + 1)))
+                    .collect(),
+                open: *open,
+            },
+            TypeExpr::Variant { name, cases } => TypeExpr::Variant {
+                name: name.clone(),
+                cases: cases
+                    .iter()
+                    .map(|(k, opt)| (k.clone(), opt.as_ref().map(|t| t.clone_shallow(depth + 1))))
+                    .collect(),
+            },
+        }
+    }
 
+    #[cold]
+    #[inline(never)]
+    fn clone_iter(&self) -> Self {
         enum CloneFrame<'a> {
-            Unary(&'static str),
+            Unary(UnaryTypeKind),
             ResultFirst(&'a TypeExpr),
             ResultSecond(Box<TypeExpr>),
             Tuple {
@@ -146,7 +198,7 @@ impl Clone for TypeExpr {
             Have(TypeExpr),
         }
 
-        let mut frames: Vec<CloneFrame<'_>> = Vec::with_capacity(8);
+        let mut frames: Vec<CloneFrame<'_>> = Vec::new();
         let mut next = CloneNext::Start(self);
 
         'clone_loop: loop {
@@ -161,15 +213,15 @@ impl Clone for TypeExpr {
                     TypeExpr::String => next = CloneNext::Have(TypeExpr::String),
                     TypeExpr::Ref(s) => next = CloneNext::Have(TypeExpr::Ref(s.clone())),
                     TypeExpr::List(t) => {
-                        frames.push(CloneFrame::Unary("list"));
+                        frames.push(CloneFrame::Unary(UnaryTypeKind::List));
                         next = CloneNext::Start(t);
                     }
                     TypeExpr::Array(t) => {
-                        frames.push(CloneFrame::Unary("array"));
+                        frames.push(CloneFrame::Unary(UnaryTypeKind::Array));
                         next = CloneNext::Start(t);
                     }
                     TypeExpr::Option(t) => {
-                        frames.push(CloneFrame::Unary("option"));
+                        frames.push(CloneFrame::Unary(UnaryTypeKind::Option));
                         next = CloneNext::Start(t);
                     }
                     TypeExpr::Result(a, b) => {
@@ -231,16 +283,15 @@ impl Clone for TypeExpr {
                         return val;
                     };
                     match frame {
-                        CloneFrame::Unary("list") => {
-                            next = CloneNext::Have(TypeExpr::List(Box::new(val)))
+                        CloneFrame::Unary(UnaryTypeKind::List) => {
+                            next = CloneNext::Have(TypeExpr::List(Box::new(val)));
                         }
-                        CloneFrame::Unary("array") => {
+                        CloneFrame::Unary(UnaryTypeKind::Array) => {
                             next = CloneNext::Have(TypeExpr::Array(Box::new(val)));
                         }
-                        CloneFrame::Unary("option") => {
+                        CloneFrame::Unary(UnaryTypeKind::Option) => {
                             next = CloneNext::Have(TypeExpr::Option(Box::new(val)));
                         }
-                        CloneFrame::Unary(_) => unreachable!(),
                         CloneFrame::ResultFirst(b) => {
                             frames.push(CloneFrame::ResultSecond(Box::new(val)));
                             next = CloneNext::Start(b);
@@ -317,15 +368,113 @@ impl Clone for TypeExpr {
     }
 }
 
-impl fmt::Debug for TypeExpr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Clone for TypeExpr {
+    #[inline]
+    fn clone(&self) -> Self {
+        self.clone_shallow(0)
+    }
+}
+
+impl TypeExpr {
+    fn fmt_shallow(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
+        if depth >= SHALLOW_TYPE_DEPTH {
+            return self.fmt_iter(f);
+        }
+        struct ShallowTy<'a>(&'a TypeExpr, usize);
+        impl fmt::Debug for ShallowTy<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt_shallow(f, self.1)
+            }
+        }
+        struct ShallowList<'a>(&'a [TypeExpr], usize);
+        impl fmt::Debug for ShallowList<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(self.0.iter().map(|t| ShallowTy(t, self.1)))
+                    .finish()
+            }
+        }
+        struct ShallowFields<'a>(&'a [(String, TypeExpr)], usize);
+        impl fmt::Debug for ShallowFields<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(self.0.iter().map(|(k, t)| (k, ShallowTy(t, self.1))))
+                    .finish()
+            }
+        }
+        struct ShallowOpt<'a>(&'a Option<TypeExpr>, usize);
+        impl fmt::Debug for ShallowOpt<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self.0 {
+                    Some(t) => f.debug_tuple("Some").field(&ShallowTy(t, self.1)).finish(),
+                    None => f.write_str("None"),
+                }
+            }
+        }
+        struct ShallowCases<'a>(&'a [(String, Option<TypeExpr>)], usize);
+        impl fmt::Debug for ShallowCases<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(self.0.iter().map(|(k, o)| (k, ShallowOpt(o, self.1))))
+                    .finish()
+            }
+        }
+
+        match self {
+            TypeExpr::Any => f.write_str("Any"),
+            TypeExpr::Void => f.write_str("Void"),
+            TypeExpr::I64 => f.write_str("I64"),
+            TypeExpr::F64 => f.write_str("F64"),
+            TypeExpr::Bool => f.write_str("Bool"),
+            TypeExpr::Char => f.write_str("Char"),
+            TypeExpr::String => f.write_str("String"),
+            TypeExpr::Ref(s) => f.debug_tuple("Ref").field(s).finish(),
+            TypeExpr::List(t) => f
+                .debug_tuple("List")
+                .field(&ShallowTy(t, depth + 1))
+                .finish(),
+            TypeExpr::Array(t) => f
+                .debug_tuple("Array")
+                .field(&ShallowTy(t, depth + 1))
+                .finish(),
+            TypeExpr::Option(t) => f
+                .debug_tuple("Option")
+                .field(&ShallowTy(t, depth + 1))
+                .finish(),
+            TypeExpr::Result(a, b) => f
+                .debug_tuple("Result")
+                .field(&ShallowTy(a, depth + 1))
+                .field(&ShallowTy(b, depth + 1))
+                .finish(),
+            TypeExpr::Tuple(elems) => f
+                .debug_tuple("Tuple")
+                .field(&ShallowList(elems, depth + 1))
+                .finish(),
+            TypeExpr::Struct { name, fields, open } => f
+                .debug_struct("Struct")
+                .field("name", name)
+                .field("fields", &ShallowFields(fields, depth + 1))
+                .field("open", open)
+                .finish(),
+            TypeExpr::Variant { name, cases } => f
+                .debug_struct("Variant")
+                .field("name", name)
+                .field("cases", &ShallowCases(cases, depth + 1))
+                .finish(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fmt_iter(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         enum DebugItem<'a> {
             Lit(&'static str),
             Quoted(&'a str),
             Bool(bool),
             Ty(&'a TypeExpr),
         }
-        let mut stack = vec![DebugItem::Ty(self)];
+        let mut stack = Vec::with_capacity(64);
+        stack.push(DebugItem::Ty(self));
         while let Some(item) = stack.pop() {
             match item {
                 DebugItem::Lit(s) => f.write_str(s)?,
@@ -420,6 +569,12 @@ impl fmt::Debug for TypeExpr {
     }
 }
 
+impl fmt::Debug for TypeExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_shallow(f, 0)
+    }
+}
+
 /// `Value` の構造を検証するコンパイル済み Rin スキーマ。
 #[derive(Debug, Clone)]
 pub struct Schema {
@@ -431,7 +586,11 @@ impl Schema {
     /// 0 個以上の `(defschema Name TypeExpr)` 宣言と末尾のルート `TypeExpr` を解析する。
     pub fn parse(source: &str) -> Result<Self, Error> {
         let tokens = tokenize(source)?;
-        let mut p = SchemaParser { tokens, pos: 0 };
+        let mut p = SchemaParser {
+            tokens,
+            pos: 0,
+            frames: Vec::new(),
+        };
         let mut defs = BTreeMap::new();
         let mut root = None;
 
@@ -459,15 +618,32 @@ impl Schema {
             )
         })?;
         let schema = Self { defs, root };
-        schema.validate_refs(&schema.root)?;
+        let mut ref_stack = Vec::new();
+        schema.validate_refs(&schema.root, &mut ref_stack)?;
         for ty in schema.defs.values() {
-            schema.validate_refs(ty)?;
+            schema.validate_refs(ty, &mut ref_stack)?;
         }
         Ok(schema)
     }
 
-    fn validate_refs(&self, ty: &TypeExpr) -> Result<(), Error> {
-        let mut stack = vec![ty];
+    fn validate_refs<'a>(
+        &'a self,
+        ty: &'a TypeExpr,
+        stack: &mut Vec<&'a TypeExpr>,
+    ) -> Result<(), Error> {
+        if !has_type_children(ty) {
+            if let TypeExpr::Ref(name) = ty
+                && !self.defs.contains_key(name)
+            {
+                return Err(Error::parse(
+                    Span::new(1, 1),
+                    format!("unknown schema name '{name}'"),
+                ));
+            }
+            return Ok(());
+        }
+        stack.clear();
+        stack.push(ty);
         while let Some(cur) = stack.pop() {
             match cur {
                 TypeExpr::Any
@@ -664,47 +840,86 @@ fn mismatch(expected: &str, actual: &str, path: &str) -> Result<(), Error> {
     ))
 }
 
+enum SchemaFrame {
+    Unary(UnaryTypeKind),
+    ResultOk,
+    ResultErr(Box<TypeExpr>),
+    Tuple {
+        head_span: Span,
+        elems: Vec<TypeExpr>,
+    },
+    StructField {
+        name: String,
+        open: bool,
+        fields: Vec<(String, TypeExpr)>,
+        fname: String,
+    },
+    VariantCase {
+        name: String,
+        cases: Vec<(String, Option<TypeExpr>)>,
+        vname: String,
+    },
+}
+
 struct SchemaParser {
     tokens: Vec<Token>,
     pos: usize,
+    frames: Vec<SchemaFrame>,
 }
 
 impl SchemaParser {
+    #[inline(always)]
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
+    #[inline(always)]
     fn peek_next(&self) -> Option<&Token> {
         self.tokens.get(self.pos + 1)
     }
 
+    #[inline(always)]
     fn at_eof(&self) -> bool {
         self.peek().kind == TokenKind::Eof
     }
 
-    fn bump(&mut self) -> Token {
-        let tok = self.tokens[self.pos].clone();
+    #[inline(always)]
+    fn advance(&mut self) {
         if !self.at_eof() {
             self.pos += 1;
         }
-        tok
     }
 
-    fn expect(&mut self, expected: TokenKind, what: &str) -> Result<Token, Error> {
-        let tok = self.peek().clone();
-        if tok.kind == expected {
+    #[inline(always)]
+    fn take_kind(&mut self) -> (TokenKind, Span) {
+        let span = self.tokens[self.pos].span;
+        let kind = std::mem::replace(&mut self.tokens[self.pos].kind, TokenKind::Eof);
+        if kind != TokenKind::Eof {
             self.pos += 1;
-            Ok(tok)
+        }
+        (kind, span)
+    }
+
+    fn expect(&mut self, expected: TokenKind, what: &str) -> Result<(), Error> {
+        let tok = self.peek();
+        if tok.kind == expected {
+            self.advance();
+            Ok(())
         } else {
             Err(Error::parse(tok.span, format!("expected {what}")))
         }
     }
 
     fn expect_ident(&mut self, what: &str) -> Result<(String, Span), Error> {
-        let tok = self.bump();
-        match tok.kind {
-            TokenKind::Ident(s) => Ok((s, tok.span)),
-            _ => Err(Error::parse(tok.span, format!("expected {what}"))),
+        let tok = self.peek();
+        if matches!(tok.kind, TokenKind::Ident(_)) {
+            let (kind, span) = self.take_kind();
+            let TokenKind::Ident(s) = kind else {
+                unreachable!()
+            };
+            Ok((s, span))
+        } else {
+            Err(Error::parse(tok.span, format!("expected {what}")))
         }
     }
 
@@ -727,45 +942,25 @@ impl SchemaParser {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr, Error> {
-        enum SchemaFrame {
-            Unary(&'static str),
-            ResultOk,
-            ResultErr(Box<TypeExpr>),
-            Tuple {
-                head_span: Span,
-                elems: Vec<TypeExpr>,
-            },
-            StructField {
-                name: String,
-                open: bool,
-                fields: Vec<(String, TypeExpr)>,
-                fname: String,
-            },
-            VariantCase {
-                name: String,
-                cases: Vec<(String, Option<TypeExpr>)>,
-                vname: String,
-            },
-        }
         enum Next {
             Start,
             Have(TypeExpr),
         }
 
-        let mut frames: Vec<SchemaFrame> = Vec::with_capacity(8);
+        self.frames.clear();
         let mut next = Next::Start;
 
         'main: loop {
             match next {
                 Next::Start => {
-                    let tok = self.bump();
-                    if frames.len() >= MAX_SYNTAX_NESTING {
+                    let (kind, span) = self.take_kind();
+                    if self.frames.len() >= MAX_SYNTAX_NESTING {
                         return Err(Error::parse(
-                            tok.span,
+                            span,
                             format!("schema nesting limit exceeded ({MAX_SYNTAX_NESTING})"),
                         ));
                     }
-                    match tok.kind {
+                    match kind {
                         TokenKind::Ident(name) => {
                             let ty = match name.as_str() {
                                 "any" => TypeExpr::Any,
@@ -783,19 +978,19 @@ impl SchemaParser {
                             let (head, head_span) = self.expect_ident("schema constructor")?;
                             match head.as_str() {
                                 "list" => {
-                                    frames.push(SchemaFrame::Unary("list"));
+                                    self.frames.push(SchemaFrame::Unary(UnaryTypeKind::List));
                                     next = Next::Start;
                                 }
                                 "array" => {
-                                    frames.push(SchemaFrame::Unary("array"));
+                                    self.frames.push(SchemaFrame::Unary(UnaryTypeKind::Array));
                                     next = Next::Start;
                                 }
                                 "option" => {
-                                    frames.push(SchemaFrame::Unary("option"));
+                                    self.frames.push(SchemaFrame::Unary(UnaryTypeKind::Option));
                                     next = Next::Start;
                                 }
                                 "result" => {
-                                    frames.push(SchemaFrame::ResultOk);
+                                    self.frames.push(SchemaFrame::ResultOk);
                                     next = Next::Start;
                                 }
                                 "tuple" => {
@@ -805,7 +1000,7 @@ impl SchemaParser {
                                             "'tuple' schema requires at least 2 element types",
                                         ));
                                     }
-                                    frames.push(SchemaFrame::Tuple {
+                                    self.frames.push(SchemaFrame::Tuple {
                                         head_span,
                                         elems: Vec::new(),
                                     });
@@ -815,7 +1010,7 @@ impl SchemaParser {
                                     let open = head == "open_struct";
                                     let (name, _) = self.expect_ident("struct name")?;
                                     if self.peek().kind == TokenKind::RParen {
-                                        self.bump();
+                                        self.advance();
                                         next = Next::Have(TypeExpr::Struct {
                                             name,
                                             fields: Vec::new(),
@@ -824,7 +1019,7 @@ impl SchemaParser {
                                     } else {
                                         self.expect(TokenKind::LParen, "field '('")?;
                                         let (fname, _) = self.expect_ident("field name")?;
-                                        frames.push(SchemaFrame::StructField {
+                                        self.frames.push(SchemaFrame::StructField {
                                             name,
                                             open,
                                             fields: Vec::new(),
@@ -840,10 +1035,10 @@ impl SchemaParser {
                                         self.expect(TokenKind::LParen, "variant case '('")?;
                                         let (vname, _) = self.expect_ident("variant name")?;
                                         if self.peek().kind == TokenKind::RParen {
-                                            self.bump();
+                                            self.advance();
                                             cases.push((vname, None));
                                         } else {
-                                            frames.push(SchemaFrame::VariantCase {
+                                            self.frames.push(SchemaFrame::VariantCase {
                                                 name,
                                                 cases,
                                                 vname,
@@ -852,7 +1047,7 @@ impl SchemaParser {
                                             continue 'main;
                                         }
                                     }
-                                    self.bump();
+                                    self.advance();
                                     next = Next::Have(TypeExpr::Variant { name, cases });
                                 }
                                 other => {
@@ -863,26 +1058,25 @@ impl SchemaParser {
                                 }
                             }
                         }
-                        _ => return Err(Error::parse(tok.span, "expected type expression")),
+                        _ => return Err(Error::parse(span, "expected type expression")),
                     }
                 }
                 Next::Have(ty) => {
-                    let Some(frame) = frames.pop() else {
+                    let Some(frame) = self.frames.pop() else {
                         return Ok(ty);
                     };
                     match frame {
                         SchemaFrame::Unary(kind) => {
                             self.expect(TokenKind::RParen, "')'")?;
                             let wrapped = match kind {
-                                "list" => TypeExpr::List(Box::new(ty)),
-                                "array" => TypeExpr::Array(Box::new(ty)),
-                                "option" => TypeExpr::Option(Box::new(ty)),
-                                _ => unreachable!(),
+                                UnaryTypeKind::List => TypeExpr::List(Box::new(ty)),
+                                UnaryTypeKind::Array => TypeExpr::Array(Box::new(ty)),
+                                UnaryTypeKind::Option => TypeExpr::Option(Box::new(ty)),
                             };
                             next = Next::Have(wrapped);
                         }
                         SchemaFrame::ResultOk => {
-                            frames.push(SchemaFrame::ResultErr(Box::new(ty)));
+                            self.frames.push(SchemaFrame::ResultErr(Box::new(ty)));
                             next = Next::Start;
                         }
                         SchemaFrame::ResultErr(ok) => {
@@ -895,7 +1089,7 @@ impl SchemaParser {
                         } => {
                             elems.push(ty);
                             if self.peek().kind == TokenKind::RParen {
-                                self.bump();
+                                self.advance();
                                 if elems.len() < 2 {
                                     return Err(Error::parse(
                                         head_span,
@@ -904,7 +1098,7 @@ impl SchemaParser {
                                 }
                                 next = Next::Have(TypeExpr::Tuple(elems));
                             } else {
-                                frames.push(SchemaFrame::Tuple { head_span, elems });
+                                self.frames.push(SchemaFrame::Tuple { head_span, elems });
                                 next = Next::Start;
                             }
                         }
@@ -917,12 +1111,12 @@ impl SchemaParser {
                             self.expect(TokenKind::RParen, "')'")?;
                             fields.push((fname, ty));
                             if self.peek().kind == TokenKind::RParen {
-                                self.bump();
+                                self.advance();
                                 next = Next::Have(TypeExpr::Struct { name, fields, open });
                             } else {
                                 self.expect(TokenKind::LParen, "field '('")?;
                                 let (next_fname, _) = self.expect_ident("field name")?;
-                                frames.push(SchemaFrame::StructField {
+                                self.frames.push(SchemaFrame::StructField {
                                     name,
                                     open,
                                     fields,
@@ -942,10 +1136,10 @@ impl SchemaParser {
                                 self.expect(TokenKind::LParen, "variant case '('")?;
                                 let (next_vname, _) = self.expect_ident("variant name")?;
                                 if self.peek().kind == TokenKind::RParen {
-                                    self.bump();
+                                    self.advance();
                                     cases.push((next_vname, None));
                                 } else {
-                                    frames.push(SchemaFrame::VariantCase {
+                                    self.frames.push(SchemaFrame::VariantCase {
                                         name,
                                         cases,
                                         vname: next_vname,
@@ -954,7 +1148,7 @@ impl SchemaParser {
                                     continue 'main;
                                 }
                             }
-                            self.bump();
+                            self.advance();
                             next = Next::Have(TypeExpr::Variant { name, cases });
                         }
                     }

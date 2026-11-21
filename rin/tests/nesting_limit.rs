@@ -155,6 +155,31 @@ fn run_in_small_stack() {
             assert_eq!(eval(&unclosed_add).unwrap_err().kind, ErrorKind::Parse);
             let unclosed_list = "[".repeat(10_000);
             assert_eq!(eval(&unclosed_list).unwrap_err().kind, ErrorKind::Parse);
+
+            // 入れ子超過エラーが仕様どおりの位置（1 始まりの行・列）を示すこと。
+            let err_add = eval(&nested_add(LIMIT + 1)).unwrap_err();
+            assert_eq!(err_add.kind, ErrorKind::Parse);
+            assert_eq!((err_add.at.line, err_add.at.col), (1, 255 * 5 + 2));
+
+            let err_field = eval(&nested_field(LIMIT + 1)).unwrap_err();
+            assert_eq!(err_field.kind, ErrorKind::Parse);
+            assert_eq!((err_field.at.line, err_field.at.col), (1, 2 + 255 * 2));
+
+            let err_index = eval(&nested_index(LIMIT + 1)).unwrap_err();
+            assert_eq!(err_index.kind, ErrorKind::Parse);
+            assert_eq!((err_index.at.line, err_index.at.col), (1, 2 + 255 * 3));
+
+            let index_nested = format!("{}0{}", "x[".repeat(LIMIT), "]".repeat(LIMIT));
+            let err_index_nested = eval(&index_nested).unwrap_err();
+            assert_eq!(err_index_nested.kind, ErrorKind::Parse);
+            assert_eq!(
+                (err_index_nested.at.line, err_index_nested.at.col),
+                (1, 2 + 255 * 2)
+            );
+
+            let err_schema = Schema::parse(&nested_schema(300)).unwrap_err();
+            assert_eq!(err_schema.kind, ErrorKind::Parse);
+            assert_eq!((err_schema.at.line, err_schema.at.col), (1, 256 * 8 + 1));
         })
         .expect("spawn small stack thread");
 

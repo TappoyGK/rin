@@ -22,7 +22,7 @@ pub(crate) fn compile_program(
     if exprs.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
     } else {
-        let mut steps = Vec::with_capacity(32);
+        let mut steps = Vec::with_capacity(4);
         steps.push(Step::FlushTicks);
         compiler.push_body(&mut steps, exprs, false);
         compiler.run_steps(&mut steps)?;

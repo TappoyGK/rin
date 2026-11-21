@@ -11,7 +11,7 @@ use crate::alloc::{Allocator, HeapAllocator};
 use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
 use crate::compiler::compile_program;
 use crate::error::{Error, ErrorKind, Limits, Span};
-use crate::parser::parse_program;
+use crate::parser::{ParseScratch, parse_program_with_scratch};
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
@@ -48,6 +48,7 @@ pub struct Machine<'a> {
     module_ids: BTreeMap<String, u32>,
     module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
+    parse_scratch: ParseScratch,
 }
 
 fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
@@ -77,6 +78,7 @@ impl<'a> Machine<'a> {
             module_ids: BTreeMap::new(),
             module_names: Vec::new(),
             module_envs: Vec::new(),
+            parse_scratch: ParseScratch::new(),
         }
     }
 
@@ -109,8 +111,11 @@ impl<'a> Machine<'a> {
                 id
             }
         };
-        let exprs = parse_program(source).map_err(with_mod)?;
-        let chunk = compile_program(&exprs, Some(mod_id), &mut self.syms).map_err(with_mod)?;
+        let chunk = {
+            let exprs =
+                parse_program_with_scratch(source, &mut self.parse_scratch).map_err(with_mod)?;
+            compile_program(exprs, Some(mod_id), &mut self.syms).map_err(with_mod)?
+        };
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
             .into_iter()
             .flatten()
@@ -168,8 +173,10 @@ impl<'a> Machine<'a> {
     }
 
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
-        let exprs = parse_program(source)?;
-        let chunk = compile_program(&exprs, None, &mut self.syms)?;
+        let chunk = {
+            let exprs = parse_program_with_scratch(source, &mut self.parse_scratch)?;
+            compile_program(exprs, None, &mut self.syms)?
+        };
         let mut runner = self.runner(None);
         let last = runner.run_top_chunk(&chunk)?;
         let exported = runner.pool.export(last);

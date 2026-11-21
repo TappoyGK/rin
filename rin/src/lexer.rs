@@ -30,8 +30,14 @@ pub struct Token {
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
-    let mut lexer = Lexer::new(input);
     let mut tokens = Vec::new();
+    tokenize_into(input, &mut tokens)?;
+    Ok(tokens)
+}
+
+pub(crate) fn tokenize_into(input: &str, tokens: &mut Vec<Token>) -> Result<(), Error> {
+    tokens.clear();
+    let mut lexer = Lexer::new(input);
     loop {
         let tok = lexer.next_token()?;
         let is_eof = tok.kind == TokenKind::Eof;
@@ -40,7 +46,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
             break;
         }
     }
-    Ok(tokens)
+    Ok(())
 }
 
 struct Lexer<'a> {

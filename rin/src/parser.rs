@@ -4,30 +4,50 @@
 
 use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
 use crate::error::{Error, Span};
-use crate::lexer::{Token, TokenKind, tokenize};
+use crate::lexer::{Token, TokenKind, tokenize_into};
 
 /// 構文解析および AST の入れ子深さの絶対上限。
 pub(crate) const MAX_SYNTAX_NESTING: usize = 256;
 
-/// Rin ソース文字列を解析し、トップレベル式の列を返す。
-pub fn parse_program(input: &str) -> Result<Vec<Expr>, Error> {
-    let tokens = tokenize(input)?;
-    let mut parser = Parser {
-        tokens,
-        pos: 0,
-        frames: Vec::with_capacity(16),
-    };
-    let mut exprs = Vec::new();
-    while !parser.at_eof() {
-        exprs.push(parser.parse_expr_iter()?);
-    }
-    Ok(exprs)
+/// 構文解析器が再利用する作業バッファ。
+pub(crate) struct ParseScratch {
+    tokens: Vec<Token>,
+    frames: Vec<ParseFrame>,
+    exprs: Vec<Expr>,
 }
 
-struct Parser {
-    tokens: Vec<Token>,
+impl ParseScratch {
+    pub(crate) fn new() -> Self {
+        Self {
+            tokens: Vec::new(),
+            frames: Vec::new(),
+            exprs: Vec::new(),
+        }
+    }
+}
+
+/// 作業バッファを再利用して Rin ソース文字列を解析する。
+pub(crate) fn parse_program_with_scratch<'s>(
+    input: &str,
+    scratch: &'s mut ParseScratch,
+) -> Result<&'s [Expr], Error> {
+    tokenize_into(input, &mut scratch.tokens)?;
+    scratch.exprs.clear();
+    let mut parser = Parser {
+        tokens: &scratch.tokens,
+        pos: 0,
+        frames: &mut scratch.frames,
+    };
+    while !parser.at_eof() {
+        scratch.exprs.push(parser.parse_expr_iter()?);
+    }
+    Ok(&scratch.exprs)
+}
+
+struct Parser<'f> {
+    tokens: &'f [Token],
     pos: usize,
-    frames: Vec<ParseFrame>,
+    frames: &'f mut Vec<ParseFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -164,7 +184,7 @@ enum NextStep {
     HaveExpr(Expr, usize),
 }
 
-impl Parser {
+impl Parser<'_> {
     #[inline(always)]
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
