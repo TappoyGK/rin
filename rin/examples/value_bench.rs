@@ -77,7 +77,6 @@ fn main() {
 
 fn make_case(case: &str) -> Value {
     use std::collections::BTreeMap;
-    use std::rc::Rc;
     fn tree(depth: usize, width: usize) -> Value {
         if depth == 0 {
             return Value::structure("Leaf", BTreeMap::from([("value".into(), Value::Int(1))]));
@@ -108,7 +107,7 @@ fn make_case(case: &str) -> Value {
                 ("c".into(), Value::str("abc")),
                 ("d".into(), Value::Bool(true)),
                 ("e".into(), Value::list(vec![Value::Int(1), Value::Int(2)])),
-                ("f".into(), Value::Some(Rc::new(Value::Int(3)))),
+                ("f".into(), Value::some(Value::Int(3))),
                 ("g".into(), Value::None),
                 ("h".into(), Value::str("xyz")),
             ]),

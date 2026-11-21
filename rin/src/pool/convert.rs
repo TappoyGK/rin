@@ -231,9 +231,9 @@ impl Pool<'_> {
                                 .zip(values.drain(base..))
                                 .collect(),
                         ),
-                        Obj::Some(_) => Value::Some(Rc::new(values.pop().unwrap())),
-                        Obj::Ok(_) => Value::Ok(Rc::new(values.pop().unwrap())),
-                        Obj::Err(_) => Value::Err(Rc::new(values.pop().unwrap())),
+                        Obj::Some(_) => Value::some(values.pop().unwrap()),
+                        Obj::Ok(_) => Value::ok(values.pop().unwrap()),
+                        Obj::Err(_) => Value::err(values.pop().unwrap()),
                         Obj::Variant {
                             type_name,
                             variant,

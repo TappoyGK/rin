@@ -4,6 +4,8 @@
 
 ## v0.1.1（未リリース）
 
+- ホストの子を持つ値に `ValueItems`・`ValueFields`・`ValueChild` を導入し、最後の所有者で解放する。option / result の構築用に `Value::some`・`ok`・`err` を追加した。
+
 - 深い値の import / export、比較、表示、スキーマ検証、解放でネイティブスタックが溢れる問題を修正した。import の途中失敗時には生成途中の値を回収する（[#31](https://github.com/TappoyGK/rin/issues/31)・[PR #37](https://github.com/TappoyGK/rin/pull/37)）。
 - `Value` / `ListNode` の `{:#?}` は浅い部分を字下げし、書式化の深さ上限に達した部分木をコンパクトに出力する。リストのセルも深さに含めるため、平らな長いリストも途中で切り替わる。
 - スキーマ検証で、値を消費しない参照循環を検出してエラーを返すようにした。

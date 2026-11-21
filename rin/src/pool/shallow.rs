@@ -66,9 +66,9 @@ impl Pool<'_> {
                     variant.as_ref(),
                     data.map(|d| self.export_shallow(d, depth + 1)),
                 ),
-                Obj::Some(v) => Value::Some(std::rc::Rc::new(self.export_shallow(*v, depth + 1))),
-                Obj::Ok(v) => Value::Ok(std::rc::Rc::new(self.export_shallow(*v, depth + 1))),
-                Obj::Err(v) => Value::Err(std::rc::Rc::new(self.export_shallow(*v, depth + 1))),
+                Obj::Some(v) => Value::some(self.export_shallow(*v, depth + 1)),
+                Obj::Ok(v) => Value::ok(self.export_shallow(*v, depth + 1)),
+                Obj::Err(v) => Value::err(self.export_shallow(*v, depth + 1)),
                 Obj::Closure { proto, .. } => Value::Builtin(match proto.name.as_deref() {
                     Some(_) => "<defn>",
                     None => "<fn>",

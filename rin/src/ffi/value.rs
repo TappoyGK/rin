@@ -244,8 +244,8 @@ pub unsafe extern "C" fn rin_unwrap(val: *const RinValue) -> *mut RinValue {
     }
     // SAFETY: 呼び出し側が有効なポインタを保証する。
     let inner = match unsafe { &(*val).0 } {
-        Value::Some(v) | Value::Ok(v) | Value::Err(v) => Some((**v).clone()),
-        Value::Variant { data: Some(v), .. } => Some((**v).clone()),
+        Value::Some(v) | Value::Ok(v) | Value::Err(v) => Some((***v).clone()),
+        Value::Variant { data: Some(v), .. } => Some((***v).clone()),
         _ => None,
     };
     match inner {
@@ -374,7 +374,7 @@ pub unsafe extern "C" fn rin_some(val: *const RinValue) -> *mut RinValue {
     }
     // SAFETY: 呼び出し側が有効なポインタを保証する。
     let inner = unsafe { &(*val).0 }.clone();
-    Box::into_raw(Box::new(RinValue(Value::Some(std::rc::Rc::new(inner)))))
+    Box::into_raw(Box::new(RinValue(Value::some(inner))))
 }
 
 /// # Safety

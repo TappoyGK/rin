@@ -57,7 +57,7 @@ fn children(value: &mut Value, pending: &mut crate::work::Work<Value>, empty: &E
         }
         Value::Struct { fields, .. } => {
             if let Some(fields) = unique(fields) {
-                for v in std::mem::take(fields).into_values() {
+                for v in std::mem::take(&mut fields.0).into_values() {
                     if branch(&v) {
                         pending.push(v);
                     }
@@ -66,9 +66,9 @@ fn children(value: &mut Value, pending: &mut crate::work::Work<Value>, empty: &E
         }
         Value::Some(v) | Value::Ok(v) | Value::Err(v) | Value::Variant { data: Some(v), .. } => {
             if let Some(v) = unique(v)
-                && !matches!(v, Value::Void)
+                && !matches!(v.0, Value::Void)
             {
-                pending.push(std::mem::replace(v, Value::Void));
+                pending.push(std::mem::replace(&mut v.0, Value::Void));
             }
         }
         _ => {}
@@ -82,27 +82,23 @@ fn drain(pending: &mut crate::work::Work<Value>, empty: &Empty) {
     }
 }
 
-#[inline(always)]
-fn has_children(value: &Value) -> bool {
-    match value {
-        Value::List(v) => Rc::strong_count(v) == 1 && !v.is_empty(),
-        Value::Array(v) | Value::Tuple(v) => Rc::strong_count(v) == 1 && v.iter().any(branch),
-        Value::Struct { fields, .. } => Rc::strong_count(fields) == 1 && !fields.is_empty(),
-        Value::Some(v) | Value::Ok(v) | Value::Err(v) | Value::Variant { data: Some(v), .. } => {
-            Rc::strong_count(v) == 1 && branch(v)
-        }
-        _ => false,
+#[inline]
+pub(super) fn items(xs: &mut Vec<Value>) {
+    for v in std::mem::take(xs) {
+        release(v, 1);
     }
 }
 
-impl Drop for Value {
-    #[inline(always)]
-    fn drop(&mut self) {
-        if !has_children(self) {
-            return;
-        }
-        drop_shallow(self, 0);
+#[inline]
+pub(super) fn fields(fields: &mut BTreeMap<String, Value>) {
+    for v in std::mem::take(fields).into_values() {
+        release(v, 1);
     }
+}
+
+#[inline]
+pub(super) fn child(value: &mut Value) {
+    release(std::mem::replace(value, Value::Void), 1);
 }
 
 impl Drop for ListNode {
@@ -129,56 +125,48 @@ fn drop_deep(value: &mut Value) {
     drain(&mut pending, &empty);
 }
 
-// 子を空にしてから通常の Drop に戻す。子の Drop から深さ 0 の探索を再開させない。
-#[inline(never)]
-fn drop_shallow(value: &mut Value, depth: usize) {
+// Value 自身に Drop を持たせず、所有する Rc を一度だけ消費する。
+// 共有されていれば参照を減らすだけ。最後の所有者なら子を取り出し、深さを引き継ぐ。
+#[inline(always)]
+fn release(mut value: Value, depth: usize) {
     if depth == 32 {
-        drop_deep(value);
+        drop_deep(&mut value);
         return;
     }
     match value {
         Value::Array(xs) | Value::Tuple(xs) => {
-            if let Some(xs) = unique(xs) {
-                // 兄弟をその場で落とし、最後の強参照になった子へ深さを引き継ぐ。
-                xs.retain_mut(|v| {
-                    if has_children(v) {
-                        drop_shallow(v, depth + 1);
-                    }
-                    false
-                });
+            if let Some(mut xs) = Rc::into_inner(xs) {
+                for v in std::mem::take(&mut xs.0) {
+                    release(v, depth + 1);
+                }
             }
         }
         Value::Struct { fields, .. } => {
-            if let Some(fields) = unique(fields) {
-                for mut v in std::mem::take(fields).into_values() {
-                    if has_children(&v) {
-                        drop_shallow(&mut v, depth + 1);
-                    }
+            if let Some(mut fields) = Rc::into_inner(fields) {
+                for v in std::mem::take(&mut fields.0).into_values() {
+                    release(v, depth + 1);
                 }
             }
         }
-        Value::Some(v) | Value::Ok(v) | Value::Err(v) | Value::Variant { data: Some(v), .. } => {
-            if let Some(v) = unique(v) {
-                if has_children(v) {
-                    drop_shallow(v, depth + 1);
-                }
-                *v = Value::Void;
+        Value::Some(v) | Value::Ok(v) | Value::Err(v) => {
+            if let Some(mut v) = Rc::into_inner(v) {
+                release(std::mem::replace(&mut v.0, Value::Void), depth + 1);
             }
         }
-        Value::List(xs) => {
-            let empty = ListNode::empty();
-            while let Some(node) = unique(xs) {
-                let ListNode::Cons { head, tail, .. } = node else {
-                    break;
-                };
-                if has_children(head) {
-                    drop_shallow(head, depth + 1);
-                }
-                *head = Value::Void;
-                let next = std::mem::replace(tail, Rc::clone(&empty));
-                *xs = next;
+        Value::Variant { data: Some(v), .. } => {
+            if let Some(mut v) = Rc::into_inner(v) {
+                release(std::mem::replace(&mut v.0, Value::Void), depth + 1);
             }
         }
-        _ => {}
+        Value::List(xs) => drop(xs), // ListNode の反復解放が部分木全体を処理する。
+        Value::Str(s) => drop(s),
+        Value::Variant { data: None, .. } => {}
+        Value::Void
+        | Value::None
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::Char(_)
+        | Value::Builtin(_) => {}
     }
 }

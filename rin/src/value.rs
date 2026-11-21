@@ -6,6 +6,8 @@ use std::rc::Rc;
 
 mod drop;
 mod format;
+mod owner;
+pub use owner::{ValueChild, ValueFields, ValueItems};
 
 /// `cons`・`car`・`cdr`・`len` を O(1) で行う永続コンスリスト。
 #[derive(Clone)]
@@ -119,25 +121,35 @@ pub enum Value {
     Char(char),
     Str(Rc<String>),
     List(Rc<ListNode>),
-    Array(Rc<Vec<Value>>),
-    Tuple(Rc<Vec<Value>>),
+    Array(Rc<ValueItems>),
+    Tuple(Rc<ValueItems>),
     Struct {
         name: Rc<String>,
-        fields: Rc<BTreeMap<String, Value>>,
+        fields: Rc<ValueFields>,
     },
     Variant {
         type_name: Rc<String>,
         variant: Rc<String>,
-        data: Option<Rc<Value>>,
+        data: Option<Rc<ValueChild>>,
     },
     None,
-    Some(Rc<Value>),
-    Ok(Rc<Value>),
-    Err(Rc<Value>),
+    Some(Rc<ValueChild>),
+    Ok(Rc<ValueChild>),
+    Err(Rc<ValueChild>),
     Builtin(&'static str),
 }
 
 impl Value {
+    pub fn some(value: Value) -> Self {
+        Self::Some(Rc::new(value.into()))
+    }
+    pub fn ok(value: Value) -> Self {
+        Self::Ok(Rc::new(value.into()))
+    }
+    pub fn err(value: Value) -> Self {
+        Self::Err(Rc::new(value.into()))
+    }
+
     pub fn str(s: impl Into<String>) -> Self {
         Self::Str(Rc::new(s.into()))
     }
@@ -155,17 +167,17 @@ impl Value {
     }
 
     pub fn array(items: Vec<Value>) -> Self {
-        Self::Array(Rc::new(items))
+        Self::Array(Rc::new(items.into()))
     }
 
     pub fn tuple(items: Vec<Value>) -> Self {
-        Self::Tuple(Rc::new(items))
+        Self::Tuple(Rc::new(items.into()))
     }
 
     pub fn structure(name: impl Into<String>, fields: BTreeMap<String, Value>) -> Self {
         Self::Struct {
             name: Rc::new(name.into()),
-            fields: Rc::new(fields),
+            fields: Rc::new(fields.into()),
         }
     }
 
@@ -177,7 +189,7 @@ impl Value {
         Self::Variant {
             type_name: Rc::new(type_name.into()),
             variant: Rc::new(variant.into()),
-            data: data.map(Rc::new),
+            data: data.map(|v| Rc::new(v.into())),
         }
     }
 

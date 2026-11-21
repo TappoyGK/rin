@@ -11,13 +11,13 @@ fn nested(shape: usize, depth: usize, leaf: Value) -> Value {
     for _ in 0..depth {
         v = match shape {
             0 => Value::list(vec![v]),
-            1 => Value::Some(Rc::new(v)),
+            1 => Value::some(v),
             2 => Value::tuple(vec![v]),
             3 => Value::array(vec![v]),
             4 => Value::structure("S", BTreeMap::from([("x".into(), v)])),
             5 => Value::variant("V", "Next", Some(v)),
-            6 => Value::Ok(Rc::new(v)),
-            7 => Value::Err(Rc::new(v)),
+            6 => Value::ok(v),
+            7 => Value::err(v),
             _ => unreachable!(),
         };
     }
@@ -74,7 +74,7 @@ fn deep_roundtrips() {
         drop(other);
         drop(different);
         // 最後の強参照が Weak と共存していても安全に解放する。
-        let root = Rc::new(nested(shape, 100_000, Value::Int(0)));
+        let root = Rc::new(nested(shape, 100_000, Value::Int(0)).into());
         let weak = Rc::downgrade(&root);
         drop(Value::Some(root));
         assert!(weak.upgrade().is_none());
@@ -99,6 +99,19 @@ fn deep_roundtrips() {
         diamond = Value::tuple(vec![diamond.clone(), diamond]);
     }
     drop(diamond);
+    // コンテナ間で共有する DAG。Value を分解して取り出した所有データも直接落とす。
+    let mut mixed = Value::None;
+    for i in 0..100_000 {
+        let pair = Value::tuple(vec![mixed.clone(), mixed]);
+        mixed = nested(i % 8, 1, pair);
+    }
+    let Value::Array(items) = Value::array(vec![mixed]) else {
+        unreachable!();
+    };
+    let weak = Rc::downgrade(&items);
+    let owned = Rc::try_unwrap(items).unwrap();
+    assert!(weak.upgrade().is_none());
+    drop(owned);
     let mut shared_node = ListNode::empty();
     for _ in 0..100_000 {
         shared_node = ListNode::cons(Value::List(shared_node.clone()), shared_node);
@@ -296,7 +309,7 @@ fn formatting_and_schema_error_order() {
         compact_whitespace(format!("{flat:?}"))
     );
     assert_eq!(
-        format!("{:#?}", Value::Some(Rc::new(Value::Int(7)))),
+        format!("{:#?}", Value::some(Value::Int(7))),
         "Some(\n    Int(\n        7,\n    ),\n)"
     );
     let cyclic = Schema::parse("(defschema A B) (defschema B A) A").unwrap();
@@ -311,7 +324,7 @@ fn formatting_and_schema_error_order() {
         "S",
         BTreeMap::from([
             ("a".into(), Value::list(vec![Value::Int(1), Value::None])),
-            ("b".into(), Value::Some(Rc::new(Value::Bool(true)))),
+            ("b".into(), Value::some(Value::Bool(true))),
         ]),
     );
     assert_eq!(v.to_string(), "S { a: [1, none], b: some(true) }");
