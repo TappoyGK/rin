@@ -6,7 +6,7 @@ fn arithmetic_and_comptime_sine_table() {
     let src = r#"
         (map (fn (i) (sin (/ (* 2.0 pi (as_f64 i)) 4.0))) (range 0 4))
     "#;
-    let Value::List(xs) = eval(src).unwrap() else {
+    let Value::List(ref xs) = eval(src).unwrap() else {
         panic!("expected list");
     };
     assert_eq!(xs.len(), 4);
@@ -49,7 +49,7 @@ fn struct_field_index_with_and_match() {
     )
     .unwrap();
 
-    let Value::List(xs) = val else {
+    let Value::List(ref xs) = val else {
         panic!("expected list");
     };
     let Some(Value::Struct { fields, .. }) = xs.get(0) else {

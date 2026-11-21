@@ -1,5 +1,6 @@
 //! Rin の値構造を検証するスキーマ DSL の構文解析と照合を実装する。
 
+mod check;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -648,138 +649,7 @@ impl Schema {
 
     /// `value` がこのスキーマに適合するか検証する。
     pub fn check(&self, value: &Value) -> Result<(), Error> {
-        self.check_type(value, &self.root, "$")
-    }
-
-    fn check_type(&self, value: &Value, ty: &TypeExpr, path: &str) -> Result<(), Error> {
-        match ty {
-            TypeExpr::Any => Ok(()),
-            TypeExpr::Void => expect_match(matches!(value, Value::Void), "void", value, path),
-            TypeExpr::I64 => expect_match(matches!(value, Value::Int(_)), "i64", value, path),
-            TypeExpr::F64 => expect_match(matches!(value, Value::Float(_)), "f64", value, path),
-            TypeExpr::Bool => expect_match(matches!(value, Value::Bool(_)), "bool", value, path),
-            TypeExpr::Char => expect_match(matches!(value, Value::Char(_)), "char", value, path),
-            TypeExpr::String => expect_match(matches!(value, Value::Str(_)), "string", value, path),
-            TypeExpr::List(elem_ty) => {
-                let Value::List(xs) = value else {
-                    return mismatch("list", value.type_name(), path);
-                };
-                for (i, item) in xs.iter().enumerate() {
-                    self.check_type(item, elem_ty, &format!("{path}[{i}]"))?;
-                }
-                Ok(())
-            }
-            TypeExpr::Array(elem_ty) => {
-                let Value::Array(xs) = value else {
-                    return mismatch("array", value.type_name(), path);
-                };
-                for (i, item) in xs.iter().enumerate() {
-                    self.check_type(item, elem_ty, &format!("{path}[{i}]"))?;
-                }
-                Ok(())
-            }
-            TypeExpr::Tuple(elem_tys) => {
-                let Value::Tuple(xs) = value else {
-                    return mismatch("tuple", value.type_name(), path);
-                };
-                if xs.len() != elem_tys.len() {
-                    return Err(Error::runtime(
-                        Span::default(),
-                        format!(
-                            "{path}: expected tuple of {} elements, got {}",
-                            elem_tys.len(),
-                            xs.len()
-                        ),
-                    ));
-                }
-                for (i, (item, ety)) in xs.iter().zip(elem_tys.iter()).enumerate() {
-                    self.check_type(item, ety, &format!("{path}.{i}"))?;
-                }
-                Ok(())
-            }
-            TypeExpr::Option(inner_ty) => match value {
-                Value::None => Ok(()),
-                Value::Some(inner) => self.check_type(inner, inner_ty, &format!("{path}.some")),
-                other => mismatch("option", other.type_name(), path),
-            },
-            TypeExpr::Result(ok_ty, err_ty) => match value {
-                Value::Ok(inner) => self.check_type(inner, ok_ty, &format!("{path}.ok")),
-                Value::Err(inner) => self.check_type(inner, err_ty, &format!("{path}.err")),
-                other => mismatch("result", other.type_name(), path),
-            },
-            TypeExpr::Struct { name, fields, open } => {
-                let Value::Struct {
-                    name: actual_name,
-                    fields: actual_fields,
-                } = value
-                else {
-                    return mismatch(name, value.type_name(), path);
-                };
-                if actual_name.as_str() != name {
-                    return mismatch(name, actual_name, path);
-                }
-                for (fname, fty) in fields {
-                    let Some(fval) = actual_fields.get(fname) else {
-                        return Err(Error::runtime(
-                            Span::default(),
-                            format!("{path}: struct {name} is missing field '{fname}'"),
-                        ));
-                    };
-                    self.check_type(fval, fty, &format!("{path}.{fname}"))?;
-                }
-                if !open {
-                    for actual_key in actual_fields.keys() {
-                        if !fields.iter().any(|(k, _)| k == actual_key) {
-                            return Err(Error::runtime(
-                                Span::default(),
-                                format!("{path}: unexpected field '{actual_key}' on struct {name}"),
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            }
-            TypeExpr::Variant { name, cases } => {
-                let Value::Variant {
-                    type_name,
-                    variant,
-                    data,
-                } = value
-                else {
-                    return mismatch(name, value.type_name(), path);
-                };
-                if type_name.as_str() != name {
-                    return mismatch(name, type_name, path);
-                }
-                let Some((_, expected_payload)) = cases.iter().find(|(v, _)| v == variant.as_str())
-                else {
-                    return Err(Error::runtime(
-                        Span::default(),
-                        format!("{path}: {name} has no variant '{variant}'"),
-                    ));
-                };
-                match (expected_payload, data) {
-                    (None, None) => Ok(()),
-                    (Some(pty), Some(actual)) => {
-                        self.check_type(actual, pty, &format!("{path}.{variant}"))
-                    }
-                    (None, Some(_)) => Err(Error::runtime(
-                        Span::default(),
-                        format!("{path}: {name}.{variant} takes no payload"),
-                    )),
-                    (Some(_), None) => Err(Error::runtime(
-                        Span::default(),
-                        format!("{path}: {name}.{variant} requires a payload"),
-                    )),
-                }
-            }
-            TypeExpr::Ref(name) => {
-                let target = self.defs.get(name).ok_or_else(|| {
-                    Error::runtime(Span::default(), format!("unknown schema '{name}'"))
-                })?;
-                self.check_type(value, target, path)
-            }
-        }
+        check::check(self, value)
     }
 }
 

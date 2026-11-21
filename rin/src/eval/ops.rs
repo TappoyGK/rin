@@ -167,84 +167,110 @@ impl Runner<'_, '_> {
     }
 
     pub(super) fn values_equal(&self, a: RVal, b: RVal) -> bool {
-        match (a, b) {
-            (RVal::Void, RVal::Void) => true,
-            (RVal::Int(x), RVal::Int(y)) => x == y,
-            (RVal::Float(x), RVal::Float(y)) => x == y,
-            (RVal::Bool(x), RVal::Bool(y)) => x == y,
-            (RVal::Char(x), RVal::Char(y)) => x == y,
-            (RVal::None, RVal::None) => true,
-            (RVal::EmptyList, RVal::EmptyList) => true,
-            (RVal::Builtin(x), RVal::Builtin(y)) => x == y,
-            (RVal::Obj(id1), RVal::Obj(id2)) => {
-                if id1 == id2 {
-                    return true;
-                }
-                match (self.pool.get(id1), self.pool.get(id2)) {
-                    (
-                        Obj::Cons {
-                            head: h1,
-                            tail: t1,
-                            len: l1,
-                        },
-                        Obj::Cons {
-                            head: h2,
-                            tail: t2,
-                            len: l2,
-                        },
-                    ) => l1 == l2 && self.values_equal(*h1, *h2) && self.values_equal(*t1, *t2),
-                    (Obj::Str(s1), Obj::Str(s2)) => s1 == s2,
-                    (Obj::Array(xs1), Obj::Array(xs2)) | (Obj::Tuple(xs1), Obj::Tuple(xs2)) => {
-                        xs1.len() == xs2.len()
-                            && xs1
-                                .iter()
-                                .zip(xs2.iter())
-                                .all(|(x, y)| self.values_equal(*x, *y))
+        let mut work = crate::work::Work::<_, 8>::new();
+        let mut next = Some((a, b));
+        while let Some((a, b)) = next.take().or_else(|| work.pop()) {
+            let equal = match (a, b) {
+                (RVal::Void, RVal::Void) => true,
+                (RVal::Int(x), RVal::Int(y)) => x == y,
+                (RVal::Float(x), RVal::Float(y)) => x == y,
+                (RVal::Bool(x), RVal::Bool(y)) => x == y,
+                (RVal::Char(x), RVal::Char(y)) => x == y,
+                (RVal::None, RVal::None) => true,
+                (RVal::EmptyList, RVal::EmptyList) => true,
+                (RVal::Builtin(x), RVal::Builtin(y)) => x == y,
+                (RVal::Obj(id1), RVal::Obj(id2)) => {
+                    if id1 == id2 {
+                        continue;
                     }
-                    (
-                        Obj::Struct {
-                            name: n1,
-                            fields: f1,
-                        },
-                        Obj::Struct {
-                            name: n2,
-                            fields: f2,
-                        },
-                    ) => {
-                        n1 == n2
-                            && f1.len() == f2.len()
-                            && f1.iter().all(|(k, v1)| {
-                                f2.get(k).is_some_and(|v2| self.values_equal(*v1, *v2))
-                            })
-                    }
-                    (
-                        Obj::Variant {
-                            type_name: t1,
-                            variant: v1,
-                            data: d1,
-                        },
-                        Obj::Variant {
-                            type_name: t2,
-                            variant: v2,
-                            data: d2,
-                        },
-                    ) => {
-                        t1 == t2
-                            && v1 == v2
-                            && match (d1, d2) {
-                                (None, None) => true,
-                                (Some(x), Some(y)) => self.values_equal(*x, *y),
-                                _ => false,
+                    match (self.pool.get(id1), self.pool.get(id2)) {
+                        (
+                            Obj::Cons {
+                                head: h1,
+                                tail: t1,
+                                len: l1,
+                            },
+                            Obj::Cons {
+                                head: h2,
+                                tail: t2,
+                                len: l2,
+                            },
+                        ) => {
+                            if l1 != l2 {
+                                return false;
                             }
+                            work.push((*t1, *t2));
+                            next = Some((*h1, *h2));
+                            true
+                        }
+                        (Obj::Str(s1), Obj::Str(s2)) => s1 == s2,
+                        (Obj::Array(xs1), Obj::Array(xs2)) | (Obj::Tuple(xs1), Obj::Tuple(xs2)) => {
+                            if xs1.len() != xs2.len() {
+                                return false;
+                            }
+                            work.extend(xs1.iter().zip(xs2.iter()).rev().map(|(x, y)| (*x, *y)));
+                            true
+                        }
+                        (
+                            Obj::Struct {
+                                name: n1,
+                                fields: f1,
+                            },
+                            Obj::Struct {
+                                name: n2,
+                                fields: f2,
+                            },
+                        ) => {
+                            if n1 != n2 || f1.len() != f2.len() {
+                                return false;
+                            }
+                            for ((k1, v1), (k2, v2)) in f1.iter().zip(f2.iter()).rev() {
+                                if k1 != k2 {
+                                    return false;
+                                }
+                                work.push((*v1, *v2));
+                            }
+                            true
+                        }
+                        (
+                            Obj::Variant {
+                                type_name: t1,
+                                variant: v1,
+                                data: d1,
+                            },
+                            Obj::Variant {
+                                type_name: t2,
+                                variant: v2,
+                                data: d2,
+                            },
+                        ) => {
+                            t1 == t2
+                                && v1 == v2
+                                && match (d1, d2) {
+                                    (None, None) => true,
+                                    (Some(x), Some(y)) => {
+                                        work.push((*x, *y));
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                        }
+                        (Obj::Some(x), Obj::Some(y))
+                        | (Obj::Ok(x), Obj::Ok(y))
+                        | (Obj::Err(x), Obj::Err(y)) => {
+                            work.push((*x, *y));
+                            true
+                        }
+                        _ => false,
                     }
-                    (Obj::Some(x), Obj::Some(y))
-                    | (Obj::Ok(x), Obj::Ok(y))
-                    | (Obj::Err(x), Obj::Err(y)) => self.values_equal(*x, *y),
-                    _ => false,
                 }
+                _ => false,
+            };
+            if !equal {
+                return false;
             }
-            _ => false,
         }
+        true
     }
 
     pub(super) fn compare_vals(
