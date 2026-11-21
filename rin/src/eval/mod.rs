@@ -424,6 +424,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             base,
             chunk.local_count as usize,
             None,
+            self.active_module,
         );
         match res {
             Ok(val) => {
@@ -478,6 +479,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     base,
                     local_count,
                     Some(origin),
+                    prev_mod,
                 );
                 self.active_module = prev_mod;
                 self.leave_depth();

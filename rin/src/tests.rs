@@ -795,6 +795,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             StackFrame {
                 module: None,
                 name: Some("inner".to_string()),
+                caller_module: None,
                 at: Span::new(2, 22),
                 tail_calls: 0,
                 tail_target_module: None,
@@ -806,6 +807,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             StackFrame {
                 module: None,
                 name: Some("outer".to_string()),
+                caller_module: None,
                 at: Span::new(3, 1),
                 tail_calls: 0,
                 tail_target_module: None,
@@ -850,12 +852,12 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert_eq!(mod_err.module(), Some("ma"));
     assert!(mod_err.to_string().starts_with("ma 1:13: division by zero"));
     let mod_bt = mod_err.format_backtrace();
-    assert!(mod_bt.contains("in ma.f (at 2:18)"));
-    assert!(mod_bt.contains("in mb.f (at 3:18)"));
+    assert!(mod_bt.contains("in ma.f (at mb 2:18)"));
+    assert!(mod_bt.contains("in mb.f (at mb 3:18)"));
     assert!(mod_bt.contains("in mb.g (called from host)"));
     assert!(!mod_bt.contains("0:0"));
 
-    // Cross-module tail call: mb.f tail-calls ma.f
+    // Cross-module tail call: mc.f tail-calls ma.f
     m.load_module(
         "mc",
         "(import ma)\n(defn f (x) (ma.f x))\n(defn g (x) (+ 1 (f x)))",
@@ -867,9 +869,20 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(tail_mod_rendered.starts_with("ma 1:13: division by zero"));
     assert!(
         tail_mod_rendered
-            .contains("in ma.f (tail-called from mc.f at 3:18) [tail calls elided: 1]")
+            .contains("in ma.f (tail-called from mc.f at mc 3:18) [tail calls elided: 1]")
     );
     assert!(tail_mod_rendered.contains("in mc.g (called from host)"));
+
+    // Module top-level call failure records caller_module on outermost frame
+    let top_mod_err = m
+        .load_module("mc2", "(import ma)\n(def z (+ 1 (ma.f 1)))")
+        .unwrap_err();
+    assert_eq!(top_mod_err.module(), Some("ma"));
+    assert_eq!(
+        top_mod_err.backtrace()[0].caller_module.as_deref(),
+        Some("mc2")
+    );
+    assert!(top_mod_err.to_string().contains("in ma.f (at mc2 2:13)"));
 
     // Innermost top-level lambda inside module call must NOT inherit outer module in header
     m.load_module("hof", "(defn apply_it (f) (+ 1 (f 1)))")

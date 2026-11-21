@@ -16,6 +16,7 @@ impl Runner<'_, '_> {
         base: usize,
         local_count: usize,
         origin: Option<CallOrigin<'_>>,
+        caller_module: Option<u32>,
     ) -> Result<RVal, Error> {
         let mut tail_source: Option<FrameSource<'_>> = None;
         let mut tail_calls = 0usize;
@@ -28,7 +29,14 @@ impl Runner<'_, '_> {
             local_count,
         );
         if let Err(ref mut err) = res {
-            self.record_unwind_frame(err, &entry, tail_source.as_ref(), tail_calls, origin);
+            self.record_unwind_frame(
+                err,
+                &entry,
+                tail_source.as_ref(),
+                tail_calls,
+                origin,
+                caller_module,
+            );
         }
         res
     }
@@ -42,6 +50,7 @@ impl Runner<'_, '_> {
         tail_source: Option<&FrameSource<'_>>,
         tail_calls: usize,
         origin: Option<CallOrigin<'_>>,
+        caller_module_id: Option<u32>,
     ) {
         let active_mod = match tail_source.unwrap_or(entry) {
             FrameSource::Proto(tp) => tp.module,
@@ -54,6 +63,7 @@ impl Runner<'_, '_> {
         let module = proto
             .module
             .map(|id| self.module_names[id as usize].clone());
+        let caller_module = caller_module_id.map(|id| self.module_names[id as usize].clone());
         let (tail_target_module, tail_target_name) = if tail_calls > 0
             && let Some(FrameSource::Proto(tp)) = tail_source
         {
@@ -72,6 +82,7 @@ impl Runner<'_, '_> {
         err.push_frame(StackFrame {
             module,
             name: proto.name.clone(),
+            caller_module,
             at,
             tail_calls,
             tail_target_module,
@@ -452,6 +463,7 @@ impl Runner<'_, '_> {
                                     child_base,
                                     child_locals,
                                     Some(CallOrigin::Rin(span)),
+                                    prev_mod,
                                 );
                                 self.active_module = prev_mod;
                                 self.leave_depth();

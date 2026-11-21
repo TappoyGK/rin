@@ -79,6 +79,7 @@ pub enum ErrorKind {
 pub struct StackFrame {
     pub module: Option<String>,
     pub name: Option<String>,
+    pub caller_module: Option<String>,
     pub at: Span,
     pub tail_calls: usize,
     pub tail_target_module: Option<String>,

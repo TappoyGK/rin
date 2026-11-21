@@ -52,6 +52,7 @@ pub enum ErrorKind {
 pub struct StackFrame {
     pub module: Option<String>,
     pub name: Option<String>,
+    pub caller_module: Option<String>,
     pub at: Span,
     pub tail_calls: usize,
     pub tail_target_module: Option<String>,
@@ -74,10 +75,19 @@ fn fmt_fn_name(
     }
 }
 
+fn fmt_site(f: &mut fmt::Formatter<'_>, caller_module: Option<&str>, at: Span) -> fmt::Result {
+    if let Some(m) = caller_module {
+        write!(f, "{m} {at}")
+    } else {
+        write!(f, "{at}")
+    }
+}
+
 impl StackFrame {
     fn same_site(&self, other: &Self) -> bool {
         self.module == other.module
             && self.name == other.name
+            && self.caller_module == other.caller_module
             && self.at == other.at
             && self.tail_calls == other.tail_calls
             && self.tail_target_module == other.tail_target_module
@@ -100,9 +110,13 @@ impl fmt::Display for StackFrame {
             if self.from_host {
                 write!(f, ", called from host)")?;
             } else if let Some(b) = &self.via_builtin {
-                write!(f, ", called by {b} at {})", self.at)?;
+                write!(f, ", called by {b} at ")?;
+                fmt_site(f, self.caller_module.as_deref(), self.at)?;
+                write!(f, ")")?;
             } else {
-                write!(f, " at {})", self.at)?;
+                write!(f, " at ")?;
+                fmt_site(f, self.caller_module.as_deref(), self.at)?;
+                write!(f, ")")?;
             }
             write!(f, " [tail calls elided: {}]", self.tail_calls)?;
         } else {
@@ -110,9 +124,13 @@ impl fmt::Display for StackFrame {
             if self.from_host {
                 write!(f, " (called from host)")?;
             } else if let Some(b) = &self.via_builtin {
-                write!(f, " (called by {b} at {})", self.at)?;
+                write!(f, " (called by {b} at ")?;
+                fmt_site(f, self.caller_module.as_deref(), self.at)?;
+                write!(f, ")")?;
             } else {
-                write!(f, " (at {})", self.at)?;
+                write!(f, " (at ")?;
+                fmt_site(f, self.caller_module.as_deref(), self.at)?;
+                write!(f, ")")?;
             }
         }
         if self.repeat_count > 1 {
