@@ -1,0 +1,3 @@
+[workspace]
+members = ["rin"]
+resolver = "3"
