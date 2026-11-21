@@ -971,3 +971,93 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         crate::ffi::rin_free(cm);
     }
 }
+
+#[test]
+fn empty_bodies_and_def_errors_and_frame_sizes() {
+    for bad in [
+        "(fn ())",
+        "(defn f ())",
+        "(let (x 1))",
+        "(when true)",
+        "(match 1 (x))",
+        "[1 (when true) 3]",
+        "(let (g (fn (a))) [7 (g 1) 8])",
+    ] {
+        let err = eval(bad).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "expected Parse for {bad}");
+        assert_eq!(err.message, "body cannot be empty", "for {bad}");
+    }
+
+    for bad_def in ["(def)", "(def 1 2)"] {
+        let err = eval(bad_def).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.message, "expected variable name");
+    }
+
+    assert!(
+        crate::parser::parse_frame_size() <= 64,
+        "ParseFrame size: {}",
+        crate::parser::parse_frame_size()
+    );
+    assert!(
+        crate::compiler::step_size() <= 48,
+        "Step size: {}",
+        crate::compiler::step_size()
+    );
+}
+
+#[test]
+fn parse_scratch_releases_large_buffers_after_eval_and_error() {
+    let mut scratch = crate::parser::ParseScratch::new();
+    let big_src = "(+ 1 2) ".repeat(200);
+    {
+        let mut guard = crate::parser::ParseScratchGuard::new(&mut scratch);
+        let exprs = guard.parse(&big_src).unwrap();
+        assert_eq!(exprs.len(), 200);
+    }
+    let caps1 = scratch.capacities();
+    assert_eq!((caps1.0, caps1.2), (0, 0));
+    assert!(caps1.1 <= 32);
+
+    let bad_deep = "(+ 1 ".repeat(100);
+    {
+        let mut guard = crate::parser::ParseScratchGuard::new(&mut scratch);
+        assert!(guard.parse(&bad_deep).is_err());
+    }
+    assert_eq!(scratch.capacities(), (0, 0, 0));
+}
+
+#[test]
+fn fn_and_defn_body_last_expr_counts_step() {
+    let lim = |steps| Limits {
+        steps,
+        ..Limits::default()
+    };
+
+    assert_eq!(
+        eval_with("(defn f (x) x) (f 1)", &[], lim(4))
+            .unwrap_err()
+            .kind,
+        ErrorKind::TooManySteps
+    );
+    assert_eq!(
+        eval_with("(defn f (x) x) (f 1)", &[], lim(5)).unwrap(),
+        Value::Int(1)
+    );
+
+    assert_eq!(
+        eval_with("((fn () 1))", &[], lim(2)).unwrap_err().kind,
+        ErrorKind::TooManySteps
+    );
+    assert_eq!(
+        eval_with("((fn () 1))", &[], lim(3)).unwrap(),
+        Value::Int(1)
+    );
+
+    let chain = "(defn f () 1) (defn g () (f)) (defn f () 2) (g)";
+    assert_eq!(
+        eval_with(chain, &[], lim(7)).unwrap_err().kind,
+        ErrorKind::TooManySteps
+    );
+    assert_eq!(eval_with(chain, &[], lim(8)).unwrap(), Value::Int(2));
+}
