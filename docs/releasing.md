@@ -31,3 +31,13 @@ cargo build --release --workspace
 ```sh
 git tag -a vVERSION -m "release: vVERSION"
 ```
+
+## 4. CI の実行条件
+
+| 起動条件 | 必須チェック | 検査 |
+|---|---|---|
+| 作業 PR → `release/*` | `work checks` | 書式、Clippy、`rustdoc`、通常テスト |
+| `release/*` への push | `work checks` | `rustdoc`、通常テスト |
+| リリース PR → `main` | `release checks` | 全検査（debug / release テスト）、`librin.a` 生成確認 |
+| `main` への push | `release checks` | 全検査（debug / release テスト）、`librin.a` 生成確認 |
+| 手動実行 | `release checks` | 選択したブランチで全検査 |

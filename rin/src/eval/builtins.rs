@@ -550,7 +550,7 @@ impl Runner<'_, '_> {
                 let a = self.list_to_vec(*a_v);
                 let b = self.list_to_vec(*b_v);
                 let mut out = Vec::with_capacity(a.len().min(b.len()));
-                for (x, y) in a.into_iter().zip(b.into_iter()) {
+                for (x, y) in a.into_iter().zip(b) {
                     self.pool.retain_val(x);
                     self.pool.retain_val(y);
                     match self.pool.alloc_obj(Obj::Tuple(vec![x, y]), span) {
