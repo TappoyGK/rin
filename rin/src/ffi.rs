@@ -527,7 +527,7 @@ pub unsafe extern "C" fn rin_tag(val: *const RinValue) -> RinTag {
         Value::Some(_) => RinTag::Some,
         Value::Ok(_) => RinTag::Ok,
         Value::Err(_) => RinTag::Err,
-        Value::Fn(_) | Value::Builtin(_) => RinTag::Fn,
+        Value::Builtin(_) => RinTag::Fn,
     }
 }
 

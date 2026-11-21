@@ -1,36 +1,207 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::Pattern;
 use crate::error::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum BuiltinId {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Not,
+    AsF64,
+    AsI64,
+    Sin,
+    Cos,
+    Sqrt,
+    Abs,
+    Floor,
+    Ceil,
+    List,
+    Len,
+    IsEmpty,
+    Get,
+    Car,
+    Cdr,
+    Last,
+    Cons,
+    Push,
+    Append,
+    Flatten,
+    Slice,
+    Take,
+    Drop,
+    Reverse,
+    Range,
+    Contains,
+    Find,
+    Any,
+    All,
+    Map,
+    Filter,
+    FlatMap,
+    Fold,
+    Zip,
+    Enumerate,
+    Sort,
+    SortBy,
+    Unique,
+    ListToArray,
+    ArrayToList,
+}
+
+impl BuiltinId {
+    pub const ALL: &[Self] = &[
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Rem,
+        Self::Eq,
+        Self::Ne,
+        Self::Lt,
+        Self::Le,
+        Self::Gt,
+        Self::Ge,
+        Self::Not,
+        Self::AsF64,
+        Self::AsI64,
+        Self::Sin,
+        Self::Cos,
+        Self::Sqrt,
+        Self::Abs,
+        Self::Floor,
+        Self::Ceil,
+        Self::List,
+        Self::Len,
+        Self::IsEmpty,
+        Self::Get,
+        Self::Car,
+        Self::Cdr,
+        Self::Last,
+        Self::Cons,
+        Self::Push,
+        Self::Append,
+        Self::Flatten,
+        Self::Slice,
+        Self::Take,
+        Self::Drop,
+        Self::Reverse,
+        Self::Range,
+        Self::Contains,
+        Self::Find,
+        Self::Any,
+        Self::All,
+        Self::Map,
+        Self::Filter,
+        Self::FlatMap,
+        Self::Fold,
+        Self::Zip,
+        Self::Enumerate,
+        Self::Sort,
+        Self::SortBy,
+        Self::Unique,
+        Self::ListToArray,
+        Self::ArrayToList,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Rem => "%",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::Not => "not",
+            Self::AsF64 => "as_f64",
+            Self::AsI64 => "as_i64",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Sqrt => "sqrt",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::List => "list",
+            Self::Len => "len",
+            Self::IsEmpty => "is_empty",
+            Self::Get => "get",
+            Self::Car => "car",
+            Self::Cdr => "cdr",
+            Self::Last => "last",
+            Self::Cons => "cons",
+            Self::Push => "push",
+            Self::Append => "append",
+            Self::Flatten => "flatten",
+            Self::Slice => "slice",
+            Self::Take => "take",
+            Self::Drop => "drop",
+            Self::Reverse => "reverse",
+            Self::Range => "range",
+            Self::Contains => "contains",
+            Self::Find => "find",
+            Self::Any => "any",
+            Self::All => "all",
+            Self::Map => "map",
+            Self::Filter => "filter",
+            Self::FlatMap => "flat_map",
+            Self::Fold => "fold",
+            Self::Zip => "zip",
+            Self::Enumerate => "enumerate",
+            Self::Sort => "sort",
+            Self::SortBy => "sort_by",
+            Self::Unique => "unique",
+            Self::ListToArray => "list->array",
+            Self::ArrayToList => "array->list",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capture {
-    Local(u16),
-    Upvalue(u16),
+    Local(u32),
+    Upvalue(u32),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct StructDesc {
-    pub name: String,
-    pub fields: Vec<String>,
+    pub name: Rc<str>,
+    pub fields: Vec<Rc<str>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct FnProto {
     pub name: Option<String>,
-    pub module: Option<String>,
-    pub arity: u16,
-    pub local_count: u16,
+    pub module: Option<Rc<str>>,
+    pub arity: u32,
+    pub local_count: u32,
     pub captures: Vec<Capture>,
     pub chunk: Chunk,
+    pub approx_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Chunk {
-    pub local_count: u16,
+    pub local_count: u32,
     pub code: Vec<Op>,
     pub spans: Vec<Span>,
-    pub strings: Vec<String>,
+    pub strings: Vec<Rc<str>>,
+    string_map: HashMap<String, u32>,
     pub floats: Vec<f64>,
     pub structs: Vec<StructDesc>,
     pub patterns: Vec<Pattern>,
@@ -46,12 +217,14 @@ impl Chunk {
         idx
     }
 
-    pub fn add_string(&mut self, s: String) -> u32 {
-        if let Some(pos) = self.strings.iter().position(|x| x == &s) {
-            return pos as u32;
+    pub fn add_string(&mut self, s: &str) -> u32 {
+        if let Some(&idx) = self.string_map.get(s) {
+            return idx;
         }
         let idx = self.strings.len() as u32;
-        self.strings.push(s);
+        let rc: Rc<str> = Rc::from(s);
+        self.strings.push(rc);
+        self.string_map.insert(s.to_string(), idx);
         idx
     }
 
@@ -84,10 +257,18 @@ impl Chunk {
         self.export_lists.push(names);
         idx
     }
+
+    pub fn approx_bytes(&self) -> usize {
+        64 + self.code.len() * std::mem::size_of::<Op>()
+            + self.strings.iter().map(|s| 16 + s.len()).sum::<usize>()
+            + self.floats.len() * 8
+            + self.patterns.len() * 32
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
+    Tick,
     Void,
     Int(i64),
     Float(u32),
@@ -97,17 +278,19 @@ pub(crate) enum Op {
     None,
     EmptyList,
 
-    GetLocal(u16),
-    SetLocal(u16),
-    GetCapture(u16),
+    GetLocal(u32),
+    SetLocal(u32),
+    GetCapture(u32),
     GetGlobal(u32),
     DefGlobal(u32),
     DefFn(u32, u32), // (name_str_idx, proto_idx)
 
-    MakeList(u16),
-    MakeTuple(u16),
+    MakeList(u32),
+    MakeTuple(u32),
     MakeStruct(u32),
-    WithStruct(u32),
+    WithCheckStruct,
+    WithCheckField(u32, u32),
+    WithFinish(u32),
     MakeVariant {
         type_name: u32,
         variant: u32,
@@ -121,7 +304,8 @@ pub(crate) enum Op {
     GetIndex,
     MakeClosure(u32),
 
-    Call(u16),
+    Call(u32),
+    TailCall(u32),
     And,
     Or,
     Jump(usize),

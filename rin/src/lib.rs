@@ -635,4 +635,35 @@ mod tests {
         let non_exhaustive = eval("(match 3 (1 10) (2 20))").unwrap_err();
         assert_eq!(non_exhaustive.kind, ErrorKind::Runtime);
     }
+
+    #[test]
+    fn tail_call_optimization_and_with_eval_order() {
+        let mut alloc = HeapAllocator;
+        let mut m = Machine::new(
+            Limits {
+                steps: 100_000,
+                depth: 10,
+                memory_bytes: 16 * 1024 * 1024,
+            },
+            &mut alloc,
+        );
+        // Depth is 10, yet 500 tail-recursive calls succeed without TooDeep
+        let sum = m
+            .eval(
+                r#"
+                (defn tail_sum (n acc)
+                  (if (== n 0) acc (tail_sum (- n 1) (+ acc n))))
+                (tail_sum 500 0)
+                "#,
+            )
+            .unwrap();
+        assert_eq!(sum, Value::Int(125_250));
+
+        // `with` checks struct type first, then each field existence before evaluating value
+        let err1 = eval("(with 1 { a: nosuch })").unwrap_err();
+        assert!(err1.message.contains("requires a struct"), "{err1}");
+
+        let err2 = eval("(with Card { cost: 1 } { missing: (/ 1 0) })").unwrap_err();
+        assert!(err2.message.contains("no field 'missing'"), "{err2}");
+    }
 }
