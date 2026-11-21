@@ -562,4 +562,77 @@ mod tests {
             ffi::rin_free(m);
         }
     }
+
+    #[test]
+    fn error_paths_do_not_leak_pool_slots() {
+        let mut backing = vec![0u8; 64 * 1024];
+        let mut arena = ArenaAllocator::new(&mut backing);
+        let mut machine = Machine::new(
+            Limits {
+                steps: 200,
+                depth: 50,
+                memory_bytes: 64 * 1024,
+            },
+            &mut arena,
+        );
+        machine
+            .eval(
+                r#"
+                (defn boom (n)
+                  (let (tmp (range 0 10))
+                    (if (== n 0) (/ tmp[0] 0) (boom (- n 1)))))
+                (defn loop_step (n)
+                  (let (tmp [1, 2, 3])
+                    (loop_step (+ n (len tmp)))))
+                "#,
+            )
+            .unwrap();
+        let baseline = machine.live_bytes();
+
+        for _ in 0..20 {
+            let err = machine.eval("(boom 3)").unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Runtime);
+            assert_eq!(machine.live_bytes(), baseline);
+
+            let step_err = machine.eval("(loop_step 0)").unwrap_err();
+            assert_eq!(step_err.kind, ErrorKind::TooManySteps);
+            assert_eq!(machine.live_bytes(), baseline);
+
+            let with_err = machine
+                .eval("(with Card { cost: 1 } { missing: 2 })")
+                .unwrap_err();
+            assert_eq!(with_err.kind, ErrorKind::Runtime);
+            assert_eq!(machine.live_bytes(), baseline);
+        }
+    }
+
+    #[test]
+    fn nested_upvalue_closures_and_shadowing() {
+        let src = r#"
+            (let (a 10)
+              (let (f1 (fn (b)
+                         (let (c 5)
+                           (fn (d) (+ a b c d)))))
+                (let (a 999)
+                  ((f1 20) 7))))
+        "#;
+        assert_eq!(eval(src).unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn edge_cases_short_circuit_overflow_when_empty_match() {
+        assert_eq!(eval("").unwrap(), Value::Void);
+        assert_eq!(eval("(when false (/ 1 0))").unwrap(), Value::Void);
+        assert_eq!(eval("(and false (== (/ 1 0) 0))").unwrap(), Value::Bool(false));
+        assert_eq!(eval("(or true (== (/ 1 0) 0))").unwrap(), Value::Bool(true));
+
+        let overflow = eval("(+ 9223372036854775807 1)").unwrap_err();
+        assert_eq!(overflow.kind, ErrorKind::Runtime);
+
+        let div_overflow = eval("(/ -9223372036854775808 -1)").unwrap_err();
+        assert_eq!(div_overflow.kind, ErrorKind::Runtime);
+
+        let non_exhaustive = eval("(match 3 (1 10) (2 20))").unwrap_err();
+        assert_eq!(non_exhaustive.kind, ErrorKind::Runtime);
+    }
 }
