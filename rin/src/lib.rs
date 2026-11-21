@@ -12,6 +12,7 @@ mod parser;
 mod pool;
 pub mod schema;
 pub mod value;
+mod work;
 
 pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
 pub use error::{Error, ErrorKind, Limits, Span, StackFrame};

@@ -8,6 +8,9 @@ use crate::bytecode::{BuiltinId, FnProto};
 use crate::error::{Error, ErrorKind, Span};
 use crate::value::Value;
 
+mod convert;
+mod shallow;
+
 const CHUNK_SLOTS: usize = 256;
 
 /// 内部プール内の参照カウント付きオブジェクトへのハンドル。
@@ -361,153 +364,6 @@ impl<'a> Pool<'a> {
                 _ => 0,
             },
             _ => 0,
-        }
-    }
-
-    /// 実行時値 `RVal` をホスト向けの独立した `Value` へ変換する。
-    pub fn export(&self, val: RVal) -> Value {
-        match val {
-            RVal::Void => Value::Void,
-            RVal::Int(n) => Value::Int(n),
-            RVal::Float(x) => Value::Float(x),
-            RVal::Bool(b) => Value::Bool(b),
-            RVal::Char(c) => Value::Char(c),
-            RVal::None => Value::None,
-            RVal::EmptyList => Value::empty_list(),
-            RVal::Builtin(b) => Value::Builtin(b.name()),
-            RVal::Obj(id) => match self.get(id) {
-                Obj::Cons { .. } => {
-                    let mut items = Vec::with_capacity(self.list_len(val));
-                    let mut cur = val;
-                    while let RVal::Obj(cid) = cur {
-                        let Obj::Cons { head, tail, .. } = self.get(cid) else {
-                            break;
-                        };
-                        items.push(self.export(*head));
-                        cur = *tail;
-                    }
-                    Value::list(items)
-                }
-                Obj::Str(s) => Value::str(s.as_ref()),
-                Obj::Array(xs) => Value::array(xs.iter().map(|v| self.export(*v)).collect()),
-                Obj::Tuple(xs) => Value::tuple(xs.iter().map(|v| self.export(*v)).collect()),
-                Obj::Struct { name, fields } => {
-                    let map = fields
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), self.export(*v)))
-                        .collect();
-                    Value::structure(name.as_ref(), map)
-                }
-                Obj::Variant {
-                    type_name,
-                    variant,
-                    data,
-                } => Value::variant(
-                    type_name.as_ref(),
-                    variant.as_ref(),
-                    data.map(|d| self.export(d)),
-                ),
-                Obj::Some(v) => Value::Some(std::rc::Rc::new(self.export(*v))),
-                Obj::Ok(v) => Value::Ok(std::rc::Rc::new(self.export(*v))),
-                Obj::Err(v) => Value::Err(std::rc::Rc::new(self.export(*v))),
-                Obj::Closure { proto, .. } => Value::Builtin(match proto.name.as_deref() {
-                    Some(_) => "<defn>",
-                    None => "<fn>",
-                }),
-                Obj::Module { .. } => Value::Builtin("<module>"),
-            },
-        }
-    }
-
-    /// ホスト側の `Value` をプール内の実行時値 `RVal` へ取り込む。
-    pub fn import(&mut self, val: &Value, span: Span) -> Result<RVal, Error> {
-        match val {
-            Value::Void => Ok(RVal::Void),
-            Value::Int(n) => Ok(RVal::Int(*n)),
-            Value::Float(x) => Ok(RVal::Float(*x)),
-            Value::Bool(b) => Ok(RVal::Bool(*b)),
-            Value::Char(c) => Ok(RVal::Char(*c)),
-            Value::None => Ok(RVal::None),
-            Value::Builtin(name) => {
-                let id = BuiltinId::ALL
-                    .iter()
-                    .copied()
-                    .find(|b| b.name() == *name)
-                    .ok_or_else(|| Error::runtime(span, format!("cannot import '{name}'")))?;
-                Ok(RVal::Builtin(id))
-            }
-            Value::Str(s) => Ok(RVal::Obj(
-                self.alloc_obj(Obj::Str(Rc::from(s.as_str())), span)?,
-            )),
-            Value::List(xs) => {
-                let items: Vec<Value> = xs.to_vec();
-                let mut acc = RVal::EmptyList;
-                for item in items.iter().rev() {
-                    let h = self.import(item, span)?;
-                    let next = self.alloc_cons(h, acc, span);
-                    self.release_val(h);
-                    self.release_val(acc);
-                    acc = next?;
-                }
-                Ok(acc)
-            }
-            Value::Array(xs) => {
-                let mut items = Vec::with_capacity(xs.len());
-                for x in xs.iter() {
-                    items.push(self.import(x, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(Obj::Array(items), span)?))
-            }
-            Value::Tuple(xs) => {
-                let mut items = Vec::with_capacity(xs.len());
-                for x in xs.iter() {
-                    items.push(self.import(x, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(Obj::Tuple(items), span)?))
-            }
-            Value::Struct { name, fields } => {
-                let mut map = BTreeMap::new();
-                for (k, v) in fields.iter() {
-                    map.insert(Rc::from(k.as_str()), self.import(v, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(
-                    Obj::Struct {
-                        name: Rc::from(name.as_str()),
-                        fields: map,
-                    },
-                    span,
-                )?))
-            }
-            Value::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                let d = match data {
-                    Some(inner) => Some(self.import(inner, span)?),
-                    None => None,
-                };
-                Ok(RVal::Obj(self.alloc_obj(
-                    Obj::Variant {
-                        type_name: Rc::from(type_name.as_str()),
-                        variant: Rc::from(variant.as_str()),
-                        data: d,
-                    },
-                    span,
-                )?))
-            }
-            Value::Some(v) => {
-                let inner = self.import(v, span)?;
-                Ok(RVal::Obj(self.alloc_obj(Obj::Some(inner), span)?))
-            }
-            Value::Ok(v) => {
-                let inner = self.import(v, span)?;
-                Ok(RVal::Obj(self.alloc_obj(Obj::Ok(inner), span)?))
-            }
-            Value::Err(v) => {
-                let inner = self.import(v, span)?;
-                Ok(RVal::Obj(self.alloc_obj(Obj::Err(inner), span)?))
-            }
         }
     }
 }
