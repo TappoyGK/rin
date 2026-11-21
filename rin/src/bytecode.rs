@@ -215,7 +215,7 @@ pub(crate) struct StructDesc {
 #[derive(Debug, Clone)]
 pub(crate) struct FnProto {
     pub name: Option<String>,
-    pub module: Option<Rc<str>>,
+    pub module: Option<u32>,
     pub arity: u32,
     pub local_count: u32,
     pub captures: Vec<Capture>,
@@ -227,6 +227,7 @@ pub(crate) struct Chunk {
     pub local_count: u32,
     pub code: Vec<Op>,
     pub spans: Vec<Span>,
+    pub tick_spans: Vec<Span>,
     pub strings: Vec<Rc<str>>,
     string_map: Option<HashMap<Rc<str>, u32>>,
     pub floats: Vec<f64>,
@@ -302,7 +303,7 @@ impl Chunk {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
-    Tick(u32),
+    Tick(u32, u32), // (tick_spans_start, count)
     Void,
     Int(i64),
     Float(u32),

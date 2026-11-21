@@ -41,7 +41,8 @@ pub struct Machine<'a> {
     syms: SymTable,
     globals: Vec<Option<RVal>>,
     modules: BTreeMap<String, RVal>,
-    module_envs: BTreeMap<String, Vec<Option<RVal>>>,
+    module_ids: BTreeMap<String, u32>,
+    module_envs: Vec<Vec<Option<RVal>>>,
 }
 
 fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
@@ -68,7 +69,8 @@ impl<'a> Machine<'a> {
             syms,
             globals,
             modules: BTreeMap::new(),
-            module_envs: BTreeMap::new(),
+            module_ids: BTreeMap::new(),
+            module_envs: Vec::new(),
         }
     }
 
@@ -87,12 +89,22 @@ impl<'a> Machine<'a> {
 
     /// Loads and evaluates a named module from host-provided source.
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
-        let exprs = parse_program(source)?;
-        let chunk = compile_program(&exprs, Some(name), &mut self.syms)?;
-        if let Some(prev_env) = self.module_envs.insert(name.to_string(), Vec::new()) {
-            for v in prev_env.into_iter().flatten() {
-                self.pool.release_val(v);
+        let mod_id = match self.module_ids.get(name).copied() {
+            Some(id) => id,
+            None => {
+                let id = self.module_envs.len() as u32;
+                self.module_ids.insert(name.to_string(), id);
+                self.module_envs.push(Vec::new());
+                id
             }
+        };
+        let exprs = parse_program(source)?;
+        let chunk = compile_program(&exprs, Some(mod_id), &mut self.syms)?;
+        for v in std::mem::take(&mut self.module_envs[mod_id as usize])
+            .into_iter()
+            .flatten()
+        {
+            self.pool.release_val(v);
         }
         let mut runner = Runner::new(
             self.limits,
@@ -101,12 +113,12 @@ impl<'a> Machine<'a> {
             &mut self.globals,
             &self.modules,
             &mut self.module_envs,
-            Some(Rc::from(name)),
+            Some(mod_id),
         );
         let v = runner.run_top_chunk(&chunk)?;
         runner.pool.release_val(v);
         let export_filter = runner.export_list.take();
-        let mod_env = self.module_envs.get(name).unwrap();
+        let mod_env = &self.module_envs[mod_id as usize];
         let mut exports = BTreeMap::new();
         match export_filter {
             Some(names) => {
@@ -250,7 +262,7 @@ impl Drop for Machine<'_> {
             self.pool.release_val(v);
         }
         let old_mod_envs = std::mem::take(&mut self.module_envs);
-        for env in old_mod_envs.into_values() {
+        for env in old_mod_envs {
             for v in env.into_iter().flatten() {
                 self.pool.release_val(v);
             }
@@ -270,8 +282,8 @@ struct Runner<'a, 'p> {
     syms: &'a SymTable,
     globals: &'a mut Vec<Option<RVal>>,
     modules: &'a BTreeMap<String, RVal>,
-    module_envs: &'a mut BTreeMap<String, Vec<Option<RVal>>>,
-    active_module: Option<Rc<str>>,
+    module_envs: &'a mut Vec<Vec<Option<RVal>>>,
+    active_module: Option<u32>,
     export_list: Option<Vec<String>>,
     stack: Vec<RVal>,
 }
@@ -283,8 +295,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         syms: &'a SymTable,
         globals: &'a mut Vec<Option<RVal>>,
         modules: &'a BTreeMap<String, RVal>,
-        module_envs: &'a mut BTreeMap<String, Vec<Option<RVal>>>,
-        active_module: Option<Rc<str>>,
+        module_envs: &'a mut Vec<Vec<Option<RVal>>>,
+        active_module: Option<u32>,
     ) -> Self {
         Self {
             limits,
@@ -302,11 +314,15 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
-    fn tick(&mut self, chunk: &Chunk, ip: usize, n: u32) -> Result<(), Error> {
-        self.steps += n as usize;
-        if self.steps > self.limits.steps {
-            return Err(self.step_limit_err(chunk.spans[ip - 1]));
+    fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
+        let next = self.steps + count as usize;
+        if next > self.limits.steps {
+            let over = self.limits.steps.saturating_sub(self.steps);
+            let span = chunk.tick_spans[start as usize + over];
+            self.steps = next;
+            return Err(self.step_limit_err(span));
         }
+        self.steps = next;
         Ok(())
     }
 
@@ -342,9 +358,8 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     fn lookup_global(&mut self, id: u32, span: Span) -> Result<RVal, Error> {
         let idx = id as usize;
-        if let Some(mod_name) = &self.active_module
-            && let Some(mod_env) = self.module_envs.get(mod_name.as_ref())
-            && let Some(Some(v)) = mod_env.get(idx).copied()
+        if let Some(mod_id) = self.active_module
+            && let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied()
         {
             self.pool.retain_val(v);
             return Ok(v);
@@ -358,9 +373,8 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     fn define_top(&mut self, id: u32, val: RVal) {
-        let prev = if let Some(mod_name) = &self.active_module {
-            let env = self.module_envs.get_mut(mod_name.as_ref()).unwrap();
-            set_slot(env, id, val)
+        let prev = if let Some(mod_id) = self.active_module {
+            set_slot(&mut self.module_envs[mod_id as usize], id, val)
         } else {
             set_slot(self.globals, id, val)
         };
@@ -453,7 +467,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     ));
                 }
                 self.enter_depth(span)?;
-                let prev_mod = std::mem::replace(&mut self.active_module, proto.module.clone());
+                let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
                 let base = self.stack.len();
                 let local_count = proto.local_count as usize;
                 self.stack.reserve(local_count);
@@ -500,8 +514,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                 ip += 1;
 
                 match op {
-                    Op::Tick(n) => {
-                        self.tick(chunk, ip, n)?;
+                    Op::Tick(start, count) => {
+                        self.tick(chunk, start, count)?;
                     }
                     Op::Void => self.stack.push(RVal::Void),
                     Op::Int(n) => self.stack.push(RVal::Int(n)),
@@ -843,10 +857,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                                 let child_base = arg_start;
                                 let child_locals = proto.local_count as usize;
                                 self.stack.resize(child_base + child_locals, RVal::Void);
-                                let prev_mod = std::mem::replace(
-                                    &mut self.active_module,
-                                    proto.module.clone(),
-                                );
+                                let prev_mod =
+                                    std::mem::replace(&mut self.active_module, proto.module);
                                 let res = self.exec_frame(
                                     FrameSource::Proto(proto),
                                     cap,
@@ -908,7 +920,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                                 let new_locals = proto.local_count as usize;
                                 self.stack.resize(base + new_locals, RVal::Void);
                                 self.pool.release_val(callee);
-                                self.active_module = proto.module.clone();
+                                self.active_module = proto.module;
                                 source = FrameSource::Proto(proto);
                                 captures = cap;
                                 frame_stack_start = base + new_locals;
@@ -1048,6 +1060,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         Ok(self.stack.pop().unwrap_or(RVal::Void))
     }
 
+    #[inline(always)]
     fn call_builtin_from_stack(
         &mut self,
         b: BuiltinId,
@@ -1055,19 +1068,74 @@ impl<'a, 'p> Runner<'a, 'p> {
         argc: usize,
         span: Span,
     ) -> Result<RVal, Error> {
-        if argc <= 4 {
-            let mut buf = [RVal::Void; 4];
-            buf[..argc].copy_from_slice(&self.stack[arg_start..arg_start + argc]);
+        if argc == 2 {
+            let lhs = self.stack[arg_start];
+            let rhs = self.stack[arg_start + 1];
             self.stack.truncate(arg_start - 1);
-            let res = self.apply_builtin(b, &buf[..argc], span);
-            self.release_all(buf[..argc].iter().copied());
-            res
-        } else {
-            let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
-            self.stack.pop(); // callee
-            let res = self.apply_builtin(b, &args, span);
-            self.release_all(args);
-            res
+            if let (RVal::Int(x), RVal::Int(y)) = (lhs, rhs) {
+                match b {
+                    BuiltinId::Add => {
+                        return x
+                            .checked_add(y)
+                            .map(RVal::Int)
+                            .ok_or_else(|| Error::runtime(span, "integer overflow"));
+                    }
+                    BuiltinId::Sub => {
+                        return x
+                            .checked_sub(y)
+                            .map(RVal::Int)
+                            .ok_or_else(|| Error::runtime(span, "integer overflow"));
+                    }
+                    BuiltinId::Mul => {
+                        return x
+                            .checked_mul(y)
+                            .map(RVal::Int)
+                            .ok_or_else(|| Error::runtime(span, "integer overflow"));
+                    }
+                    BuiltinId::Lt => return Ok(RVal::Bool(x < y)),
+                    BuiltinId::Le => return Ok(RVal::Bool(x <= y)),
+                    BuiltinId::Gt => return Ok(RVal::Bool(x > y)),
+                    BuiltinId::Ge => return Ok(RVal::Bool(x >= y)),
+                    BuiltinId::Eq => return Ok(RVal::Bool(x == y)),
+                    BuiltinId::Ne => return Ok(RVal::Bool(x != y)),
+                    _ => {}
+                }
+            }
+            let res = self.apply_builtin(b, &[lhs, rhs], span);
+            self.pool.release_val(lhs);
+            self.pool.release_val(rhs);
+            return res;
+        }
+        match argc {
+            0 => {
+                self.stack.truncate(arg_start - 1);
+                self.apply_builtin(b, &[], span)
+            }
+            1 => {
+                let a = self.stack[arg_start];
+                self.stack.truncate(arg_start - 1);
+                let res = self.apply_builtin(b, &[a], span);
+                self.pool.release_val(a);
+                res
+            }
+            3 => {
+                let a = self.stack[arg_start];
+                let c = self.stack[arg_start + 1];
+                let d = self.stack[arg_start + 2];
+                self.stack.truncate(arg_start - 1);
+                let res = self.apply_builtin(b, &[a, c, d], span);
+                self.pool.release_val(a);
+                self.pool.release_val(c);
+                self.pool.release_val(d);
+                res
+            }
+            _ => {
+                let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
+                self.stack.pop(); // callee
+                let res = self.apply_builtin(b, &args, span);
+                self.release_all(args);
+                res
+            }
         }
     }
 }

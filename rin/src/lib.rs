@@ -104,6 +104,26 @@ mod tests {
     }
 
     #[test]
+    fn step_limit_error_reports_exact_span() {
+        let limits = |steps| Limits {
+            steps,
+            depth: 200,
+            memory_bytes: 1024 * 1024,
+        };
+        let e1 = eval_with("(let (x 1) [x (/ 1 0)])", &[], limits(1)).unwrap_err();
+        assert_eq!(e1.kind, ErrorKind::TooManySteps);
+        assert_eq!((e1.at.line, e1.at.col), (1, 9));
+
+        let e2 = eval_with("(+ 1\n   zzz)", &[], limits(2)).unwrap_err();
+        assert_eq!(e2.kind, ErrorKind::TooManySteps);
+        assert_eq!((e2.at.line, e2.at.col), (1, 4));
+
+        let e3 = eval_with("(def a 1) (def a (+ a 1)) a", &[], limits(1)).unwrap_err();
+        assert_eq!(e3.kind, ErrorKind::TooManySteps);
+        assert_eq!((e3.at.line, e3.at.col), (1, 8));
+    }
+
+    #[test]
     fn list_vs_index_syntax() {
         let src = r#"
             (let (xs [10, 20, 30])

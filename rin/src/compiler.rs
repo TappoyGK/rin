@@ -6,13 +6,12 @@ use crate::error::{Error, Span};
 
 pub(crate) fn compile_program(
     exprs: &[Expr],
-    module: Option<&str>,
+    module: Option<u32>,
     syms: &mut SymTable,
 ) -> Result<Chunk, Error> {
-    let mod_rc: Option<Rc<str>> = module.map(Rc::from);
     let mut compiler = Compiler {
-        scopes: vec![Scope::new(mod_rc.clone())],
-        module: mod_rc,
+        scopes: vec![Scope::new(module)],
+        module,
         syms,
     };
     if exprs.is_empty() {
@@ -24,7 +23,7 @@ pub(crate) fn compile_program(
                 compiler.emit(Op::Pop, expr.span);
             }
         }
-        compiler.flush_ticks(exprs.last().unwrap().span);
+        compiler.flush_ticks();
     }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
@@ -32,24 +31,24 @@ pub(crate) fn compile_program(
 }
 
 struct Scope {
-    module: Option<Rc<str>>,
+    module: Option<u32>,
     locals: Vec<(String, u32)>,
     next_slot: u32,
     max_slots: u32,
     captures: Vec<(String, Capture)>,
-    pending_ticks: u32,
+    pending_tick_spans: Vec<Span>,
     chunk: Chunk,
 }
 
 impl Scope {
-    fn new(module: Option<Rc<str>>) -> Self {
+    fn new(module: Option<u32>) -> Self {
         Self {
             module,
             locals: Vec::new(),
             next_slot: 0,
             max_slots: 0,
             captures: Vec::new(),
-            pending_ticks: 0,
+            pending_tick_spans: Vec::new(),
             chunk: Chunk::default(),
         }
     }
@@ -88,7 +87,7 @@ impl Scope {
 
 struct Compiler<'a> {
     scopes: Vec<Scope>,
-    module: Option<Rc<str>>,
+    module: Option<u32>,
     syms: &'a mut SymTable,
 }
 
@@ -97,17 +96,19 @@ impl Compiler<'_> {
         &mut self.scopes.last_mut().unwrap().chunk
     }
 
-    fn flush_ticks(&mut self, span: Span) {
+    fn flush_ticks(&mut self) {
         let top = self.scopes.last_mut().unwrap();
-        if top.pending_ticks > 0 {
-            let n = top.pending_ticks;
-            top.pending_ticks = 0;
-            top.chunk.emit(Op::Tick(n), span);
+        if !top.pending_tick_spans.is_empty() {
+            let start = top.chunk.tick_spans.len() as u32;
+            let count = top.pending_tick_spans.len() as u32;
+            let first_span = top.pending_tick_spans[0];
+            top.chunk.tick_spans.append(&mut top.pending_tick_spans);
+            top.chunk.emit(Op::Tick(start, count), first_span);
         }
     }
 
     fn emit(&mut self, op: Op, span: Span) -> usize {
-        self.flush_ticks(span);
+        self.flush_ticks();
         self.chunk().emit(op, span)
     }
 
@@ -169,8 +170,8 @@ impl Compiler<'_> {
                 self.emit(Op::Pop, expr.span);
             }
         }
-        if let Some(last_expr) = body.last() {
-            self.flush_ticks(last_expr.span);
+        if !body.is_empty() {
+            self.flush_ticks();
         }
         Ok(())
     }
@@ -184,7 +185,7 @@ impl Compiler<'_> {
     ) -> Result<Rc<FnProto>, Error> {
         let arity =
             u32::try_from(params.len()).map_err(|_| Error::parse(span, "too many parameters"))?;
-        let mut inner = Scope::new(self.module.clone());
+        let mut inner = Scope::new(self.module);
         for p in params {
             inner.alloc_slot(p.clone(), span)?;
         }
@@ -215,7 +216,11 @@ impl Compiler<'_> {
 
     fn compile_expr(&mut self, expr: &Expr, is_tail: bool) -> Result<(), Error> {
         let span = expr.span;
-        self.scopes.last_mut().unwrap().pending_ticks += 1;
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .pending_tick_spans
+            .push(span);
 
         match &expr.kind {
             ExprKind::Int(n) => {
@@ -384,7 +389,7 @@ impl Compiler<'_> {
                 let else_ip = self.chunk().code.len();
                 self.patch_jump(j_else, else_ip);
                 self.compile_expr(else_branch, is_tail)?;
-                self.flush_ticks(span);
+                self.flush_ticks();
                 let end_ip = self.chunk().code.len();
                 self.patch_jump(j_end, end_ip);
             }
