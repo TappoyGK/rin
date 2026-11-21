@@ -54,9 +54,24 @@ pub struct StackFrame {
     pub name: Option<String>,
     pub at: Span,
     pub tail_calls: usize,
+    pub tail_target_module: Option<String>,
+    pub tail_target_name: Option<String>,
     pub repeat_count: usize,
     pub from_host: bool,
     pub via_builtin: Option<String>,
+}
+
+fn fmt_fn_name(
+    f: &mut fmt::Formatter<'_>,
+    module: Option<&str>,
+    name: Option<&str>,
+) -> fmt::Result {
+    match (module, name) {
+        (Some(m), Some(n)) => write!(f, "{m}.{n}"),
+        (Some(m), None) => write!(f, "{m}.<lambda>"),
+        (None, Some(n)) => write!(f, "{n}"),
+        (None, None) => write!(f, "<lambda>"),
+    }
 }
 
 impl StackFrame {
@@ -65,6 +80,8 @@ impl StackFrame {
             && self.name == other.name
             && self.at == other.at
             && self.tail_calls == other.tail_calls
+            && self.tail_target_module == other.tail_target_module
+            && self.tail_target_name == other.tail_target_name
             && self.from_host == other.from_host
             && self.via_builtin == other.via_builtin
     }
@@ -72,21 +89,31 @@ impl StackFrame {
 
 impl fmt::Display for StackFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.module, &self.name) {
-            (Some(m), Some(n)) => write!(f, "{m}.{n}")?,
-            (Some(m), None) => write!(f, "{m}.<lambda>")?,
-            (None, Some(n)) => write!(f, "{n}")?,
-            (None, None) => write!(f, "<lambda>")?,
-        }
-        if self.from_host {
-            write!(f, " (called from host)")?;
-        } else if let Some(b) = &self.via_builtin {
-            write!(f, " (called by {b} at {})", self.at)?;
-        } else {
-            write!(f, " (at {})", self.at)?;
-        }
         if self.tail_calls > 0 {
+            fmt_fn_name(
+                f,
+                self.tail_target_module.as_deref(),
+                self.tail_target_name.as_deref(),
+            )?;
+            write!(f, " (tail-called from ")?;
+            fmt_fn_name(f, self.module.as_deref(), self.name.as_deref())?;
+            if self.from_host {
+                write!(f, ", called from host)")?;
+            } else if let Some(b) = &self.via_builtin {
+                write!(f, ", called by {b} at {})", self.at)?;
+            } else {
+                write!(f, " at {})", self.at)?;
+            }
             write!(f, " [tail calls elided: {}]", self.tail_calls)?;
+        } else {
+            fmt_fn_name(f, self.module.as_deref(), self.name.as_deref())?;
+            if self.from_host {
+                write!(f, " (called from host)")?;
+            } else if let Some(b) = &self.via_builtin {
+                write!(f, " (called by {b} at {})", self.at)?;
+            } else {
+                write!(f, " (at {})", self.at)?;
+            }
         }
         if self.repeat_count > 1 {
             write!(f, " ×{}", self.repeat_count)?;
@@ -103,6 +130,7 @@ pub struct Error {
     pub kind: ErrorKind,
     pub at: Span,
     pub message: String,
+    module: Option<String>,
     backtrace: Vec<StackFrame>,
     omitted_frames: usize,
 }
@@ -113,6 +141,7 @@ impl Error {
             kind,
             at,
             message: message.into(),
+            module: None,
             backtrace: Vec::new(),
             omitted_frames: 0,
         }
@@ -128,6 +157,17 @@ impl Error {
 
     pub fn runtime(at: Span, message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Runtime, at, message)
+    }
+
+    /// Returns the module name where the error occurred, if inside a module.
+    pub fn module(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
+    pub(crate) fn set_module_if_none(&mut self, module: String) {
+        if self.module.is_none() {
+            self.module = Some(module);
+        }
     }
 
     /// Returns the call frames from innermost callee to outermost caller.
@@ -175,12 +215,14 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.at, self.message)?;
-        for (i, frame) in self.backtrace.iter().enumerate() {
-            if i == MAX_BACKTRACE_SIDE && self.omitted_frames > 0 {
-                write!(f, "\n  ... {} frames omitted", self.omitted_frames)?;
-            }
-            write!(f, "\n  in {frame}")?;
+        if let Some(m) = &self.module {
+            write!(f, "{m} {}: {}", self.at, self.message)?;
+        } else {
+            write!(f, "{}: {}", self.at, self.message)?;
+        }
+        let bt = self.format_backtrace();
+        if !bt.is_empty() {
+            write!(f, "\n{bt}")?;
         }
         Ok(())
     }

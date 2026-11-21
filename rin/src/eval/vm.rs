@@ -15,7 +15,7 @@ impl Runner<'_, '_> {
         captures: Rc<[RVal]>,
         base: usize,
         local_count: usize,
-        origin: CallOrigin<'_>,
+        origin: Option<CallOrigin<'_>>,
     ) -> Result<RVal, Error> {
         let mut tail_source: Option<FrameSource<'_>> = None;
         let mut tail_calls = 0usize;
@@ -27,10 +27,8 @@ impl Runner<'_, '_> {
             base,
             local_count,
         );
-        if let Err(ref mut err) = res
-            && let FrameSource::Proto(p) = &entry
-        {
-            self.record_unwind_frame(err, p, tail_calls, origin);
+        if let Err(ref mut err) = res {
+            self.record_unwind_frame(err, &entry, tail_source.as_ref(), tail_calls, origin);
         }
         res
     }
@@ -40,15 +38,37 @@ impl Runner<'_, '_> {
     fn record_unwind_frame(
         &self,
         err: &mut Error,
-        proto: &crate::bytecode::FnProto,
+        entry: &FrameSource<'_>,
+        tail_source: Option<&FrameSource<'_>>,
         tail_calls: usize,
-        origin: CallOrigin<'_>,
+        origin: Option<CallOrigin<'_>>,
     ) {
+        if err.module().is_none() {
+            let active_mod = match tail_source.unwrap_or(entry) {
+                FrameSource::Proto(tp) => tp.module,
+                FrameSource::Top(_) => self.active_module,
+            };
+            if let Some(mid) = active_mod {
+                err.set_module_if_none(self.module_names[mid as usize].clone());
+            }
+        }
+        let (Some(orig), FrameSource::Proto(proto)) = (origin, entry) else {
+            return;
+        };
         let module = proto
             .module
             .map(|id| self.module_names[id as usize].clone());
-        let (at, from_host, via_builtin) = match origin {
-            CallOrigin::TopLevel => (Span::default(), false, None),
+        let (tail_target_module, tail_target_name) = if tail_calls > 0
+            && let Some(FrameSource::Proto(tp)) = tail_source
+        {
+            (
+                tp.module.map(|id| self.module_names[id as usize].clone()),
+                tp.name.clone(),
+            )
+        } else {
+            (None, None)
+        };
+        let (at, from_host, via_builtin) = match orig {
             CallOrigin::Rin(s) => (s, false, None),
             CallOrigin::Host => (Span::default(), true, None),
             CallOrigin::Builtin { name, at } => (at, false, Some(name.to_string())),
@@ -58,6 +78,8 @@ impl Runner<'_, '_> {
             name: proto.name.clone(),
             at,
             tail_calls,
+            tail_target_module,
+            tail_target_name,
             repeat_count: 1,
             from_host,
             via_builtin,
@@ -433,7 +455,7 @@ impl Runner<'_, '_> {
                                     cap,
                                     child_base,
                                     child_locals,
-                                    CallOrigin::Rin(span),
+                                    Some(CallOrigin::Rin(span)),
                                 );
                                 self.active_module = prev_mod;
                                 self.leave_depth();

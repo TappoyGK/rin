@@ -168,6 +168,7 @@ pub unsafe extern "C" fn rin_bind(
     }
     // SAFETY: Caller guarantees valid pointers.
     let m = unsafe { &mut *machine };
+    m.last_backtrace = None;
     // SAFETY: Caller guarantees valid NUL-terminated string.
     let Ok(key) = unsafe { CStr::from_ptr(name) }.to_str() else {
         return false;
@@ -195,6 +196,7 @@ pub unsafe extern "C" fn rin_eval(
     }
     // SAFETY: Caller guarantees valid pointers.
     let m = unsafe { &mut *machine };
+    m.last_backtrace = None;
     // SAFETY: Caller guarantees valid NUL-terminated string.
     let Ok(src) = unsafe { CStr::from_ptr(source) }.to_str() else {
         return RinEvalResult {
@@ -243,6 +245,7 @@ pub unsafe extern "C" fn rin_call(
     }
     // SAFETY: Caller guarantees valid pointers.
     let m = unsafe { &mut *machine };
+    m.last_backtrace = None;
     let Ok(name) = (unsafe { CStr::from_ptr(fn_name) }).to_str() else {
         return RinEvalResult {
             ok: false,
@@ -308,6 +311,7 @@ pub unsafe extern "C" fn rin_load(
     }
     // SAFETY: Caller guarantees valid pointers.
     let m = unsafe { &mut *machine };
+    m.last_backtrace = None;
     let (Ok(name), Ok(src)) = (
         unsafe { CStr::from_ptr(mod_name) }.to_str(),
         unsafe { CStr::from_ptr(source) }.to_str(),
@@ -359,6 +363,7 @@ pub unsafe extern "C" fn rin_call_in(
     }
     // SAFETY: Caller guarantees valid pointers.
     let m = unsafe { &mut *machine };
+    m.last_backtrace = None;
     let (Ok(mname), Ok(fname)) = (
         unsafe { CStr::from_ptr(mod_name) }.to_str(),
         unsafe { CStr::from_ptr(fn_name) }.to_str(),

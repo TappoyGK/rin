@@ -81,6 +81,8 @@ pub struct StackFrame {
     pub name: Option<String>,
     pub at: Span,
     pub tail_calls: usize,
+    pub tail_target_module: Option<String>,
+    pub tail_target_name: Option<String>,
     pub repeat_count: usize,
     pub from_host: bool,
     pub via_builtin: Option<String>,
@@ -93,6 +95,7 @@ pub struct Error {
 }
 
 impl Error {
+    pub fn module(&self) -> Option<&str>;
     pub fn backtrace(&self) -> &[StackFrame];
     pub fn omitted_frames(&self) -> usize;
     pub fn format_backtrace(&self) -> String;

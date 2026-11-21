@@ -797,6 +797,8 @@ fn runtime_and_limit_errors_record_call_backtrace() {
                 name: Some("inner".to_string()),
                 at: Span::new(2, 22),
                 tail_calls: 0,
+                tail_target_module: None,
+                tail_target_name: None,
                 repeat_count: 1,
                 from_host: false,
                 via_builtin: None,
@@ -806,6 +808,8 @@ fn runtime_and_limit_errors_record_call_backtrace() {
                 name: Some("outer".to_string()),
                 at: Span::new(3, 1),
                 tail_calls: 0,
+                tail_target_module: None,
+                tail_target_name: None,
                 repeat_count: 1,
                 from_host: false,
                 via_builtin: None,
@@ -830,10 +834,10 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(
         tail_err
             .to_string()
-            .contains("in f (at 3:1) [tail calls elided: 1]")
+            .contains("in g (tail-called from f at 3:1) [tail calls elided: 1]")
     );
 
-    // 2 & 3. Module names and host entry frames
+    // 2 & 3. Module names, tail-call across modules, and host entry frames
     let mut alloc = HeapAllocator;
     let mut m = Machine::new(Limits::default(), &mut alloc);
     m.load_module("ma", "(defn f (x) (/ x 0))").unwrap();
@@ -843,23 +847,41 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     )
     .unwrap();
     let mod_err = m.call_in("mb", "g", &[Value::Int(1)]).unwrap_err();
+    assert_eq!(mod_err.module(), Some("ma"));
+    assert!(mod_err.to_string().starts_with("ma 1:13: division by zero"));
     let mod_bt = mod_err.format_backtrace();
     assert!(mod_bt.contains("in ma.f (at 2:18)"));
     assert!(mod_bt.contains("in mb.f (at 3:18)"));
     assert!(mod_bt.contains("in mb.g (called from host)"));
     assert!(!mod_bt.contains("0:0"));
 
+    // Cross-module tail call: mb.f tail-calls ma.f
+    m.load_module(
+        "mc",
+        "(import ma)\n(defn f (x) (ma.f x))\n(defn g (x) (+ 1 (f x)))",
+    )
+    .unwrap();
+    let tail_mod_err = m.call_in("mc", "g", &[Value::Int(1)]).unwrap_err();
+    assert_eq!(tail_mod_err.module(), Some("ma"));
+    let tail_mod_rendered = tail_mod_err.to_string();
+    assert!(tail_mod_rendered.starts_with("ma 1:13: division by zero"));
+    assert!(
+        tail_mod_rendered
+            .contains("in ma.f (tail-called from mc.f at 3:18) [tail calls elided: 1]")
+    );
+    assert!(tail_mod_rendered.contains("in mc.g (called from host)"));
+
     // 4. Consecutive frame collapsing on TooDeep & middle omission on deep mutual recursion
     let deep_limits = Limits {
         steps: 100_000,
-        depth: 80,
+        depth: 66,
         memory_bytes: 16 * 1024 * 1024,
     };
     let deep_err = eval_with("(defn d (n) (+ 1 (d n)))\n(d 0)", &[], deep_limits).unwrap_err();
     assert_eq!(deep_err.kind, ErrorKind::TooDeep);
     assert_eq!(deep_err.backtrace().len(), 2);
-    assert_eq!(deep_err.backtrace()[0].repeat_count, 79);
-    assert!(deep_err.to_string().contains("in d (at 1:18) ×79"));
+    assert_eq!(deep_err.backtrace()[0].repeat_count, 65);
+    assert!(deep_err.to_string().contains("in d (at 1:18) ×65"));
 
     let mutual_src = "\
 (defn a (n) (+ 1 (b n)))
@@ -900,6 +922,14 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         assert!(bt_str.contains("in inner (at 2:22)"));
         assert!(bt_str.contains("in outer (at 3:1)"));
         crate::ffi::rin_res_free(&mut res);
+
+        // Early error returns clear previous backtrace
+        let bad_utf8 = [0xffu8, 0x00];
+        let mut bad_res = crate::ffi::rin_eval(cm, bad_utf8.as_ptr().cast());
+        assert!(!bad_res.ok);
+        assert!(crate::ffi::rin_last_backtrace(cm).is_null());
+        crate::ffi::rin_res_free(&mut bad_res);
+
         crate::ffi::rin_free(cm);
     }
 }

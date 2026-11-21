@@ -277,7 +277,6 @@ impl<'a> Machine<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) enum CallOrigin<'a> {
-    TopLevel,
     Rin(Span),
     Host,
     Builtin { name: &'a str, at: Span },
@@ -420,7 +419,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             Rc::from([]),
             base,
             chunk.local_count as usize,
-            CallOrigin::TopLevel,
+            None,
         );
         match res {
             Ok(val) => {
@@ -474,7 +473,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     captures,
                     base,
                     local_count,
-                    origin,
+                    Some(origin),
                 );
                 self.active_module = prev_mod;
                 self.leave_depth();
