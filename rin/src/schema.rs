@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Span};
 use crate::lexer::{Token, TokenKind, tokenize};
+use crate::parser::MAX_SYNTAX_NESTING;
 use crate::value::Value;
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,64 @@ pub enum TypeExpr {
         cases: Vec<(String, Option<TypeExpr>)>,
     },
     Ref(String),
+}
+
+impl Drop for TypeExpr {
+    fn drop(&mut self) {
+        if matches!(
+            self,
+            TypeExpr::Any
+                | TypeExpr::Void
+                | TypeExpr::I64
+                | TypeExpr::F64
+                | TypeExpr::Bool
+                | TypeExpr::Char
+                | TypeExpr::String
+                | TypeExpr::Ref(_)
+        ) {
+            return;
+        }
+        let mut work = Vec::new();
+        take_type_children(self, &mut work);
+        while let Some(mut child) = work.pop() {
+            take_type_children(&mut child, &mut work);
+        }
+    }
+}
+
+fn take_type_children(ty: &mut TypeExpr, out: &mut Vec<TypeExpr>) {
+    match ty {
+        TypeExpr::Any
+        | TypeExpr::Void
+        | TypeExpr::I64
+        | TypeExpr::F64
+        | TypeExpr::Bool
+        | TypeExpr::Char
+        | TypeExpr::String
+        | TypeExpr::Ref(_) => {}
+        TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
+            out.push(std::mem::replace(&mut **t, TypeExpr::Any));
+        }
+        TypeExpr::Result(a, b) => {
+            out.push(std::mem::replace(&mut **a, TypeExpr::Any));
+            out.push(std::mem::replace(&mut **b, TypeExpr::Any));
+        }
+        TypeExpr::Tuple(elems) => {
+            out.append(elems);
+        }
+        TypeExpr::Struct { fields, .. } => {
+            for (_, t) in std::mem::take(fields) {
+                out.push(t);
+            }
+        }
+        TypeExpr::Variant { cases, .. } => {
+            for (_, opt) in std::mem::take(cases) {
+                if let Some(t) = opt {
+                    out.push(t);
+                }
+            }
+        }
+    }
 }
 
 /// `Value` の構造を検証するコンパイル済み Rin スキーマ。
@@ -79,52 +138,49 @@ impl Schema {
     }
 
     fn validate_refs(&self, ty: &TypeExpr) -> Result<(), Error> {
-        match ty {
-            TypeExpr::Any
-            | TypeExpr::Void
-            | TypeExpr::I64
-            | TypeExpr::F64
-            | TypeExpr::Bool
-            | TypeExpr::Char
-            | TypeExpr::String => Ok(()),
-            TypeExpr::List(inner) | TypeExpr::Array(inner) | TypeExpr::Option(inner) => {
-                self.validate_refs(inner)
-            }
-            TypeExpr::Result(ok, err) => {
-                self.validate_refs(ok)?;
-                self.validate_refs(err)
-            }
-            TypeExpr::Tuple(items) => {
-                for item in items {
-                    self.validate_refs(item)?;
+        let mut stack = vec![ty];
+        while let Some(cur) = stack.pop() {
+            match cur {
+                TypeExpr::Any
+                | TypeExpr::Void
+                | TypeExpr::I64
+                | TypeExpr::F64
+                | TypeExpr::Bool
+                | TypeExpr::Char
+                | TypeExpr::String => {}
+                TypeExpr::List(inner) | TypeExpr::Array(inner) | TypeExpr::Option(inner) => {
+                    stack.push(inner);
                 }
-                Ok(())
-            }
-            TypeExpr::Struct { fields, .. } => {
-                for (_, fty) in fields {
-                    self.validate_refs(fty)?;
+                TypeExpr::Result(ok, err) => {
+                    stack.push(ok);
+                    stack.push(err);
                 }
-                Ok(())
-            }
-            TypeExpr::Variant { cases, .. } => {
-                for (_, payload) in cases {
-                    if let Some(pty) = payload {
-                        self.validate_refs(pty)?;
+                TypeExpr::Tuple(items) => {
+                    stack.extend(items.iter());
+                }
+                TypeExpr::Struct { fields, .. } => {
+                    for (_, fty) in fields {
+                        stack.push(fty);
                     }
                 }
-                Ok(())
-            }
-            TypeExpr::Ref(name) => {
-                if self.defs.contains_key(name) {
-                    Ok(())
-                } else {
-                    Err(Error::parse(
-                        Span::new(1, 1),
-                        format!("unknown schema name '{name}'"),
-                    ))
+                TypeExpr::Variant { cases, .. } => {
+                    for (_, payload) in cases {
+                        if let Some(pty) = payload {
+                            stack.push(pty);
+                        }
+                    }
+                }
+                TypeExpr::Ref(name) => {
+                    if !self.defs.contains_key(name) {
+                        return Err(Error::parse(
+                            Span::new(1, 1),
+                            format!("unknown schema name '{name}'"),
+                        ));
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// `value` がこのスキーマに適合するか検証する。
@@ -342,82 +398,239 @@ impl SchemaParser {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr, Error> {
-        let tok = self.bump();
-        match tok.kind {
-            TokenKind::Ident(name) => match name.as_str() {
-                "any" => Ok(TypeExpr::Any),
-                "void" => Ok(TypeExpr::Void),
-                "i64" => Ok(TypeExpr::I64),
-                "f64" => Ok(TypeExpr::F64),
-                "bool" => Ok(TypeExpr::Bool),
-                "char" => Ok(TypeExpr::Char),
-                "string" => Ok(TypeExpr::String),
-                _ => Ok(TypeExpr::Ref(name)),
+        enum SchemaFrame {
+            Unary(&'static str),
+            ResultOk,
+            ResultErr(Box<TypeExpr>),
+            Tuple {
+                head_span: Span,
+                elems: Vec<TypeExpr>,
             },
-            TokenKind::LParen => {
-                let (head, head_span) = self.expect_ident("schema constructor")?;
-                let ty = match head.as_str() {
-                    "list" => TypeExpr::List(Box::new(self.parse_type()?)),
-                    "array" => TypeExpr::Array(Box::new(self.parse_type()?)),
-                    "option" => TypeExpr::Option(Box::new(self.parse_type()?)),
-                    "result" => {
-                        let ok = self.parse_type()?;
-                        let err = self.parse_type()?;
-                        TypeExpr::Result(Box::new(ok), Box::new(err))
-                    }
-                    "tuple" => {
-                        let mut elems = Vec::new();
-                        while self.peek().kind != TokenKind::RParen {
-                            elems.push(self.parse_type()?);
-                        }
-                        if elems.len() < 2 {
-                            return Err(Error::parse(
-                                head_span,
-                                "'tuple' schema requires at least 2 element types",
-                            ));
-                        }
-                        TypeExpr::Tuple(elems)
-                    }
-                    "struct" | "open_struct" => {
-                        let open = head == "open_struct";
-                        let (name, _) = self.expect_ident("struct name")?;
-                        let mut fields = Vec::new();
-                        while self.peek().kind != TokenKind::RParen {
-                            self.expect(TokenKind::LParen, "field '('")?;
-                            let (fname, _) = self.expect_ident("field name")?;
-                            let fty = self.parse_type()?;
-                            self.expect(TokenKind::RParen, "')'")?;
-                            fields.push((fname, fty));
-                        }
-                        TypeExpr::Struct { name, fields, open }
-                    }
-                    "variant" => {
-                        let (name, _) = self.expect_ident("variant type name")?;
-                        let mut cases = Vec::new();
-                        while self.peek().kind != TokenKind::RParen {
-                            self.expect(TokenKind::LParen, "variant case '('")?;
-                            let (vname, _) = self.expect_ident("variant name")?;
-                            let payload = if self.peek().kind == TokenKind::RParen {
-                                None
-                            } else {
-                                Some(self.parse_type()?)
-                            };
-                            self.expect(TokenKind::RParen, "')'")?;
-                            cases.push((vname, payload));
-                        }
-                        TypeExpr::Variant { name, cases }
-                    }
-                    other => {
+            StructField {
+                name: String,
+                open: bool,
+                fields: Vec<(String, TypeExpr)>,
+                fname: String,
+            },
+            VariantCase {
+                name: String,
+                cases: Vec<(String, Option<TypeExpr>)>,
+                vname: String,
+            },
+        }
+        enum Next {
+            Start,
+            Have(TypeExpr),
+        }
+
+        let mut frames: Vec<SchemaFrame> = Vec::new();
+        let mut next = Next::Start;
+
+        'main: loop {
+            match next {
+                Next::Start => {
+                    let tok = self.bump();
+                    if frames.len() >= MAX_SYNTAX_NESTING {
                         return Err(Error::parse(
-                            head_span,
-                            format!("unknown schema constructor '{other}'"),
+                            tok.span,
+                            format!("schema nesting limit exceeded ({MAX_SYNTAX_NESTING})"),
                         ));
                     }
-                };
-                self.expect(TokenKind::RParen, "')'")?;
-                Ok(ty)
+                    match tok.kind {
+                        TokenKind::Ident(name) => {
+                            let ty = match name.as_str() {
+                                "any" => TypeExpr::Any,
+                                "void" => TypeExpr::Void,
+                                "i64" => TypeExpr::I64,
+                                "f64" => TypeExpr::F64,
+                                "bool" => TypeExpr::Bool,
+                                "char" => TypeExpr::Char,
+                                "string" => TypeExpr::String,
+                                _ => TypeExpr::Ref(name),
+                            };
+                            next = Next::Have(ty);
+                        }
+                        TokenKind::LParen => {
+                            let (head, head_span) = self.expect_ident("schema constructor")?;
+                            match head.as_str() {
+                                "list" => {
+                                    frames.push(SchemaFrame::Unary("list"));
+                                    next = Next::Start;
+                                }
+                                "array" => {
+                                    frames.push(SchemaFrame::Unary("array"));
+                                    next = Next::Start;
+                                }
+                                "option" => {
+                                    frames.push(SchemaFrame::Unary("option"));
+                                    next = Next::Start;
+                                }
+                                "result" => {
+                                    frames.push(SchemaFrame::ResultOk);
+                                    next = Next::Start;
+                                }
+                                "tuple" => {
+                                    if self.peek().kind == TokenKind::RParen {
+                                        return Err(Error::parse(
+                                            head_span,
+                                            "'tuple' schema requires at least 2 element types",
+                                        ));
+                                    }
+                                    frames.push(SchemaFrame::Tuple {
+                                        head_span,
+                                        elems: Vec::new(),
+                                    });
+                                    next = Next::Start;
+                                }
+                                "struct" | "open_struct" => {
+                                    let open = head == "open_struct";
+                                    let (name, _) = self.expect_ident("struct name")?;
+                                    if self.peek().kind == TokenKind::RParen {
+                                        self.bump();
+                                        next = Next::Have(TypeExpr::Struct {
+                                            name,
+                                            fields: Vec::new(),
+                                            open,
+                                        });
+                                    } else {
+                                        self.expect(TokenKind::LParen, "field '('")?;
+                                        let (fname, _) = self.expect_ident("field name")?;
+                                        frames.push(SchemaFrame::StructField {
+                                            name,
+                                            open,
+                                            fields: Vec::new(),
+                                            fname,
+                                        });
+                                        next = Next::Start;
+                                    }
+                                }
+                                "variant" => {
+                                    let (name, _) = self.expect_ident("variant type name")?;
+                                    let mut cases = Vec::new();
+                                    while self.peek().kind != TokenKind::RParen {
+                                        self.expect(TokenKind::LParen, "variant case '('")?;
+                                        let (vname, _) = self.expect_ident("variant name")?;
+                                        if self.peek().kind == TokenKind::RParen {
+                                            self.bump();
+                                            cases.push((vname, None));
+                                        } else {
+                                            frames.push(SchemaFrame::VariantCase {
+                                                name,
+                                                cases,
+                                                vname,
+                                            });
+                                            next = Next::Start;
+                                            continue 'main;
+                                        }
+                                    }
+                                    self.bump();
+                                    next = Next::Have(TypeExpr::Variant { name, cases });
+                                }
+                                other => {
+                                    return Err(Error::parse(
+                                        head_span,
+                                        format!("unknown schema constructor '{other}'"),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => return Err(Error::parse(tok.span, "expected type expression")),
+                    }
+                }
+                Next::Have(ty) => {
+                    let Some(frame) = frames.pop() else {
+                        return Ok(ty);
+                    };
+                    match frame {
+                        SchemaFrame::Unary(kind) => {
+                            self.expect(TokenKind::RParen, "')'")?;
+                            let wrapped = match kind {
+                                "list" => TypeExpr::List(Box::new(ty)),
+                                "array" => TypeExpr::Array(Box::new(ty)),
+                                "option" => TypeExpr::Option(Box::new(ty)),
+                                _ => unreachable!(),
+                            };
+                            next = Next::Have(wrapped);
+                        }
+                        SchemaFrame::ResultOk => {
+                            frames.push(SchemaFrame::ResultErr(Box::new(ty)));
+                            next = Next::Start;
+                        }
+                        SchemaFrame::ResultErr(ok) => {
+                            self.expect(TokenKind::RParen, "')'")?;
+                            next = Next::Have(TypeExpr::Result(ok, Box::new(ty)));
+                        }
+                        SchemaFrame::Tuple {
+                            head_span,
+                            mut elems,
+                        } => {
+                            elems.push(ty);
+                            if self.peek().kind == TokenKind::RParen {
+                                self.bump();
+                                if elems.len() < 2 {
+                                    return Err(Error::parse(
+                                        head_span,
+                                        "'tuple' schema requires at least 2 element types",
+                                    ));
+                                }
+                                next = Next::Have(TypeExpr::Tuple(elems));
+                            } else {
+                                frames.push(SchemaFrame::Tuple { head_span, elems });
+                                next = Next::Start;
+                            }
+                        }
+                        SchemaFrame::StructField {
+                            name,
+                            open,
+                            mut fields,
+                            fname,
+                        } => {
+                            self.expect(TokenKind::RParen, "')'")?;
+                            fields.push((fname, ty));
+                            if self.peek().kind == TokenKind::RParen {
+                                self.bump();
+                                next = Next::Have(TypeExpr::Struct { name, fields, open });
+                            } else {
+                                self.expect(TokenKind::LParen, "field '('")?;
+                                let (next_fname, _) = self.expect_ident("field name")?;
+                                frames.push(SchemaFrame::StructField {
+                                    name,
+                                    open,
+                                    fields,
+                                    fname: next_fname,
+                                });
+                                next = Next::Start;
+                            }
+                        }
+                        SchemaFrame::VariantCase {
+                            name,
+                            mut cases,
+                            vname,
+                        } => {
+                            self.expect(TokenKind::RParen, "')'")?;
+                            cases.push((vname, Some(ty)));
+                            while self.peek().kind != TokenKind::RParen {
+                                self.expect(TokenKind::LParen, "variant case '('")?;
+                                let (next_vname, _) = self.expect_ident("variant name")?;
+                                if self.peek().kind == TokenKind::RParen {
+                                    self.bump();
+                                    cases.push((next_vname, None));
+                                } else {
+                                    frames.push(SchemaFrame::VariantCase {
+                                        name,
+                                        cases,
+                                        vname: next_vname,
+                                    });
+                                    next = Next::Start;
+                                    continue 'main;
+                                }
+                            }
+                            self.bump();
+                            next = Next::Have(TypeExpr::Variant { name, cases });
+                        }
+                    }
+                }
             }
-            _ => Err(Error::parse(tok.span, "expected type expression")),
         }
     }
 }

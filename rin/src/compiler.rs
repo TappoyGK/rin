@@ -1,11 +1,14 @@
 //! AST をスロット解決付きのバイトコードチャンクへコンパイルする。
+//!
+//! 深い入れ子でもネイティブスタックを消費しないよう、明示的タスクスタックでコンパイルする。
 
 use std::rc::Rc;
 
-use crate::ast::{Expr, ExprKind, Pattern};
+use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
 use crate::bytecode::{Capture, Chunk, FnProto, Op, StructDesc, SymTable};
 use crate::error::{Error, Span};
 
+/// AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
 pub(crate) fn compile_program(
     exprs: &[Expr],
     module: Option<u32>,
@@ -19,13 +22,10 @@ pub(crate) fn compile_program(
     if exprs.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
     } else {
-        for (i, expr) in exprs.iter().enumerate() {
-            compiler.compile_expr(expr, false)?;
-            if i + 1 < exprs.len() {
-                compiler.emit(Op::Pop, expr.span);
-            }
-        }
-        compiler.flush_ticks();
+        let mut steps = Vec::new();
+        steps.push(Step::FlushTicks);
+        compiler.push_body(&mut steps, exprs, false);
+        compiler.run_steps(&mut steps)?;
     }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
@@ -87,13 +87,101 @@ impl Scope {
     }
 }
 
+enum Step<'a> {
+    Expr {
+        expr: &'a Expr,
+        is_tail: bool,
+    },
+    EmitFlushed {
+        op: Op,
+        span: Span,
+    },
+    EmitRaw {
+        op: Op,
+        span: Span,
+    },
+    FlushTicks,
+    BindLocal {
+        name: String,
+        span: Span,
+    },
+    RestoreLocals {
+        saved_locals_len: usize,
+        saved_next_slot: u32,
+    },
+    FinishStruct {
+        name: &'a str,
+        field_names: Vec<Rc<str>>,
+        span: Span,
+    },
+    FinishWith {
+        field_names: Vec<Rc<str>>,
+        span: Span,
+    },
+    FinishFn {
+        name: Option<String>,
+        arity: u32,
+        is_defn: bool,
+        span: Span,
+    },
+    IfAfterCond {
+        then_branch: &'a Expr,
+        else_branch: &'a Expr,
+        is_tail: bool,
+        cond_span: Span,
+        span: Span,
+    },
+    IfAfterThen {
+        j_else: usize,
+        else_branch: &'a Expr,
+        is_tail: bool,
+        span: Span,
+    },
+    PatchJump {
+        op_idx: usize,
+    },
+    WhenAfterCond {
+        body: &'a [Expr],
+        cond_span: Span,
+        span: Span,
+    },
+    WhenAfterBody {
+        j_end: usize,
+        span: Span,
+    },
+    MatchStartArms {
+        arms: &'a [MatchArm],
+        idx: usize,
+        end_jumps: Vec<usize>,
+        is_tail: bool,
+        span: Span,
+    },
+    MatchAfterArm {
+        arms: &'a [MatchArm],
+        idx: usize,
+        try_ip: usize,
+        saved_locals_len: usize,
+        saved_next_slot: u32,
+        end_jumps: Vec<usize>,
+        is_tail: bool,
+        span: Span,
+    },
+    ShortCircuitAfterArg {
+        is_and: bool,
+        args: &'a [Expr],
+        idx: usize,
+        jumps: Vec<usize>,
+        span: Span,
+    },
+}
+
 struct Compiler<'a> {
     scopes: Vec<Scope>,
     module: Option<u32>,
     syms: &'a mut SymTable,
 }
 
-impl Compiler<'_> {
+impl<'a> Compiler<'a> {
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.scopes.last_mut().unwrap().chunk
     }
@@ -124,8 +212,8 @@ impl Compiler<'_> {
         {
             return Ok(Op::GetCapture(cap_idx));
         }
-        let sym_id = self.syms.intern(name);
-        Ok(Op::GetGlobal(sym_id))
+        let id = self.syms.intern(name);
+        Ok(Op::GetGlobal(id))
     }
 
     fn resolve_capture(
@@ -137,72 +225,23 @@ impl Compiler<'_> {
         if scope_idx == 0 {
             return Ok(None);
         }
-        if let Some(pos) = self.scopes[scope_idx]
-            .captures
-            .iter()
-            .position(|(n, _)| n == name)
-        {
-            return Ok(Some(pos as u32));
-        }
         let parent = scope_idx - 1;
         if let Some(slot) = self.scopes[parent].find_local(name) {
-            return Ok(Some(self.scopes[scope_idx].find_or_add_capture(
-                name,
-                Capture::Local(slot),
-                span,
-            )?));
+            let cap_idx =
+                self.scopes[scope_idx].find_or_add_capture(name, Capture::Local(slot), span)?;
+            return Ok(Some(cap_idx));
         }
         if parent > 0
-            && let Some(up_idx) = self.resolve_capture(parent, name, span)?
+            && let Some(parent_cap) = self.resolve_capture(parent, name, span)?
         {
-            return Ok(Some(self.scopes[scope_idx].find_or_add_capture(
+            let cap_idx = self.scopes[scope_idx].find_or_add_capture(
                 name,
-                Capture::Upvalue(up_idx),
+                Capture::Upvalue(parent_cap),
                 span,
-            )?));
+            )?;
+            return Ok(Some(cap_idx));
         }
         Ok(None)
-    }
-
-    fn compile_body(&mut self, body: &[Expr], is_tail: bool) -> Result<(), Error> {
-        for (i, expr) in body.iter().enumerate() {
-            let last = i + 1 == body.len();
-            self.compile_expr(expr, is_tail && last)?;
-            if !last {
-                self.emit(Op::Pop, expr.span);
-            }
-        }
-        if !body.is_empty() {
-            self.flush_ticks();
-        }
-        Ok(())
-    }
-
-    fn compile_fn_proto(
-        &mut self,
-        name: Option<String>,
-        params: &[String],
-        body: &[Expr],
-        span: Span,
-    ) -> Result<Rc<FnProto>, Error> {
-        let arity =
-            u32::try_from(params.len()).map_err(|_| Error::parse(span, "too many parameters"))?;
-        let mut inner = Scope::new(self.module);
-        for p in params {
-            inner.alloc_slot(p.clone(), span)?;
-        }
-        self.scopes.push(inner);
-        self.compile_body(body, true)?;
-        let finished = self.scopes.pop().unwrap();
-        let captures: Vec<Capture> = finished.captures.into_iter().map(|(_, c)| c).collect();
-        Ok(Rc::new(FnProto {
-            name,
-            module: finished.module,
-            arity,
-            local_count: finished.max_slots,
-            captures,
-            chunk: finished.chunk,
-        }))
     }
 
     fn patch_jump(&mut self, op_idx: usize, target: usize) {
@@ -216,7 +255,271 @@ impl Compiler<'_> {
         }
     }
 
-    fn compile_expr(&mut self, expr: &Expr, is_tail: bool) -> Result<(), Error> {
+    fn push_body(&self, steps: &mut Vec<Step<'a>>, body: &'a [Expr], is_tail: bool) {
+        if body.is_empty() {
+            steps.push(Step::EmitRaw {
+                op: Op::Void,
+                span: Span::default(),
+            });
+            return;
+        }
+        steps.push(Step::FlushTicks);
+        for (i, expr) in body.iter().enumerate().rev() {
+            let last = i + 1 == body.len();
+            if !last {
+                steps.push(Step::EmitFlushed {
+                    op: Op::Pop,
+                    span: expr.span,
+                });
+            }
+            steps.push(Step::Expr {
+                expr,
+                is_tail: last && is_tail,
+            });
+        }
+    }
+
+    fn run_steps(&mut self, steps: &mut Vec<Step<'a>>) -> Result<(), Error> {
+        while let Some(step) = steps.pop() {
+            match step {
+                Step::Expr { expr, is_tail } => self.step_expr(expr, is_tail, steps)?,
+                Step::EmitFlushed { op, span } => {
+                    self.emit(op, span);
+                }
+                Step::EmitRaw { op, span } => {
+                    self.chunk().emit(op, span);
+                }
+                Step::FlushTicks => {
+                    self.flush_ticks();
+                }
+                Step::BindLocal { name, span } => {
+                    let slot = self.scopes.last_mut().unwrap().alloc_slot(name, span)?;
+                    self.chunk().emit(Op::SetLocal(slot), span);
+                }
+                Step::RestoreLocals {
+                    saved_locals_len,
+                    saved_next_slot,
+                } => {
+                    let scope = self.scopes.last_mut().unwrap();
+                    scope.locals.truncate(saved_locals_len);
+                    scope.next_slot = saved_next_slot;
+                }
+                Step::FinishStruct {
+                    name,
+                    field_names,
+                    span,
+                } => {
+                    let s_idx = self.chunk().add_struct(StructDesc {
+                        name: Rc::from(name),
+                        fields: field_names,
+                    });
+                    self.emit(Op::MakeStruct(s_idx), span);
+                }
+                Step::FinishWith { field_names, span } => {
+                    let s_idx = self.chunk().add_struct(StructDesc {
+                        name: Rc::from(""),
+                        fields: field_names,
+                    });
+                    self.emit(Op::WithFinish(s_idx), span);
+                }
+                Step::FinishFn {
+                    name,
+                    arity,
+                    is_defn,
+                    span,
+                } => {
+                    let finished = self.scopes.pop().unwrap();
+                    let captures: Vec<Capture> =
+                        finished.captures.into_iter().map(|(_, c)| c).collect();
+                    let proto = Rc::new(FnProto {
+                        name: name.clone(),
+                        module: finished.module,
+                        arity,
+                        local_count: finished.max_slots,
+                        captures,
+                        chunk: finished.chunk,
+                    });
+                    let p_idx = self.chunk().add_proto(proto);
+                    if is_defn {
+                        let n_idx = self.syms.intern(name.as_deref().unwrap());
+                        self.emit(Op::DefFn(n_idx, p_idx), span);
+                    } else {
+                        self.emit(Op::MakeClosure(p_idx), span);
+                    }
+                }
+                Step::IfAfterCond {
+                    then_branch,
+                    else_branch,
+                    is_tail,
+                    cond_span,
+                    span,
+                } => {
+                    let j_else = self.emit(Op::JumpIfFalse(0), cond_span);
+                    steps.push(Step::IfAfterThen {
+                        j_else,
+                        else_branch,
+                        is_tail,
+                        span,
+                    });
+                    steps.push(Step::Expr {
+                        expr: then_branch,
+                        is_tail,
+                    });
+                }
+                Step::IfAfterThen {
+                    j_else,
+                    else_branch,
+                    is_tail,
+                    span,
+                } => {
+                    let j_end = self.emit(Op::Jump(0), span);
+                    let else_ip = self.chunk().code.len();
+                    self.patch_jump(j_else, else_ip);
+                    steps.push(Step::PatchJump { op_idx: j_end });
+                    steps.push(Step::FlushTicks);
+                    steps.push(Step::Expr {
+                        expr: else_branch,
+                        is_tail,
+                    });
+                }
+                Step::PatchJump { op_idx } => {
+                    let end_ip = self.chunk().code.len();
+                    self.patch_jump(op_idx, end_ip);
+                }
+                Step::WhenAfterCond {
+                    body,
+                    cond_span,
+                    span,
+                } => {
+                    let j_end = self.emit(Op::JumpIfFalse(0), cond_span);
+                    steps.push(Step::WhenAfterBody { j_end, span });
+                    self.push_body(steps, body, false);
+                }
+                Step::WhenAfterBody { j_end, span } => {
+                    self.emit(Op::Pop, span);
+                    let end_ip = self.chunk().code.len();
+                    self.patch_jump(j_end, end_ip);
+                    self.chunk().emit(Op::Void, span);
+                }
+                Step::MatchStartArms {
+                    arms,
+                    idx,
+                    end_jumps,
+                    is_tail,
+                    span,
+                } => {
+                    if idx >= arms.len() {
+                        self.chunk().emit(Op::Pop, span);
+                        self.emit(Op::MatchFail, span);
+                        let end_ip = self.chunk().code.len();
+                        for j in end_jumps {
+                            self.patch_jump(j, end_ip);
+                        }
+                        continue;
+                    }
+                    let arm = &arms[idx];
+                    let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
+                    let try_ip = self.emit(
+                        Op::TryMatch {
+                            pat_idx,
+                            fail_ip: 0,
+                        },
+                        arm.span,
+                    );
+                    let saved_locals_len = self.scopes.last().unwrap().locals.len();
+                    let saved_next_slot = self.scopes.last().unwrap().next_slot;
+                    if let Some(bind_name) = pattern_binding(&arm.pattern) {
+                        let slot = self
+                            .scopes
+                            .last_mut()
+                            .unwrap()
+                            .alloc_slot(bind_name, arm.span)?;
+                        self.chunk().emit(Op::SetLocal(slot), arm.span);
+                    }
+                    self.chunk().emit(Op::Pop, arm.span);
+                    steps.push(Step::MatchAfterArm {
+                        arms,
+                        idx,
+                        try_ip,
+                        saved_locals_len,
+                        saved_next_slot,
+                        end_jumps,
+                        is_tail,
+                        span,
+                    });
+                    self.push_body(steps, &arm.body, is_tail);
+                }
+                Step::MatchAfterArm {
+                    arms,
+                    idx,
+                    try_ip,
+                    saved_locals_len,
+                    saved_next_slot,
+                    mut end_jumps,
+                    is_tail,
+                    span,
+                } => {
+                    let arm = &arms[idx];
+                    let scope = self.scopes.last_mut().unwrap();
+                    scope.locals.truncate(saved_locals_len);
+                    scope.next_slot = saved_next_slot;
+                    end_jumps.push(self.emit(Op::Jump(0), arm.span));
+                    let fail_ip = self.chunk().code.len();
+                    self.patch_jump(try_ip, fail_ip);
+                    steps.push(Step::MatchStartArms {
+                        arms,
+                        idx: idx + 1,
+                        end_jumps,
+                        is_tail,
+                        span,
+                    });
+                }
+                Step::ShortCircuitAfterArg {
+                    is_and,
+                    args,
+                    idx,
+                    mut jumps,
+                    span,
+                } => {
+                    let arg_span = args[idx].span;
+                    let j = if is_and {
+                        self.emit(Op::JumpIfFalsePeek(0), arg_span)
+                    } else {
+                        self.emit(Op::JumpIfTruePeek(0), arg_span)
+                    };
+                    jumps.push(j);
+                    let next_idx = idx + 1;
+                    if next_idx < args.len() {
+                        steps.push(Step::ShortCircuitAfterArg {
+                            is_and,
+                            args,
+                            idx: next_idx,
+                            jumps,
+                            span,
+                        });
+                        steps.push(Step::Expr {
+                            expr: &args[next_idx],
+                            is_tail: false,
+                        });
+                    } else {
+                        self.chunk().emit(Op::Bool(is_and), span);
+                        let end_ip = self.chunk().code.len();
+                        for jmp in jumps {
+                            self.patch_jump(jmp, end_ip);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn step_expr(
+        &mut self,
+        expr: &'a Expr,
+        is_tail: bool,
+        steps: &mut Vec<Step<'a>>,
+    ) -> Result<(), Error> {
         let span = expr.span;
         self.scopes
             .last_mut()
@@ -262,207 +565,291 @@ impl Compiler<'_> {
                 if count == 0 {
                     self.emit(Op::EmptyList, span);
                 } else {
-                    for item in items {
-                        self.compile_expr(item, false)?;
+                    steps.push(Step::EmitFlushed {
+                        op: Op::MakeList(count),
+                        span,
+                    });
+                    for item in items.iter().rev() {
+                        steps.push(Step::Expr {
+                            expr: item,
+                            is_tail: false,
+                        });
                     }
-                    self.emit(Op::MakeList(count), span);
                 }
             }
             ExprKind::Tuple(items) => {
                 let count = u32::try_from(items.len())
                     .map_err(|_| Error::parse(span, "tuple literal too large"))?;
-                for item in items {
-                    self.compile_expr(item, false)?;
+                steps.push(Step::EmitFlushed {
+                    op: Op::MakeTuple(count),
+                    span,
+                });
+                for item in items.iter().rev() {
+                    steps.push(Step::Expr {
+                        expr: item,
+                        is_tail: false,
+                    });
                 }
-                self.emit(Op::MakeTuple(count), span);
             }
             ExprKind::Struct { name, fields } => {
-                let mut field_names = Vec::with_capacity(fields.len());
-                for (fname, fexpr) in fields {
-                    self.compile_expr(fexpr, false)?;
-                    field_names.push(Rc::from(fname.as_str()));
-                }
-                let s_idx = self.chunk().add_struct(StructDesc {
-                    name: Rc::from(name.as_str()),
-                    fields: field_names,
+                let field_names: Vec<Rc<str>> =
+                    fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
+                steps.push(Step::FinishStruct {
+                    name,
+                    field_names,
+                    span,
                 });
-                self.emit(Op::MakeStruct(s_idx), span);
+                for (_, fexpr) in fields.iter().rev() {
+                    steps.push(Step::Expr {
+                        expr: fexpr,
+                        is_tail: false,
+                    });
+                }
             }
             ExprKind::With { target, fields } => {
-                self.compile_expr(target, false)?;
-                self.emit(Op::WithCheckStruct, span);
-                let mut field_names = Vec::with_capacity(fields.len());
-                for (idx, (fname, fexpr)) in fields.iter().enumerate() {
+                let field_names: Vec<Rc<str>> =
+                    fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
+                steps.push(Step::FinishWith { field_names, span });
+                for (idx, (fname, fexpr)) in fields.iter().enumerate().rev() {
                     let f_idx = self.chunk().add_string(fname);
-                    self.emit(Op::WithCheckField(f_idx, idx as u32), span);
-                    self.compile_expr(fexpr, false)?;
-                    field_names.push(Rc::from(fname.as_str()));
+                    steps.push(Step::Expr {
+                        expr: fexpr,
+                        is_tail: false,
+                    });
+                    steps.push(Step::EmitFlushed {
+                        op: Op::WithCheckField(f_idx, idx as u32),
+                        span,
+                    });
                 }
-                let s_idx = self.chunk().add_struct(StructDesc {
-                    name: Rc::from(""),
-                    fields: field_names,
+                steps.push(Step::EmitFlushed {
+                    op: Op::WithCheckStruct,
+                    span,
                 });
-                self.emit(Op::WithFinish(s_idx), span);
+                steps.push(Step::Expr {
+                    expr: target,
+                    is_tail: false,
+                });
             }
             ExprKind::Variant {
                 type_name,
                 variant,
                 data,
             } => {
-                let has_data = data.is_some();
-                if let Some(d) = data {
-                    self.compile_expr(d, false)?;
-                }
                 let t_idx = self.chunk().add_string(type_name);
                 let v_idx = self.chunk().add_string(variant);
-                self.emit(
-                    Op::MakeVariant {
-                        type_name: t_idx,
-                        variant: v_idx,
-                        has_data,
-                    },
-                    span,
-                );
+                let op = Op::MakeVariant {
+                    type_name: t_idx,
+                    variant: v_idx,
+                    has_data: data.is_some(),
+                };
+                if let Some(d) = data {
+                    steps.push(Step::EmitFlushed { op, span });
+                    steps.push(Step::Expr {
+                        expr: d,
+                        is_tail: false,
+                    });
+                } else {
+                    self.emit(op, span);
+                }
             }
             ExprKind::Some(inner) => {
-                self.compile_expr(inner, false)?;
-                self.emit(Op::MakeSome, span);
+                steps.push(Step::EmitFlushed {
+                    op: Op::MakeSome,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: inner,
+                    is_tail: false,
+                });
             }
             ExprKind::Ok(inner) => {
-                self.compile_expr(inner, false)?;
-                self.emit(Op::MakeOk, span);
+                steps.push(Step::EmitFlushed {
+                    op: Op::MakeOk,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: inner,
+                    is_tail: false,
+                });
             }
             ExprKind::Err(inner) => {
-                self.compile_expr(inner, false)?;
-                self.emit(Op::MakeErr, span);
+                steps.push(Step::EmitFlushed {
+                    op: Op::MakeErr,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: inner,
+                    is_tail: false,
+                });
             }
             ExprKind::Field { target, field } => {
-                self.compile_expr(target, false)?;
                 let f_idx = self.chunk().add_string(field);
-                self.emit(Op::GetField(f_idx), span);
+                steps.push(Step::EmitFlushed {
+                    op: Op::GetField(f_idx),
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: target,
+                    is_tail: false,
+                });
             }
             ExprKind::Index { target, index } => {
-                self.compile_expr(target, false)?;
-                self.compile_expr(index, false)?;
-                self.emit(Op::GetIndex, span);
+                steps.push(Step::EmitFlushed {
+                    op: Op::GetIndex,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: index,
+                    is_tail: false,
+                });
+                steps.push(Step::Expr {
+                    expr: target,
+                    is_tail: false,
+                });
             }
             ExprKind::Def { name, value } => {
-                self.compile_expr(value, false)?;
                 let n_idx = self.syms.intern(name);
-                self.emit(Op::DefGlobal(n_idx), span);
+                steps.push(Step::EmitFlushed {
+                    op: Op::DefGlobal(n_idx),
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: value,
+                    is_tail: false,
+                });
             }
             ExprKind::Defn { name, params, body } => {
-                let proto = self.compile_fn_proto(Some(name.clone()), params, body, span)?;
-                let p_idx = self.chunk().add_proto(proto);
-                let n_idx = self.syms.intern(name);
-                self.emit(Op::DefFn(n_idx, p_idx), span);
+                let arity = u32::try_from(params.len())
+                    .map_err(|_| Error::parse(span, "too many parameters"))?;
+                let mut inner = Scope::new(self.module);
+                for p in params {
+                    inner.alloc_slot(p.clone(), span)?;
+                }
+                self.scopes.push(inner);
+                steps.push(Step::FinishFn {
+                    name: Some(name.clone()),
+                    arity,
+                    is_defn: true,
+                    span,
+                });
+                self.push_body(steps, body, true);
             }
             ExprKind::Fn { params, body } => {
-                let proto = self.compile_fn_proto(None, params, body, span)?;
-                let p_idx = self.chunk().add_proto(proto);
-                self.emit(Op::MakeClosure(p_idx), span);
+                let arity = u32::try_from(params.len())
+                    .map_err(|_| Error::parse(span, "too many parameters"))?;
+                let mut inner = Scope::new(self.module);
+                for p in params {
+                    inner.alloc_slot(p.clone(), span)?;
+                }
+                self.scopes.push(inner);
+                steps.push(Step::FinishFn {
+                    name: None,
+                    arity,
+                    is_defn: false,
+                    span,
+                });
+                self.push_body(steps, body, true);
             }
             ExprKind::Let { bindings, body } => {
                 let saved_locals_len = self.scopes.last().unwrap().locals.len();
                 let saved_next_slot = self.scopes.last().unwrap().next_slot;
-                for (name, val_expr) in bindings {
-                    self.compile_expr(val_expr, false)?;
-                    let slot = self
-                        .scopes
-                        .last_mut()
-                        .unwrap()
-                        .alloc_slot(name.clone(), val_expr.span)?;
-                    self.chunk().emit(Op::SetLocal(slot), val_expr.span);
+                steps.push(Step::RestoreLocals {
+                    saved_locals_len,
+                    saved_next_slot,
+                });
+                self.push_body(steps, body, is_tail);
+                for (name, val_expr) in bindings.iter().rev() {
+                    steps.push(Step::BindLocal {
+                        name: name.clone(),
+                        span: val_expr.span,
+                    });
+                    steps.push(Step::Expr {
+                        expr: val_expr,
+                        is_tail: false,
+                    });
                 }
-                self.compile_body(body, is_tail)?;
-                let scope = self.scopes.last_mut().unwrap();
-                scope.locals.truncate(saved_locals_len);
-                scope.next_slot = saved_next_slot;
             }
             ExprKind::If {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                self.compile_expr(cond, false)?;
-                let j_else = self.emit(Op::JumpIfFalse(0), cond.span);
-                self.compile_expr(then_branch, is_tail)?;
-                let j_end = self.emit(Op::Jump(0), span);
-                let else_ip = self.chunk().code.len();
-                self.patch_jump(j_else, else_ip);
-                self.compile_expr(else_branch, is_tail)?;
-                self.flush_ticks();
-                let end_ip = self.chunk().code.len();
-                self.patch_jump(j_end, end_ip);
+                steps.push(Step::IfAfterCond {
+                    then_branch,
+                    else_branch,
+                    is_tail,
+                    cond_span: cond.span,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: cond,
+                    is_tail: false,
+                });
             }
             ExprKind::When { cond, body } => {
-                self.compile_expr(cond, false)?;
-                let j_end = self.emit(Op::JumpIfFalse(0), cond.span);
-                self.compile_body(body, false)?;
-                self.emit(Op::Pop, span);
-                let end_ip = self.chunk().code.len();
-                self.patch_jump(j_end, end_ip);
-                self.chunk().emit(Op::Void, span);
+                steps.push(Step::WhenAfterCond {
+                    body,
+                    cond_span: cond.span,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: cond,
+                    is_tail: false,
+                });
             }
             ExprKind::Match { scrutinee, arms } => {
-                self.compile_expr(scrutinee, false)?;
-                let mut end_jumps = Vec::with_capacity(arms.len());
-                for arm in arms {
-                    let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
-                    let try_ip = self.emit(
-                        Op::TryMatch {
-                            pat_idx,
-                            fail_ip: 0,
-                        },
-                        arm.span,
-                    );
-                    let saved_locals_len = self.scopes.last().unwrap().locals.len();
-                    let saved_next_slot = self.scopes.last().unwrap().next_slot;
-                    if let Some(bind_name) = pattern_binding(&arm.pattern) {
-                        let slot = self
-                            .scopes
-                            .last_mut()
-                            .unwrap()
-                            .alloc_slot(bind_name, arm.span)?;
-                        self.chunk().emit(Op::SetLocal(slot), arm.span);
-                    }
-                    self.chunk().emit(Op::Pop, arm.span);
-                    self.compile_body(&arm.body, is_tail)?;
-                    let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
-                    scope.next_slot = saved_next_slot;
-                    end_jumps.push(self.emit(Op::Jump(0), arm.span));
-                    let fail_ip = self.chunk().code.len();
-                    self.patch_jump(try_ip, fail_ip);
-                }
-                self.chunk().emit(Op::Pop, span);
-                self.emit(Op::MatchFail, span);
-                let end_ip = self.chunk().code.len();
-                for j in end_jumps {
-                    self.patch_jump(j, end_ip);
-                }
+                steps.push(Step::MatchStartArms {
+                    arms,
+                    idx: 0,
+                    end_jumps: Vec::with_capacity(arms.len()),
+                    is_tail,
+                    span,
+                });
+                steps.push(Step::Expr {
+                    expr: scrutinee,
+                    is_tail: false,
+                });
             }
             ExprKind::Call { callee, args } => {
-                if let ExprKind::Ident(op) = &callee.kind {
-                    if op == "and" {
-                        return self.compile_short_circuit(true, args, span);
+                if let ExprKind::Ident(op) = &callee.kind
+                    && (op == "and" || op == "or")
+                {
+                    let is_and = op == "and";
+                    if args.is_empty() {
+                        self.emit(if is_and { Op::And } else { Op::Or }, span);
+                    } else {
+                        steps.push(Step::ShortCircuitAfterArg {
+                            is_and,
+                            args,
+                            idx: 0,
+                            jumps: Vec::with_capacity(args.len()),
+                            span,
+                        });
+                        steps.push(Step::Expr {
+                            expr: &args[0],
+                            is_tail: false,
+                        });
                     }
-                    if op == "or" {
-                        return self.compile_short_circuit(false, args, span);
-                    }
+                    return Ok(());
                 }
                 let argc = u32::try_from(args.len())
                     .map_err(|_| Error::parse(span, "too many arguments"))?;
-                self.compile_expr(callee, false)?;
-                for arg in args {
-                    self.compile_expr(arg, false)?;
-                }
                 let call_op = if is_tail {
                     Op::TailCall(argc)
                 } else {
                     Op::Call(argc)
                 };
-                self.emit(call_op, span);
+                steps.push(Step::EmitFlushed { op: call_op, span });
+                for arg in args.iter().rev() {
+                    steps.push(Step::Expr {
+                        expr: arg,
+                        is_tail: false,
+                    });
+                }
+                steps.push(Step::Expr {
+                    expr: callee,
+                    is_tail: false,
+                });
             }
             ExprKind::Import { name } => {
                 let idx = self.syms.intern(name);
@@ -472,35 +859,6 @@ impl Compiler<'_> {
                 let idx = self.chunk().add_exports(names.clone());
                 self.emit(Op::Export(idx), span);
             }
-        }
-        Ok(())
-    }
-
-    fn compile_short_circuit(
-        &mut self,
-        is_and: bool,
-        args: &[Expr],
-        span: Span,
-    ) -> Result<(), Error> {
-        if args.is_empty() {
-            let op = if is_and { Op::And } else { Op::Or };
-            self.emit(op, span);
-            return Ok(());
-        }
-        let mut jumps = Vec::with_capacity(args.len());
-        for arg in args {
-            self.compile_expr(arg, false)?;
-            let j = if is_and {
-                self.emit(Op::JumpIfFalsePeek(0), arg.span)
-            } else {
-                self.emit(Op::JumpIfTruePeek(0), arg.span)
-            };
-            jumps.push(j);
-        }
-        self.chunk().emit(Op::Bool(is_and), span);
-        let end_ip = self.chunk().code.len();
-        for j in jumps {
-            self.patch_jump(j, end_ip);
         }
         Ok(())
     }

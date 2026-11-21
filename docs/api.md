@@ -63,7 +63,7 @@ pub trait Allocator {
 ```rust
 pub struct Limits {
     pub steps: usize,        // 既定: 100_000
-    pub depth: usize,        // 既定: 200
+    pub depth: usize,        // 既定: 200（大きくするとネイティブスタック容量に依存）
     pub memory_bytes: usize, // 既定: 16 * 1024 * 1024
 }
 

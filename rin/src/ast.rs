@@ -14,6 +14,83 @@ impl Expr {
     }
 }
 
+impl Drop for Expr {
+    fn drop(&mut self) {
+        let mut work = Vec::new();
+        take_expr_children(&mut self.kind, &mut work);
+        while let Some(mut child) = work.pop() {
+            take_expr_children(&mut child.kind, &mut work);
+        }
+    }
+}
+
+fn take_expr_children(kind: &mut ExprKind, out: &mut Vec<Expr>) {
+    match std::mem::replace(kind, ExprKind::None) {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Char(_)
+        | ExprKind::Str(_)
+        | ExprKind::None
+        | ExprKind::Ident(_)
+        | ExprKind::Import { .. }
+        | ExprKind::Export { .. } => {}
+        ExprKind::List(items) | ExprKind::Tuple(items) => out.extend(items),
+        ExprKind::Struct { fields, .. } => {
+            for (_, v) in fields {
+                out.push(v);
+            }
+        }
+        ExprKind::Variant { data: Some(d), .. }
+        | ExprKind::Some(d)
+        | ExprKind::Ok(d)
+        | ExprKind::Err(d)
+        | ExprKind::Field { target: d, .. }
+        | ExprKind::Def { value: d, .. } => out.push(*d),
+        ExprKind::Variant { data: None, .. } => {}
+        ExprKind::Index { target, index } => {
+            out.push(*target);
+            out.push(*index);
+        }
+        ExprKind::With { target, fields } => {
+            out.push(*target);
+            for (_, v) in fields {
+                out.push(v);
+            }
+        }
+        ExprKind::Defn { body, .. } | ExprKind::Fn { body, .. } => out.extend(body),
+        ExprKind::Let { bindings, body } => {
+            for (_, v) in bindings {
+                out.push(v);
+            }
+            out.extend(body);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            out.push(*cond);
+            out.push(*then_branch);
+            out.push(*else_branch);
+        }
+        ExprKind::When { cond, body } => {
+            out.push(*cond);
+            out.extend(body);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            out.push(*scrutinee);
+            for arm in arms {
+                out.extend(arm.body);
+            }
+        }
+        ExprKind::Call { callee, args } => {
+            out.push(*callee);
+            out.extend(args);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     Int(i64),
