@@ -132,15 +132,33 @@ mod tests {
         );
         assert_eq!(eval("(car [10, 20])").unwrap(), eval("some(10)").unwrap());
         assert_eq!(eval("(car [])").unwrap(), Value::None);
-        assert_eq!(eval("(cdr [10, 20, 30])").unwrap(), eval("[20, 30]").unwrap());
+        assert_eq!(
+            eval("(cdr [10, 20, 30])").unwrap(),
+            eval("[20, 30]").unwrap()
+        );
         assert_eq!(eval("(cdr [])").unwrap(), eval("[]").unwrap());
         assert_eq!(eval("(last [10, 20])").unwrap(), eval("some(20)").unwrap());
         assert_eq!(eval("(get [10, 20] 5)").unwrap(), Value::None);
-        assert_eq!(eval("(reverse [1, 2, 3])").unwrap(), eval("[3, 2, 1]").unwrap());
-        assert_eq!(eval("(take [1, 2, 3, 4] 2)").unwrap(), eval("[1, 2]").unwrap());
-        assert_eq!(eval("(drop [1, 2, 3, 4] 2)").unwrap(), eval("[3, 4]").unwrap());
-        assert_eq!(eval("(slice [10, 20, 30, 40] 1 3)").unwrap(), eval("[20, 30]").unwrap());
-        assert_eq!(eval("(flatten [[1, 2], [3]])").unwrap(), eval("[1, 2, 3]").unwrap());
+        assert_eq!(
+            eval("(reverse [1, 2, 3])").unwrap(),
+            eval("[3, 2, 1]").unwrap()
+        );
+        assert_eq!(
+            eval("(take [1, 2, 3, 4] 2)").unwrap(),
+            eval("[1, 2]").unwrap()
+        );
+        assert_eq!(
+            eval("(drop [1, 2, 3, 4] 2)").unwrap(),
+            eval("[3, 4]").unwrap()
+        );
+        assert_eq!(
+            eval("(slice [10, 20, 30, 40] 1 3)").unwrap(),
+            eval("[20, 30]").unwrap()
+        );
+        assert_eq!(
+            eval("(flatten [[1, 2], [3]])").unwrap(),
+            eval("[1, 2, 3]").unwrap()
+        );
         assert_eq!(
             eval("(flat_map (fn (x) [x, (* x 10)]) [1, 2])").unwrap(),
             eval("[1, 10, 2, 20]").unwrap()
@@ -150,8 +168,14 @@ mod tests {
             eval("(find (fn (x) (> x 3)) [1, 4, 5])").unwrap(),
             eval("some(4)").unwrap()
         );
-        assert_eq!(eval("(any (fn (x) (> x 3)) [1, 4])").unwrap(), Value::Bool(true));
-        assert_eq!(eval("(all (fn (x) (> x 0)) [1, 2])").unwrap(), Value::Bool(true));
+        assert_eq!(
+            eval("(any (fn (x) (> x 3)) [1, 4])").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval("(all (fn (x) (> x 0)) [1, 2])").unwrap(),
+            Value::Bool(true)
+        );
         assert_eq!(
             eval("(zip [1, 2] [\"a\", \"b\", \"c\"])").unwrap(),
             eval("[(1, \"a\"), (2, \"b\")]").unwrap()
@@ -160,12 +184,18 @@ mod tests {
             eval("(enumerate [\"a\", \"b\"])").unwrap(),
             eval("[(0, \"a\"), (1, \"b\")]").unwrap()
         );
-        assert_eq!(eval("(sort [3, 1, 2])").unwrap(), eval("[1, 2, 3]").unwrap());
+        assert_eq!(
+            eval("(sort [3, 1, 2])").unwrap(),
+            eval("[1, 2, 3]").unwrap()
+        );
         assert_eq!(
             eval("(sort_by (fn (x) (- 0 x)) [1, 3, 2])").unwrap(),
             eval("[3, 2, 1]").unwrap()
         );
-        assert_eq!(eval("(unique [1, 2, 1, 3, 2])").unwrap(), eval("[1, 2, 3]").unwrap());
+        assert_eq!(
+            eval("(unique [1, 2, 1, 3, 2])").unwrap(),
+            eval("[1, 2, 3]").unwrap()
+        );
         assert_eq!(eval("(list 1 2 3)").unwrap(), eval("[1, 2, 3]").unwrap());
         let rec_map = r#"
             (defn my_map (f xs)
@@ -201,8 +231,8 @@ mod tests {
     fn arena_exhaustion_returns_too_much_memory() {
         let mut tiny = vec![0u8; 256];
         let mut arena = ArenaAllocator::new(&mut tiny);
-        let err = eval_with_allocator("(range 0 20)", &[], Limits::default(), &mut arena)
-            .unwrap_err();
+        let err =
+            eval_with_allocator("(range 0 20)", &[], Limits::default(), &mut arena).unwrap_err();
         assert_eq!(err.kind, ErrorKind::TooMuchMemory);
     }
 
@@ -341,22 +371,16 @@ mod tests {
         )
         .unwrap();
 
-        let ok_val = eval(
-            r#"[Card { id: "strike", cost: 1, element: Element.Fire }]"#,
-        )
-        .unwrap();
+        let ok_val = eval(r#"[Card { id: "strike", cost: 1, element: Element.Fire }]"#).unwrap();
         assert!(s.check(&ok_val).is_ok());
 
-        let extra_field = eval(
-            r#"[Card { id: "strike", cost: 1, element: Element.Fire, rarity: 2 }]"#,
-        )
-        .unwrap();
+        let extra_field =
+            eval(r#"[Card { id: "strike", cost: 1, element: Element.Fire, rarity: 2 }]"#).unwrap();
         assert!(s.check(&extra_field).is_err());
 
-        let open_s = Schema::parse(
-            "(list (open_struct Card (id string) (cost i64) (element any)))",
-        )
-        .unwrap();
+        let open_s =
+            Schema::parse("(list (open_struct Card (id string) (cost i64) (element any)))")
+                .unwrap();
         assert!(open_s.check(&extra_field).is_ok());
 
         let rec = Schema::parse(
@@ -527,11 +551,12 @@ mod tests {
         assert!(machine.eval("(helper 1)").is_err());
 
         // `ember.on_play` calls `base.deal_damage`, which calls `base`'s private `helper`
-        let res = machine.call_in("ember", "on_play", &[Value::Int(1)]).unwrap();
-        let schema = Schema::parse(
-            "(list (struct Action (kind string) (target i64) (amount i64)))",
-        )
-        .unwrap();
+        let res = machine
+            .call_in("ember", "on_play", &[Value::Int(1)])
+            .unwrap();
+        let schema =
+            Schema::parse("(list (struct Action (kind string) (target i64) (amount i64)))")
+                .unwrap();
         assert!(schema.check(&res).is_ok());
 
         let m = ffi::rin_new(
@@ -552,7 +577,8 @@ mod tests {
 
             let arg = ffi::rin_int(21);
             let args = [arg as *const ffi::RinValue];
-            let mut cr = ffi::rin_call_in(m, mod_base.as_ptr(), fn_double.as_ptr(), args.as_ptr(), 1);
+            let mut cr =
+                ffi::rin_call_in(m, mod_base.as_ptr(), fn_double.as_ptr(), args.as_ptr(), 1);
             ffi::rin_drop(arg);
             assert!(cr.ok);
             let mut out = 0;
@@ -623,7 +649,10 @@ mod tests {
     fn edge_cases_short_circuit_overflow_when_empty_match() {
         assert_eq!(eval("").unwrap(), Value::Void);
         assert_eq!(eval("(when false (/ 1 0))").unwrap(), Value::Void);
-        assert_eq!(eval("(and false (== (/ 1 0) 0))").unwrap(), Value::Bool(false));
+        assert_eq!(
+            eval("(and false (== (/ 1 0) 0))").unwrap(),
+            Value::Bool(false)
+        );
         assert_eq!(eval("(or true (== (/ 1 0) 0))").unwrap(), Value::Bool(true));
 
         let overflow = eval("(+ 9223372036854775807 1)").unwrap_err();
@@ -728,9 +757,18 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(m.call_in("m", "entry", &[Value::Int(5)]).unwrap(), Value::Int(15));
+        assert_eq!(
+            m.call_in("m", "entry", &[Value::Int(5)]).unwrap(),
+            Value::Int(15)
+        );
 
-        assert_eq!(eval("(let (f and) (f true false))").unwrap(), Value::Bool(false));
-        assert_eq!(eval("(let (f or) (f false true))").unwrap(), Value::Bool(true));
+        assert_eq!(
+            eval("(let (f and) (f true false))").unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval("(let (f or) (f false true))").unwrap(),
+            Value::Bool(true)
+        );
     }
 }

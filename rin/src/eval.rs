@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::alloc::{Allocator, HeapAllocator};
 use crate::ast::Pattern;
-use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, Op};
+use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, Op, SymTable};
 use crate::compiler::compile_program;
 use crate::error::{Error, ErrorKind, Limits, Span};
 use crate::parser::parse_program;
@@ -11,11 +11,7 @@ use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
 /// Evaluates Rin source code using the default `HeapAllocator`.
-pub fn eval_with(
-    source: &str,
-    bindings: &[(&str, Value)],
-    limits: Limits,
-) -> Result<Value, Error> {
+pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
 }
@@ -42,21 +38,34 @@ pub fn eval_with_allocator(
 pub struct Machine<'a> {
     limits: Limits,
     pool: Pool<'a>,
-    globals: BTreeMap<String, RVal>,
+    syms: SymTable,
+    globals: Vec<Option<RVal>>,
     modules: BTreeMap<String, RVal>,
-    module_envs: BTreeMap<String, BTreeMap<String, RVal>>,
+    module_envs: BTreeMap<String, Vec<Option<RVal>>>,
+}
+
+fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
+    let idx = id as usize;
+    if idx >= slots.len() {
+        slots.resize(idx + 1, None);
+    }
+    slots[idx].replace(val)
 }
 
 impl<'a> Machine<'a> {
     pub fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
-        let mut globals = BTreeMap::new();
+        let mut syms = SymTable::default();
+        let mut globals = Vec::new();
         for &b in BuiltinId::ALL {
-            globals.insert(b.name().to_string(), RVal::Builtin(b));
+            let id = syms.intern(b.name());
+            set_slot(&mut globals, id, RVal::Builtin(b));
         }
-        globals.insert("pi".to_string(), RVal::Float(std::f64::consts::PI));
+        let pi_id = syms.intern("pi");
+        set_slot(&mut globals, pi_id, RVal::Float(std::f64::consts::PI));
         Self {
             limits,
             pool: Pool::new(alloc, limits.memory_bytes),
+            syms,
             globals,
             modules: BTreeMap::new(),
             module_envs: BTreeMap::new(),
@@ -65,7 +74,8 @@ impl<'a> Machine<'a> {
 
     pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
         let rval = self.pool.import(value, Span::default())?;
-        if let Some(prev) = self.globals.insert(name.to_string(), rval) {
+        let id = self.syms.intern(name);
+        if let Some(prev) = set_slot(&mut self.globals, id, rval) {
             self.pool.release_val(prev);
         }
         Ok(())
@@ -78,15 +88,16 @@ impl<'a> Machine<'a> {
     /// Loads and evaluates a named module from host-provided source.
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         let exprs = parse_program(source)?;
-        let chunk = compile_program(&exprs, Some(name))?;
-        if let Some(prev_env) = self.module_envs.insert(name.to_string(), BTreeMap::new()) {
-            for v in prev_env.into_values() {
+        let chunk = compile_program(&exprs, Some(name), &mut self.syms)?;
+        if let Some(prev_env) = self.module_envs.insert(name.to_string(), Vec::new()) {
+            for v in prev_env.into_iter().flatten() {
                 self.pool.release_val(v);
             }
         }
         let mut runner = Runner::new(
             self.limits,
             &mut self.pool,
+            &self.syms,
             &mut self.globals,
             &self.modules,
             &mut self.module_envs,
@@ -100,7 +111,11 @@ impl<'a> Machine<'a> {
         match export_filter {
             Some(names) => {
                 for sym in names {
-                    let Some(&val) = mod_env.get(&sym) else {
+                    let Some(val) = self
+                        .syms
+                        .get(&sym)
+                        .and_then(|id| mod_env.get(id as usize).copied().flatten())
+                    else {
                         for v in exports.into_values() {
                             self.pool.release_val(v);
                         }
@@ -114,11 +129,12 @@ impl<'a> Machine<'a> {
                 }
             }
             None => {
-                for (sym, &val) in mod_env {
+                for (id, val_opt) in mod_env.iter().enumerate() {
+                    let Some(val) = *val_opt else { continue };
                     let is_module = matches!(val, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Module { .. }));
                     if !is_module {
                         self.pool.retain_val(val);
-                        exports.insert(Rc::from(sym.as_str()), val);
+                        exports.insert(Rc::clone(&self.syms.names[id]), val);
                     }
                 }
             }
@@ -138,10 +154,11 @@ impl<'a> Machine<'a> {
 
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         let exprs = parse_program(source)?;
-        let chunk = compile_program(&exprs, None)?;
+        let chunk = compile_program(&exprs, None, &mut self.syms)?;
         let mut runner = Runner::new(
             self.limits,
             &mut self.pool,
+            &self.syms,
             &mut self.globals,
             &self.modules,
             &mut self.module_envs,
@@ -155,7 +172,11 @@ impl<'a> Machine<'a> {
 
     /// Calls a previously defined global function directly without re-parsing source.
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
-        let Some(&callee) = self.globals.get(fn_name) else {
+        let Some(callee) = self
+            .syms
+            .get(fn_name)
+            .and_then(|id| self.globals.get(id as usize).copied().flatten())
+        else {
             return Err(Error::runtime(
                 Span::default(),
                 format!("unknown function '{fn_name}'"),
@@ -165,7 +186,12 @@ impl<'a> Machine<'a> {
     }
 
     /// Calls an exported function from a loaded module directly without re-parsing source.
-    pub fn call_in(&mut self, mod_name: &str, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
+    pub fn call_in(
+        &mut self,
+        mod_name: &str,
+        fn_name: &str,
+        args: &[Value],
+    ) -> Result<Value, Error> {
         let Some(&RVal::Obj(mod_id)) = self.modules.get(mod_name) else {
             return Err(Error::runtime(
                 Span::default(),
@@ -201,6 +227,7 @@ impl<'a> Machine<'a> {
         let mut runner = Runner::new(
             self.limits,
             &mut self.pool,
+            &self.syms,
             &mut self.globals,
             &self.modules,
             &mut self.module_envs,
@@ -224,12 +251,12 @@ impl Drop for Machine<'_> {
         }
         let old_mod_envs = std::mem::take(&mut self.module_envs);
         for env in old_mod_envs.into_values() {
-            for v in env.into_values() {
+            for v in env.into_iter().flatten() {
                 self.pool.release_val(v);
             }
         }
         let old = std::mem::take(&mut self.globals);
-        for v in old.into_values() {
+        for v in old.into_iter().flatten() {
             self.pool.release_val(v);
         }
     }
@@ -240,9 +267,10 @@ struct Runner<'a, 'p> {
     steps: usize,
     depth: usize,
     pool: &'a mut Pool<'p>,
-    globals: &'a mut BTreeMap<String, RVal>,
+    syms: &'a SymTable,
+    globals: &'a mut Vec<Option<RVal>>,
     modules: &'a BTreeMap<String, RVal>,
-    module_envs: &'a mut BTreeMap<String, BTreeMap<String, RVal>>,
+    module_envs: &'a mut BTreeMap<String, Vec<Option<RVal>>>,
     active_module: Option<Rc<str>>,
     export_list: Option<Vec<String>>,
     stack: Vec<RVal>,
@@ -252,9 +280,10 @@ impl<'a, 'p> Runner<'a, 'p> {
     fn new(
         limits: Limits,
         pool: &'a mut Pool<'p>,
-        globals: &'a mut BTreeMap<String, RVal>,
+        syms: &'a SymTable,
+        globals: &'a mut Vec<Option<RVal>>,
         modules: &'a BTreeMap<String, RVal>,
-        module_envs: &'a mut BTreeMap<String, BTreeMap<String, RVal>>,
+        module_envs: &'a mut BTreeMap<String, Vec<Option<RVal>>>,
         active_module: Option<Rc<str>>,
     ) -> Self {
         Self {
@@ -262,6 +291,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             steps: 0,
             depth: 0,
             pool,
+            syms,
             globals,
             modules,
             module_envs,
@@ -272,8 +302,8 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
-    fn tick(&mut self, chunk: &Chunk, ip: usize) -> Result<(), Error> {
-        self.steps += 1;
+    fn tick(&mut self, chunk: &Chunk, ip: usize, n: u32) -> Result<(), Error> {
+        self.steps += n as usize;
         if self.steps > self.limits.steps {
             return Err(self.step_limit_err(chunk.spans[ip - 1]));
         }
@@ -310,29 +340,29 @@ impl<'a, 'p> Runner<'a, 'p> {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    fn lookup_global(&mut self, name: &str, span: Span) -> Result<RVal, Error> {
+    fn lookup_global(&mut self, id: u32, span: Span) -> Result<RVal, Error> {
+        let idx = id as usize;
         if let Some(mod_name) = &self.active_module
             && let Some(mod_env) = self.module_envs.get(mod_name.as_ref())
-            && let Some(&v) = mod_env.get(name)
+            && let Some(Some(v)) = mod_env.get(idx).copied()
         {
             self.pool.retain_val(v);
             return Ok(v);
         }
-        if let Some(&v) = self.globals.get(name) {
+        if let Some(Some(v)) = self.globals.get(idx).copied() {
             self.pool.retain_val(v);
             return Ok(v);
         }
+        let name = self.syms.names.get(idx).map(|s| s.as_ref()).unwrap_or("?");
         Err(Error::runtime(span, format!("unknown name '{name}'")))
     }
 
-    fn define_top(&mut self, name: String, val: RVal) {
+    fn define_top(&mut self, id: u32, val: RVal) {
         let prev = if let Some(mod_name) = &self.active_module {
-            self.module_envs
-                .get_mut(mod_name.as_ref())
-                .unwrap()
-                .insert(name, val)
+            let env = self.module_envs.get_mut(mod_name.as_ref()).unwrap();
+            set_slot(env, id, val)
         } else {
-            self.globals.insert(name, val)
+            set_slot(self.globals, id, val)
         };
         if let Some(p) = prev {
             self.pool.release_val(p);
@@ -432,12 +462,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     self.stack.push(val);
                 }
                 self.stack.resize(base + local_count, RVal::Void);
-                let res = self.exec_frame(
-                    FrameSource::Proto(proto),
-                    captures,
-                    base,
-                    local_count,
-                );
+                let res = self.exec_frame(FrameSource::Proto(proto), captures, base, local_count);
                 self.active_module = prev_mod;
                 self.leave_depth();
                 match res {
@@ -475,527 +500,546 @@ impl<'a, 'p> Runner<'a, 'p> {
                 ip += 1;
 
                 match op {
-                Op::Tick => {
-                    self.tick(chunk, ip)?;
-                }
-                Op::Void => self.stack.push(RVal::Void),
-                Op::Int(n) => self.stack.push(RVal::Int(n)),
-                Op::Float(idx) => self.stack.push(RVal::Float(chunk.floats[idx as usize])),
-                Op::Bool(b) => self.stack.push(RVal::Bool(b)),
-                Op::Char(c) => self.stack.push(RVal::Char(c)),
-                Op::Str(idx) => {
-                    let s = Rc::clone(&chunk.strings[idx as usize]);
-                    let span = chunk.spans[ip - 1];
-                    let id = self.pool.alloc_obj(Obj::Str(s), span)?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::None => self.stack.push(RVal::None),
-                Op::EmptyList => self.stack.push(RVal::EmptyList),
-                Op::GetLocal(slot) => {
-                    let v = self.stack[base + slot as usize];
-                    self.pool.retain_val(v);
-                    self.stack.push(v);
-                }
-                Op::SetLocal(slot) => {
-                    let v = self.stack.pop().expect("stack underflow on SetLocal");
-                    let old = std::mem::replace(&mut self.stack[base + slot as usize], v);
-                    self.pool.release_val(old);
-                }
-                Op::GetCapture(idx) => {
-                    let v = captures[idx as usize];
-                    self.pool.retain_val(v);
-                    self.stack.push(v);
-                }
-                Op::GetGlobal(idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let v = self.lookup_global(&chunk.strings[idx as usize], span)?;
-                    self.stack.push(v);
-                }
-                Op::DefGlobal(idx) => {
-                    let v = self.stack.pop().expect("stack underflow on DefGlobal");
-                    self.define_top(chunk.strings[idx as usize].to_string(), v);
-                    self.stack.push(RVal::Void);
-                }
-                Op::DefFn(name_idx, proto_idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let proto = &chunk.protos[proto_idx as usize];
-                    let closure = self.build_closure(proto, &captures, base, span)?;
-                    self.define_top(chunk.strings[name_idx as usize].to_string(), closure);
-                    self.stack.push(RVal::Void);
-                }
-                Op::MakeClosure(proto_idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let proto = &chunk.protos[proto_idx as usize];
-                    let closure = self.build_closure(proto, &captures, base, span)?;
-                    self.stack.push(closure);
-                }
-                Op::MakeList(n) => {
-                    let span = chunk.spans[ip - 1];
-                    let start = self.stack.len() - n as usize;
-                    let list = self.build_list_from_owned_slice(start, span)?;
-                    self.stack.push(list);
-                }
-                Op::MakeTuple(n) => {
-                    let span = chunk.spans[ip - 1];
-                    let start = self.stack.len() - n as usize;
-                    let items: Vec<RVal> = self.stack.drain(start..).collect();
-                    let id = self.pool.alloc_obj(Obj::Tuple(items), span)?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::MakeStruct(s_idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let desc = &chunk.structs[s_idx as usize];
-                    let start = self.stack.len() - desc.fields.len();
-                    let mut map = BTreeMap::new();
-                    for (idx, fname) in desc.fields.iter().enumerate() {
-                        let val = self.stack[start + idx];
-                        if let Some(prev) = map.insert(Rc::clone(fname), val) {
-                            self.pool.release_val(prev);
-                        }
+                    Op::Tick(n) => {
+                        self.tick(chunk, ip, n)?;
                     }
-                    self.stack.truncate(start);
-                    let id = self.pool.alloc_obj(
-                        Obj::Struct {
-                            name: Rc::clone(&desc.name),
-                            fields: map,
-                        },
-                        span,
-                    )?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::WithCheckStruct => {
-                    let span = chunk.spans[ip - 1];
-                    let base_val = *self.stack.last().expect("stack underflow on WithCheckStruct");
-                    let is_struct = matches!(
-                        base_val,
-                        RVal::Obj(id) if matches!(self.pool.get(id), Obj::Struct { .. })
-                    );
-                    if !is_struct {
-                        let tname = base_val.type_name(self.pool);
-                        return Err(Error::runtime(
-                            span,
-                            format!("'with' requires a struct, got {tname}"),
-                        ));
+                    Op::Void => self.stack.push(RVal::Void),
+                    Op::Int(n) => self.stack.push(RVal::Int(n)),
+                    Op::Float(idx) => self.stack.push(RVal::Float(chunk.floats[idx as usize])),
+                    Op::Bool(b) => self.stack.push(RVal::Bool(b)),
+                    Op::Char(c) => self.stack.push(RVal::Char(c)),
+                    Op::Str(idx) => {
+                        let s = Rc::clone(&chunk.strings[idx as usize]);
+                        let span = chunk.spans[ip - 1];
+                        let id = self.pool.alloc_obj(Obj::Str(s), span)?;
+                        self.stack.push(RVal::Obj(id));
                     }
-                }
-                Op::WithCheckField(f_idx, pushed_count) => {
-                    let span = chunk.spans[ip - 1];
-                    let fname = &chunk.strings[f_idx as usize];
-                    let base_val = self.stack[self.stack.len() - 1 - pushed_count as usize];
-                    let RVal::Obj(id) = base_val else {
-                        unreachable!();
-                    };
-                    let Obj::Struct { name, fields } = self.pool.get(id) else {
-                        unreachable!();
-                    };
-                    if !fields.contains_key(fname.as_ref()) {
-                        return Err(Error::runtime(
-                            span,
-                            format!("{name} has no field '{fname}'"),
-                        ));
-                    }
-                }
-                Op::WithFinish(s_idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let desc = &chunk.structs[s_idx as usize];
-                    let n = desc.fields.len();
-                    let val_start = self.stack.len() - n;
-                    let base_val = self.stack[val_start - 1];
-                    let RVal::Obj(id) = base_val else {
-                        unreachable!();
-                    };
-                    let Obj::Struct { name, fields } = self.pool.get(id) else {
-                        unreachable!();
-                    };
-                    let name = name.clone();
-                    let mut updated = fields.clone();
-                    for &v in updated.values() {
+                    Op::None => self.stack.push(RVal::None),
+                    Op::EmptyList => self.stack.push(RVal::EmptyList),
+                    Op::GetLocal(slot) => {
+                        let v = self.stack[base + slot as usize];
                         self.pool.retain_val(v);
+                        self.stack.push(v);
                     }
-                    for (idx, fname) in desc.fields.iter().enumerate() {
-                        let val = self.stack[val_start + idx];
-                        if let Some(prev) = updated.insert(Rc::clone(fname), val) {
-                            self.pool.release_val(prev);
+                    Op::SetLocal(slot) => {
+                        let v = self.stack.pop().expect("stack underflow on SetLocal");
+                        let old = std::mem::replace(&mut self.stack[base + slot as usize], v);
+                        self.pool.release_val(old);
+                    }
+                    Op::GetCapture(idx) => {
+                        let v = captures[idx as usize];
+                        self.pool.retain_val(v);
+                        self.stack.push(v);
+                    }
+                    Op::GetGlobal(id) => {
+                        let span = chunk.spans[ip - 1];
+                        let v = self.lookup_global(id, span)?;
+                        self.stack.push(v);
+                    }
+                    Op::DefGlobal(id) => {
+                        let v = self.stack.pop().expect("stack underflow on DefGlobal");
+                        self.define_top(id, v);
+                        self.stack.push(RVal::Void);
+                    }
+                    Op::DefFn(name_id, proto_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        let proto = &chunk.protos[proto_idx as usize];
+                        let closure = self.build_closure(proto, &captures, base, span)?;
+                        self.define_top(name_id, closure);
+                        self.stack.push(RVal::Void);
+                    }
+                    Op::MakeClosure(proto_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        let proto = &chunk.protos[proto_idx as usize];
+                        let closure = self.build_closure(proto, &captures, base, span)?;
+                        self.stack.push(closure);
+                    }
+                    Op::MakeList(n) => {
+                        let span = chunk.spans[ip - 1];
+                        let start = self.stack.len() - n as usize;
+                        let list = self.build_list_from_owned_slice(start, span)?;
+                        self.stack.push(list);
+                    }
+                    Op::MakeTuple(n) => {
+                        let span = chunk.spans[ip - 1];
+                        let start = self.stack.len() - n as usize;
+                        let items: Vec<RVal> = self.stack.drain(start..).collect();
+                        let id = self.pool.alloc_obj(Obj::Tuple(items), span)?;
+                        self.stack.push(RVal::Obj(id));
+                    }
+                    Op::MakeStruct(s_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        let desc = &chunk.structs[s_idx as usize];
+                        let start = self.stack.len() - desc.fields.len();
+                        let mut map = BTreeMap::new();
+                        for (idx, fname) in desc.fields.iter().enumerate() {
+                            let val = self.stack[start + idx];
+                            if let Some(prev) = map.insert(Rc::clone(fname), val) {
+                                self.pool.release_val(prev);
+                            }
+                        }
+                        self.stack.truncate(start);
+                        let id = self.pool.alloc_obj(
+                            Obj::Struct {
+                                name: Rc::clone(&desc.name),
+                                fields: map,
+                            },
+                            span,
+                        )?;
+                        self.stack.push(RVal::Obj(id));
+                    }
+                    Op::WithCheckStruct => {
+                        let span = chunk.spans[ip - 1];
+                        let base_val = *self
+                            .stack
+                            .last()
+                            .expect("stack underflow on WithCheckStruct");
+                        let is_struct = matches!(
+                            base_val,
+                            RVal::Obj(id) if matches!(self.pool.get(id), Obj::Struct { .. })
+                        );
+                        if !is_struct {
+                            let tname = base_val.type_name(self.pool);
+                            return Err(Error::runtime(
+                                span,
+                                format!("'with' requires a struct, got {tname}"),
+                            ));
                         }
                     }
-                    self.stack.truncate(val_start - 1);
-                    self.pool.release_val(base_val);
-                    let new_id = self.pool.alloc_obj(
-                        Obj::Struct {
-                            name,
-                            fields: updated,
-                        },
-                        span,
-                    )?;
-                    self.stack.push(RVal::Obj(new_id));
-                }
-                Op::MakeVariant {
-                    type_name,
-                    variant,
-                    has_data,
-                } => {
-                    let span = chunk.spans[ip - 1];
-                    let data = if has_data {
-                        Some(self.stack.pop().expect("stack underflow on MakeVariant"))
-                    } else {
-                        None
-                    };
-                    let id = self.pool.alloc_obj(
-                        Obj::Variant {
-                            type_name: Rc::clone(&chunk.strings[type_name as usize]),
-                            variant: Rc::clone(&chunk.strings[variant as usize]),
-                            data,
-                        },
-                        span,
-                    )?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::MakeSome => {
-                    let span = chunk.spans[ip - 1];
-                    let v = self.stack.pop().expect("stack underflow on MakeSome");
-                    let id = self.pool.alloc_obj(Obj::Some(v), span)?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::MakeOk => {
-                    let span = chunk.spans[ip - 1];
-                    let v = self.stack.pop().expect("stack underflow on MakeOk");
-                    let id = self.pool.alloc_obj(Obj::Ok(v), span)?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::MakeErr => {
-                    let span = chunk.spans[ip - 1];
-                    let v = self.stack.pop().expect("stack underflow on MakeErr");
-                    let id = self.pool.alloc_obj(Obj::Err(v), span)?;
-                    self.stack.push(RVal::Obj(id));
-                }
-                Op::GetField(f_idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let field = &chunk.strings[f_idx as usize];
-                    let val = self.stack.pop().expect("stack underflow on GetField");
-                    let res = match val {
-                        RVal::Obj(id) => match self.pool.get(id) {
-                            Obj::Struct { name, fields } => match fields.get(field.as_ref()).copied()
-                            {
-                                Some(fv) => {
-                                    self.pool.retain_val(fv);
-                                    Ok(fv)
+                    Op::WithCheckField(f_idx, pushed_count) => {
+                        let span = chunk.spans[ip - 1];
+                        let fname = &chunk.strings[f_idx as usize];
+                        let base_val = self.stack[self.stack.len() - 1 - pushed_count as usize];
+                        let RVal::Obj(id) = base_val else {
+                            unreachable!();
+                        };
+                        let Obj::Struct { name, fields } = self.pool.get(id) else {
+                            unreachable!();
+                        };
+                        if !fields.contains_key(fname.as_ref()) {
+                            return Err(Error::runtime(
+                                span,
+                                format!("{name} has no field '{fname}'"),
+                            ));
+                        }
+                    }
+                    Op::WithFinish(s_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        let desc = &chunk.structs[s_idx as usize];
+                        let n = desc.fields.len();
+                        let val_start = self.stack.len() - n;
+                        let base_val = self.stack[val_start - 1];
+                        let RVal::Obj(id) = base_val else {
+                            unreachable!();
+                        };
+                        let Obj::Struct { name, fields } = self.pool.get(id) else {
+                            unreachable!();
+                        };
+                        let name = name.clone();
+                        let mut updated = fields.clone();
+                        for &v in updated.values() {
+                            self.pool.retain_val(v);
+                        }
+                        for (idx, fname) in desc.fields.iter().enumerate() {
+                            let val = self.stack[val_start + idx];
+                            if let Some(prev) = updated.insert(Rc::clone(fname), val) {
+                                self.pool.release_val(prev);
+                            }
+                        }
+                        self.stack.truncate(val_start - 1);
+                        self.pool.release_val(base_val);
+                        let new_id = self.pool.alloc_obj(
+                            Obj::Struct {
+                                name,
+                                fields: updated,
+                            },
+                            span,
+                        )?;
+                        self.stack.push(RVal::Obj(new_id));
+                    }
+                    Op::MakeVariant {
+                        type_name,
+                        variant,
+                        has_data,
+                    } => {
+                        let span = chunk.spans[ip - 1];
+                        let data = if has_data {
+                            Some(self.stack.pop().expect("stack underflow on MakeVariant"))
+                        } else {
+                            None
+                        };
+                        let id = self.pool.alloc_obj(
+                            Obj::Variant {
+                                type_name: Rc::clone(&chunk.strings[type_name as usize]),
+                                variant: Rc::clone(&chunk.strings[variant as usize]),
+                                data,
+                            },
+                            span,
+                        )?;
+                        self.stack.push(RVal::Obj(id));
+                    }
+                    Op::MakeSome => {
+                        let span = chunk.spans[ip - 1];
+                        let v = self.stack.pop().expect("stack underflow on MakeSome");
+                        let id = self.pool.alloc_obj(Obj::Some(v), span)?;
+                        self.stack.push(RVal::Obj(id));
+                    }
+                    Op::MakeOk => {
+                        let span = chunk.spans[ip - 1];
+                        let v = self.stack.pop().expect("stack underflow on MakeOk");
+                        let id = self.pool.alloc_obj(Obj::Ok(v), span)?;
+                        self.stack.push(RVal::Obj(id));
+                    }
+                    Op::MakeErr => {
+                        let span = chunk.spans[ip - 1];
+                        let v = self.stack.pop().expect("stack underflow on MakeErr");
+                        let id = self.pool.alloc_obj(Obj::Err(v), span)?;
+                        self.stack.push(RVal::Obj(id));
+                    }
+                    Op::GetField(f_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        let field = &chunk.strings[f_idx as usize];
+                        let val = self.stack.pop().expect("stack underflow on GetField");
+                        let res = match val {
+                            RVal::Obj(id) => match self.pool.get(id) {
+                                Obj::Struct { name, fields } => {
+                                    match fields.get(field.as_ref()).copied() {
+                                        Some(fv) => {
+                                            self.pool.retain_val(fv);
+                                            Ok(fv)
+                                        }
+                                        None => Err(Error::runtime(
+                                            span,
+                                            format!("{name} has no field '{field}'"),
+                                        )),
+                                    }
                                 }
-                                None => Err(Error::runtime(
+                                Obj::Module { name, exports } => {
+                                    match exports.get(field.as_ref()).copied() {
+                                        Some(fv) => {
+                                            self.pool.retain_val(fv);
+                                            Ok(fv)
+                                        }
+                                        None => Err(Error::runtime(
+                                            span,
+                                            format!("module '{name}' has no export '{field}'"),
+                                        )),
+                                    }
+                                }
+                                _ => Err(Error::runtime(
                                     span,
-                                    format!("{name} has no field '{field}'"),
+                                    format!(
+                                        "cannot read field '{field}' on {}",
+                                        val.type_name(self.pool)
+                                    ),
                                 )),
                             },
-                            Obj::Module { name, exports } => {
-                                match exports.get(field.as_ref()).copied() {
-                                    Some(fv) => {
-                                        self.pool.retain_val(fv);
-                                        Ok(fv)
-                                    }
-                                    None => Err(Error::runtime(
-                                        span,
-                                        format!("module '{name}' has no export '{field}'"),
-                                    )),
-                                }
-                            }
-                            _ => Err(Error::runtime(
+                            other => Err(Error::runtime(
                                 span,
                                 format!(
                                     "cannot read field '{field}' on {}",
-                                    val.type_name(self.pool)
+                                    other.type_name(self.pool)
                                 ),
                             )),
-                        },
-                        other => Err(Error::runtime(
-                            span,
-                            format!(
-                                "cannot read field '{field}' on {}",
-                                other.type_name(self.pool)
-                            ),
-                        )),
-                    };
-                    self.pool.release_val(val);
-                    self.stack.push(res?);
-                }
-                Op::GetIndex => {
-                    let span = chunk.spans[ip - 1];
-                    let idx_val = self.stack.pop().expect("stack underflow on GetIndex");
-                    let list_val = self.stack.pop().expect("stack underflow on GetIndex");
-                    let idx = match idx_val {
-                        RVal::Int(i) => i,
-                        other => {
-                            let tname = other.type_name(self.pool);
-                            self.pool.release_val(idx_val);
-                            self.pool.release_val(list_val);
-                            return Err(Error::runtime(
-                                span,
-                                format!("index must be i64, got {tname}"),
-                            ));
-                        }
-                    };
-                    self.pool.release_val(idx_val);
+                        };
+                        self.pool.release_val(val);
+                        self.stack.push(res?);
+                    }
+                    Op::GetIndex => {
+                        let span = chunk.spans[ip - 1];
+                        let idx_val = self.stack.pop().expect("stack underflow on GetIndex");
+                        let list_val = self.stack.pop().expect("stack underflow on GetIndex");
+                        let idx = match idx_val {
+                            RVal::Int(i) => i,
+                            other => {
+                                let tname = other.type_name(self.pool);
+                                self.pool.release_val(idx_val);
+                                self.pool.release_val(list_val);
+                                return Err(Error::runtime(
+                                    span,
+                                    format!("index must be i64, got {tname}"),
+                                ));
+                            }
+                        };
+                        self.pool.release_val(idx_val);
 
-                    let res = if let RVal::Obj(id) = list_val
-                        && let Obj::Array(arr) = self.pool.get(id)
-                    {
-                        if idx < 0 || (idx as usize) >= arr.len() {
-                            Err(Error::runtime(
-                                span,
-                                format!("index {idx} out of range (length {})", arr.len()),
-                            ))
-                        } else {
-                            let v = arr[idx as usize];
-                            self.pool.retain_val(v);
-                            Ok(v)
-                        }
-                    } else if !self.is_list(list_val) {
-                        Err(Error::runtime(
-                            span,
-                            format!("cannot index into {}", list_val.type_name(self.pool)),
-                        ))
-                    } else if idx < 0 {
-                        Err(Error::runtime(
-                            span,
-                            format!(
-                                "index {idx} out of range (length {})",
-                                self.pool.list_len(list_val)
-                            ),
-                        ))
-                    } else {
-                        match self.list_get(list_val, idx as usize) {
-                            Some(v) => {
+                        let res = if let RVal::Obj(id) = list_val
+                            && let Obj::Array(arr) = self.pool.get(id)
+                        {
+                            if idx < 0 || (idx as usize) >= arr.len() {
+                                Err(Error::runtime(
+                                    span,
+                                    format!("index {idx} out of range (length {})", arr.len()),
+                                ))
+                            } else {
+                                let v = arr[idx as usize];
                                 self.pool.retain_val(v);
                                 Ok(v)
                             }
-                            None => Err(Error::runtime(
+                        } else if !self.is_list(list_val) {
+                            Err(Error::runtime(
+                                span,
+                                format!("cannot index into {}", list_val.type_name(self.pool)),
+                            ))
+                        } else if idx < 0 {
+                            Err(Error::runtime(
                                 span,
                                 format!(
                                     "index {idx} out of range (length {})",
                                     self.pool.list_len(list_val)
                                 ),
-                            )),
-                        }
-                    };
-                    self.pool.release_val(list_val);
-                    self.stack.push(res?);
-                }
-                Op::Call(argc) => {
-                    let span = chunk.spans[ip - 1];
-                    let argc = argc as usize;
-                    let arg_start = self.stack.len() - argc;
-                    let callee = self.stack[arg_start - 1];
-                    match callee {
-                        RVal::Builtin(b) => {
-                            let res = self.call_builtin_from_stack(b, arg_start, argc, span);
-                            self.stack.push(res?);
-                        }
-                        RVal::Obj(id) => {
-                            let (proto, cap) = match self.pool.get(id) {
-                                Obj::Closure { proto, captures } => {
-                                    (Rc::clone(proto), Rc::clone(captures))
+                            ))
+                        } else {
+                            match self.list_get(list_val, idx as usize) {
+                                Some(v) => {
+                                    self.pool.retain_val(v);
+                                    Ok(v)
                                 }
-                                _ => {
+                                None => Err(Error::runtime(
+                                    span,
+                                    format!(
+                                        "index {idx} out of range (length {})",
+                                        self.pool.list_len(list_val)
+                                    ),
+                                )),
+                            }
+                        };
+                        self.pool.release_val(list_val);
+                        self.stack.push(res?);
+                    }
+                    Op::Call(argc) => {
+                        let span = chunk.spans[ip - 1];
+                        let argc = argc as usize;
+                        let arg_start = self.stack.len() - argc;
+                        let callee = self.stack[arg_start - 1];
+                        match callee {
+                            RVal::Builtin(b) => {
+                                let res = self.call_builtin_from_stack(b, arg_start, argc, span);
+                                self.stack.push(res?);
+                            }
+                            RVal::Obj(id) => {
+                                let (proto, cap) = match self.pool.get(id) {
+                                    Obj::Closure { proto, captures } => {
+                                        (Rc::clone(proto), Rc::clone(captures))
+                                    }
+                                    _ => {
+                                        return Err(Error::runtime(
+                                            span,
+                                            format!(
+                                                "cannot call value of type {}",
+                                                callee.type_name(self.pool)
+                                            ),
+                                        ));
+                                    }
+                                };
+                                if proto.arity as usize != argc {
                                     return Err(Error::runtime(
                                         span,
-                                        format!(
-                                            "cannot call value of type {}",
-                                            callee.type_name(self.pool)
-                                        ),
+                                        format!("expected {} arguments, got {}", proto.arity, argc),
                                     ));
                                 }
-                            };
-                            if proto.arity as usize != argc {
+                                self.enter_depth(span)?;
+                                // Leave callee at arg_start - 1 so args stay in place (no memmove).
+                                let child_base = arg_start;
+                                let child_locals = proto.local_count as usize;
+                                self.stack.resize(child_base + child_locals, RVal::Void);
+                                let prev_mod = std::mem::replace(
+                                    &mut self.active_module,
+                                    proto.module.clone(),
+                                );
+                                let res = self.exec_frame(
+                                    FrameSource::Proto(proto),
+                                    cap,
+                                    child_base,
+                                    child_locals,
+                                );
+                                self.active_module = prev_mod;
+                                self.leave_depth();
+                                self.release_stack_from(arg_start - 1);
+                                self.stack.push(res?);
+                            }
+                            other => {
                                 return Err(Error::runtime(
                                     span,
                                     format!(
-                                        "expected {} arguments, got {}",
-                                        proto.arity, argc
+                                        "cannot call value of type {}",
+                                        other.type_name(self.pool)
                                     ),
                                 ));
                             }
-                            self.enter_depth(span)?;
-                            // Remove callee slot and shift args down by 1 in place
-                            self.stack.remove(arg_start - 1);
-                            let child_base = arg_start - 1;
-                            let child_locals = proto.local_count as usize;
-                            self.stack.resize(child_base + child_locals, RVal::Void);
-                            let prev_mod =
-                                std::mem::replace(&mut self.active_module, proto.module.clone());
-                            let res = self.exec_frame(
-                                FrameSource::Proto(proto),
-                                cap,
-                                child_base,
-                                child_locals,
-                            );
-                            self.active_module = prev_mod;
-                            self.leave_depth();
-                            self.release_stack_from(child_base);
-                            self.pool.release_val(callee);
-                            self.stack.push(res?);
-                        }
-                        other => {
-                            return Err(Error::runtime(
-                                span,
-                                format!("cannot call value of type {}", other.type_name(self.pool)),
-                            ));
                         }
                     }
-                }
-                Op::TailCall(argc) => {
-                    let span = chunk.spans[ip - 1];
-                    let argc = argc as usize;
-                    let arg_start = self.stack.len() - argc;
-                    let callee = self.stack[arg_start - 1];
-                    match callee {
-                        RVal::Obj(id) if matches!(source, FrameSource::Proto(_)) => {
-                            let (proto, cap) = match self.pool.get(id) {
-                                Obj::Closure { proto, captures } => {
-                                    (Rc::clone(proto), Rc::clone(captures))
-                                }
-                                _ => {
+                    Op::TailCall(argc) => {
+                        let span = chunk.spans[ip - 1];
+                        let argc = argc as usize;
+                        let arg_start = self.stack.len() - argc;
+                        let callee = self.stack[arg_start - 1];
+                        match callee {
+                            RVal::Obj(id) if matches!(source, FrameSource::Proto(_)) => {
+                                let (proto, cap) = match self.pool.get(id) {
+                                    Obj::Closure { proto, captures } => {
+                                        (Rc::clone(proto), Rc::clone(captures))
+                                    }
+                                    _ => {
+                                        return Err(Error::runtime(
+                                            span,
+                                            format!(
+                                                "cannot call value of type {}",
+                                                callee.type_name(self.pool)
+                                            ),
+                                        ));
+                                    }
+                                };
+                                if proto.arity as usize != argc {
                                     return Err(Error::runtime(
                                         span,
-                                        format!(
-                                            "cannot call value of type {}",
-                                            callee.type_name(self.pool)
-                                        ),
+                                        format!("expected {} arguments, got {}", proto.arity, argc),
                                     ));
                                 }
-                            };
-                            if proto.arity as usize != argc {
+                                // Release old frame's locals and any temporaries below `arg_start - 1`
+                                for i in base..(arg_start - 1) {
+                                    let old = self.stack[i];
+                                    self.pool.release_val(old);
+                                }
+                                for i in 0..argc {
+                                    self.stack[base + i] = self.stack[arg_start + i];
+                                }
+                                self.stack.truncate(base + argc);
+                                let new_locals = proto.local_count as usize;
+                                self.stack.resize(base + new_locals, RVal::Void);
+                                self.pool.release_val(callee);
+                                self.active_module = proto.module.clone();
+                                source = FrameSource::Proto(proto);
+                                captures = cap;
+                                frame_stack_start = base + new_locals;
+                                ip = 0;
+                                continue 'frame;
+                            }
+                            RVal::Builtin(b) => {
+                                let res = self.call_builtin_from_stack(b, arg_start, argc, span);
+                                self.stack.push(res?);
+                            }
+                            _ => {
+                                // Fallback for non-closure or top-level
                                 return Err(Error::runtime(
                                     span,
                                     format!(
-                                        "expected {} arguments, got {}",
-                                        proto.arity, argc
+                                        "cannot call value of type {}",
+                                        callee.type_name(self.pool)
                                     ),
                                 ));
                             }
-                            // Release old frame's locals and any temporaries below `arg_start - 1`
-                            for i in base..(arg_start - 1) {
-                                let old = self.stack[i];
-                                self.pool.release_val(old);
-                            }
-                            for i in 0..argc {
-                                self.stack[base + i] = self.stack[arg_start + i];
-                            }
-                            self.stack.truncate(base + argc);
-                            let new_locals = proto.local_count as usize;
-                            self.stack.resize(base + new_locals, RVal::Void);
-                            self.pool.release_val(callee);
-                            self.active_module = proto.module.clone();
-                            source = FrameSource::Proto(proto);
-                            captures = cap;
-                            frame_stack_start = base + new_locals;
-                            ip = 0;
-                            continue 'frame;
                         }
-                        RVal::Builtin(b) => {
-                            let res = self.call_builtin_from_stack(b, arg_start, argc, span);
-                            self.stack.push(res?);
+                    }
+                    Op::And => {
+                        let span = chunk.spans[ip - 1];
+                        return Err(Error::runtime(span, "'and' requires at least 1 argument"));
+                    }
+                    Op::Or => {
+                        let span = chunk.spans[ip - 1];
+                        return Err(Error::runtime(span, "'or' requires at least 1 argument"));
+                    }
+                    Op::Jump(target) => {
+                        ip = target;
+                    }
+                    Op::JumpIfFalse(target) => {
+                        let cond = self.stack.pop().expect("stack underflow on JumpIfFalse");
+                        match cond {
+                            RVal::Bool(true) => {}
+                            RVal::Bool(false) => ip = target,
+                            other => {
+                                let span = chunk.spans[ip - 1];
+                                let tname = other.type_name(self.pool);
+                                self.pool.release_val(cond);
+                                return Err(Error::runtime(
+                                    span,
+                                    format!("expected bool, got {tname}"),
+                                ));
+                            }
                         }
-                        _ => {
-                            // Fallback for non-closure or top-level
+                    }
+                    Op::JumpIfFalsePeek(target) => {
+                        let cond = *self
+                            .stack
+                            .last()
+                            .expect("stack underflow on JumpIfFalsePeek");
+                        match cond {
+                            RVal::Bool(true) => {
+                                self.stack.pop();
+                            }
+                            RVal::Bool(false) => ip = target,
+                            other => {
+                                let span = chunk.spans[ip - 1];
+                                let tname = other.type_name(self.pool);
+                                return Err(Error::runtime(
+                                    span,
+                                    format!("expected bool, got {tname}"),
+                                ));
+                            }
+                        }
+                    }
+                    Op::JumpIfTruePeek(target) => {
+                        let cond = *self
+                            .stack
+                            .last()
+                            .expect("stack underflow on JumpIfTruePeek");
+                        match cond {
+                            RVal::Bool(false) => {
+                                self.stack.pop();
+                            }
+                            RVal::Bool(true) => ip = target,
+                            other => {
+                                let span = chunk.spans[ip - 1];
+                                let tname = other.type_name(self.pool);
+                                return Err(Error::runtime(
+                                    span,
+                                    format!("expected bool, got {tname}"),
+                                ));
+                            }
+                        }
+                    }
+                    Op::Pop => {
+                        let v = self.stack.pop().expect("stack underflow on Op::Pop");
+                        self.pool.release_val(v);
+                    }
+                    Op::TryMatch { pat_idx, fail_ip } => {
+                        let val = *self.stack.last().expect("stack underflow on TryMatch");
+                        match self.match_pattern(&chunk.patterns[pat_idx as usize], val) {
+                            Some(Some(bound)) => {
+                                self.pool.retain_val(bound);
+                                self.stack.push(bound);
+                            }
+                            Some(None) => {}
+                            None => ip = fail_ip,
+                        }
+                    }
+                    Op::MatchFail => {
+                        let span = chunk.spans[ip - 1];
+                        return Err(Error::runtime(span, "non-exhaustive match"));
+                    }
+                    Op::Import(id) => {
+                        let span = chunk.spans[ip - 1];
+                        let name = &self.syms.names[id as usize];
+                        let Some(&mod_val) = self.modules.get(name.as_ref()) else {
+                            return Err(Error::runtime(span, format!("unknown module '{name}'")));
+                        };
+                        self.pool.retain_val(mod_val);
+                        self.define_top(id, mod_val);
+                        self.stack.push(RVal::Void);
+                    }
+                    Op::Export(idx) => {
+                        let span = chunk.spans[ip - 1];
+                        if self.active_module.is_none() {
                             return Err(Error::runtime(
                                 span,
-                                format!("cannot call value of type {}", callee.type_name(self.pool)),
+                                "'export' can only be used inside a module",
                             ));
                         }
+                        let names = &chunk.export_lists[idx as usize];
+                        let list = self.export_list.get_or_insert_with(Vec::new);
+                        list.extend(names.iter().cloned());
+                        self.stack.push(RVal::Void);
                     }
-                }
-                Op::And => {
-                    let span = chunk.spans[ip - 1];
-                    return Err(Error::runtime(span, "'and' requires at least 1 argument"));
-                }
-                Op::Or => {
-                    let span = chunk.spans[ip - 1];
-                    return Err(Error::runtime(span, "'or' requires at least 1 argument"));
-                }
-                Op::Jump(target) => {
-                    ip = target;
-                }
-                Op::JumpIfFalse(target) => {
-                    let cond = self.stack.pop().expect("stack underflow on JumpIfFalse");
-                    match cond {
-                        RVal::Bool(true) => {}
-                        RVal::Bool(false) => ip = target,
-                        other => {
-                            let span = chunk.spans[ip - 1];
-                            let tname = other.type_name(self.pool);
-                            self.pool.release_val(cond);
-                            return Err(Error::runtime(span, format!("expected bool, got {tname}")));
-                        }
-                    }
-                }
-                Op::JumpIfFalsePeek(target) => {
-                    let cond = *self.stack.last().expect("stack underflow on JumpIfFalsePeek");
-                    match cond {
-                        RVal::Bool(true) => {
-                            self.stack.pop();
-                        }
-                        RVal::Bool(false) => ip = target,
-                        other => {
-                            let span = chunk.spans[ip - 1];
-                            let tname = other.type_name(self.pool);
-                            return Err(Error::runtime(span, format!("expected bool, got {tname}")));
-                        }
-                    }
-                }
-                Op::JumpIfTruePeek(target) => {
-                    let cond = *self.stack.last().expect("stack underflow on JumpIfTruePeek");
-                    match cond {
-                        RVal::Bool(false) => {
-                            self.stack.pop();
-                        }
-                        RVal::Bool(true) => ip = target,
-                        other => {
-                            let span = chunk.spans[ip - 1];
-                            let tname = other.type_name(self.pool);
-                            return Err(Error::runtime(span, format!("expected bool, got {tname}")));
-                        }
-                    }
-                }
-                Op::Pop => {
-                    let v = self.stack.pop().expect("stack underflow on Op::Pop");
-                    self.pool.release_val(v);
-                }
-                Op::TryMatch { pat_idx, fail_ip } => {
-                    let val = *self.stack.last().expect("stack underflow on TryMatch");
-                    match self.match_pattern(&chunk.patterns[pat_idx as usize], val) {
-                        Some(Some(bound)) => {
-                            self.pool.retain_val(bound);
-                            self.stack.push(bound);
-                        }
-                        Some(None) => {}
-                        None => ip = fail_ip,
-                    }
-                }
-                Op::MatchFail => {
-                    let span = chunk.spans[ip - 1];
-                    return Err(Error::runtime(span, "non-exhaustive match"));
-                }
-                Op::Import(idx) => {
-                    let span = chunk.spans[ip - 1];
-                    let name = &chunk.strings[idx as usize];
-                    let Some(&mod_val) = self.modules.get(name.as_ref()) else {
-                        return Err(Error::runtime(span, format!("unknown module '{name}'")));
-                    };
-                    self.pool.retain_val(mod_val);
-                    self.define_top(name.to_string(), mod_val);
-                    self.stack.push(RVal::Void);
-                }
-                Op::Export(idx) => {
-                    let span = chunk.spans[ip - 1];
-                    if self.active_module.is_none() {
-                        return Err(Error::runtime(
-                            span,
-                            "'export' can only be used inside a module",
-                        ));
-                    }
-                    let names = &chunk.export_lists[idx as usize];
-                    let list = self.export_list.get_or_insert_with(Vec::new);
-                    list.extend(names.iter().cloned());
-                    self.stack.push(RVal::Void);
-                }
                 }
             }
             break;
@@ -1188,11 +1232,9 @@ impl Runner<'_, '_> {
 
     fn apply_builtin(&mut self, b: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
         match b {
-            BuiltinId::Add
-            | BuiltinId::Sub
-            | BuiltinId::Mul
-            | BuiltinId::Div
-            | BuiltinId::Rem => self.arith(b, args, span),
+            BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div | BuiltinId::Rem => {
+                self.arith(b, args, span)
+            }
             BuiltinId::Eq | BuiltinId::Ne => self.eq_cmp(b == BuiltinId::Eq, args, span),
             BuiltinId::Lt | BuiltinId::Le | BuiltinId::Gt | BuiltinId::Ge => {
                 self.ord_cmp(b, args, span)
@@ -1254,7 +1296,10 @@ impl Runner<'_, '_> {
                     RVal::Float(x) => Ok(RVal::Float(*x)),
                     other => Err(Error::runtime(
                         span,
-                        format!("'as_f64' expects number, got {}", other.type_name(self.pool)),
+                        format!(
+                            "'as_f64' expects number, got {}",
+                            other.type_name(self.pool)
+                        ),
                     )),
                 }
             }
@@ -1272,7 +1317,10 @@ impl Runner<'_, '_> {
                     }
                     other => Err(Error::runtime(
                         span,
-                        format!("'as_i64' expects number, got {}", other.type_name(self.pool)),
+                        format!(
+                            "'as_i64' expects number, got {}",
+                            other.type_name(self.pool)
+                        ),
                     )),
                 }
             }
@@ -1365,14 +1413,20 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Cons => {
                 let [item, list_v] = args else {
-                    return Err(Error::runtime(span, "'cons' takes 2 arguments (item, list)"));
+                    return Err(Error::runtime(
+                        span,
+                        "'cons' takes 2 arguments (item, list)",
+                    ));
                 };
                 self.expect_list("cons", *list_v, span)?;
                 self.pool.alloc_cons(*item, *list_v, span)
             }
             BuiltinId::Push => {
                 let [list_v, item] = args else {
-                    return Err(Error::runtime(span, "'push' takes 2 arguments (list, item)"));
+                    return Err(Error::runtime(
+                        span,
+                        "'push' takes 2 arguments (list, item)",
+                    ));
                 };
                 self.expect_list("push", *list_v, span)?;
                 let mut items = self.list_to_vec(*list_v);
@@ -1468,7 +1522,10 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Range => {
                 let [start_v, end_v] = args else {
-                    return Err(Error::runtime(span, "'range' takes 2 arguments (start, end)"));
+                    return Err(Error::runtime(
+                        span,
+                        "'range' takes 2 arguments (start, end)",
+                    ));
                 };
                 let start = self.expect_int("range", *start_v, span)?;
                 let end = self.expect_int("range", *end_v, span)?;
@@ -1613,7 +1670,10 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Filter => {
                 let [f, list_v] = args else {
-                    return Err(Error::runtime(span, "'filter' takes 2 arguments (fn, list)"));
+                    return Err(Error::runtime(
+                        span,
+                        "'filter' takes 2 arguments (fn, list)",
+                    ));
                 };
                 self.expect_list("filter", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
@@ -1829,7 +1889,10 @@ impl Runner<'_, '_> {
                         _ => {
                             return Err(Error::runtime(
                                 span,
-                                format!("'array->list' expects array, got {}", v.type_name(self.pool)),
+                                format!(
+                                    "'array->list' expects array, got {}",
+                                    v.type_name(self.pool)
+                                ),
                             ));
                         }
                     },

@@ -257,10 +257,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_number(&mut self, span: Span, neg: bool) -> Result<TokenKind, Error> {
-        if !neg
-            && self.peek() == Some(b'0')
-            && matches!(self.peek_at(1), Some(b'x') | Some(b'X'))
-        {
+        if !neg && self.peek() == Some(b'0') && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
             self.bump();
             self.bump();
             let mut hex = String::new();

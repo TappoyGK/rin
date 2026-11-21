@@ -63,7 +63,10 @@ impl Schema {
         }
 
         let root = root.ok_or_else(|| {
-            Error::parse(Span::new(1, 1), "schema must end with a root type expression")
+            Error::parse(
+                Span::new(1, 1),
+                "schema must end with a root type expression",
+            )
         })?;
         let schema = Self { defs, root };
         schema.validate_refs(&schema.root)?;

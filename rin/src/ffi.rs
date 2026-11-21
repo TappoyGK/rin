@@ -230,7 +230,9 @@ pub unsafe extern "C" fn rin_call(
         return RinEvalResult {
             ok: false,
             value: std::ptr::null_mut(),
-            error_message: CString::new("invalid UTF-8 function name").unwrap().into_raw(),
+            error_message: CString::new("invalid UTF-8 function name")
+                .unwrap()
+                .into_raw(),
             error_line: 0,
             error_col: 0,
         };
@@ -616,10 +618,7 @@ pub unsafe extern "C" fn rin_as_str(val: *const RinValue, out_len: *mut usize) -
 /// # Safety
 /// `val` and `field` must be valid pointers (`field` NUL-terminated UTF-8).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_field(
-    val: *const RinValue,
-    field: *const c_char,
-) -> *mut RinValue {
+pub unsafe extern "C" fn rin_field(val: *const RinValue, field: *const c_char) -> *mut RinValue {
     if val.is_null() || field.is_null() {
         return std::ptr::null_mut();
     }
@@ -643,10 +642,7 @@ pub unsafe extern "C" fn rin_field(
 /// # Safety
 /// `val` and `out_len` must be valid pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_variant_name(
-    val: *const RinValue,
-    out_len: *mut usize,
-) -> *const u8 {
+pub unsafe extern "C" fn rin_variant_name(val: *const RinValue, out_len: *mut usize) -> *const u8 {
     if val.is_null() || out_len.is_null() {
         return std::ptr::null();
     }
@@ -671,9 +667,7 @@ pub unsafe extern "C" fn rin_unwrap(val: *const RinValue) -> *mut RinValue {
     // SAFETY: Caller guarantees valid pointer.
     let inner = match unsafe { &(*val).0 } {
         Value::Some(v) | Value::Ok(v) | Value::Err(v) => Some((**v).clone()),
-        Value::Variant {
-            data: Some(v), ..
-        } => Some((**v).clone()),
+        Value::Variant { data: Some(v), .. } => Some((**v).clone()),
         _ => None,
     };
     match inner {
@@ -775,10 +769,7 @@ pub extern "C" fn rin_nil() -> *mut RinValue {
 /// # Safety
 /// `head` and `tail` must be valid `RinValue` pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_cons(
-    head: *const RinValue,
-    tail: *const RinValue,
-) -> *mut RinValue {
+pub unsafe extern "C" fn rin_cons(head: *const RinValue, tail: *const RinValue) -> *mut RinValue {
     if head.is_null() || tail.is_null() {
         return std::ptr::null_mut();
     }

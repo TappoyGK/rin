@@ -480,12 +480,11 @@ impl Parser {
                 _ if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {
                     self.expect(TokenKind::Dot, "'.' in variant pattern")?;
                     let (variant, _) = self.expect_ident("variant name")?;
-                    let binding =
-                        if self.peek().kind == TokenKind::LParen && self.peek().attached {
-                            self.parse_opt_binding()?
-                        } else {
-                            None
-                        };
+                    let binding = if self.peek().kind == TokenKind::LParen && self.peek().attached {
+                        self.parse_opt_binding()?
+                    } else {
+                        None
+                    };
                     Ok(Pattern::Variant {
                         type_name: name,
                         variant,

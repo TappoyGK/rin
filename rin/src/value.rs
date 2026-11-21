@@ -209,9 +209,7 @@ impl Value {
                 variant,
                 data,
             } => {
-                32 + type_name.len()
-                    + variant.len()
-                    + data.as_ref().map_or(0, |d| d.approx_bytes())
+                32 + type_name.len() + variant.len() + data.as_ref().map_or(0, |d| d.approx_bytes())
             }
             Value::Some(v) | Value::Ok(v) | Value::Err(v) => 16 + v.approx_bytes(),
         }

@@ -1,14 +1,19 @@
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind, Pattern};
-use crate::bytecode::{Capture, Chunk, FnProto, Op, StructDesc};
+use crate::bytecode::{Capture, Chunk, FnProto, Op, StructDesc, SymTable};
 use crate::error::{Error, Span};
 
-pub(crate) fn compile_program(exprs: &[Expr], module: Option<&str>) -> Result<Chunk, Error> {
+pub(crate) fn compile_program(
+    exprs: &[Expr],
+    module: Option<&str>,
+    syms: &mut SymTable,
+) -> Result<Chunk, Error> {
     let mod_rc: Option<Rc<str>> = module.map(Rc::from);
     let mut compiler = Compiler {
         scopes: vec![Scope::new(mod_rc.clone())],
         module: mod_rc,
+        syms,
     };
     if exprs.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
@@ -16,9 +21,10 @@ pub(crate) fn compile_program(exprs: &[Expr], module: Option<&str>) -> Result<Ch
         for (i, expr) in exprs.iter().enumerate() {
             compiler.compile_expr(expr, false)?;
             if i + 1 < exprs.len() {
-                compiler.chunk().emit(Op::Pop, expr.span);
+                compiler.emit(Op::Pop, expr.span);
             }
         }
+        compiler.flush_ticks(exprs.last().unwrap().span);
     }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
@@ -31,6 +37,7 @@ struct Scope {
     next_slot: u32,
     max_slots: u32,
     captures: Vec<(String, Capture)>,
+    pending_ticks: u32,
     chunk: Chunk,
 }
 
@@ -42,6 +49,7 @@ impl Scope {
             next_slot: 0,
             max_slots: 0,
             captures: Vec::new(),
+            pending_ticks: 0,
             chunk: Chunk::default(),
         }
     }
@@ -78,14 +86,29 @@ impl Scope {
     }
 }
 
-struct Compiler {
+struct Compiler<'a> {
     scopes: Vec<Scope>,
     module: Option<Rc<str>>,
+    syms: &'a mut SymTable,
 }
 
-impl Compiler {
+impl Compiler<'_> {
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.scopes.last_mut().unwrap().chunk
+    }
+
+    fn flush_ticks(&mut self, span: Span) {
+        let top = self.scopes.last_mut().unwrap();
+        if top.pending_ticks > 0 {
+            let n = top.pending_ticks;
+            top.pending_ticks = 0;
+            top.chunk.emit(Op::Tick(n), span);
+        }
+    }
+
+    fn emit(&mut self, op: Op, span: Span) -> usize {
+        self.flush_ticks(span);
+        self.chunk().emit(op, span)
     }
 
     fn resolve_var(&mut self, name: &str, span: Span) -> Result<Op, Error> {
@@ -98,8 +121,8 @@ impl Compiler {
         {
             return Ok(Op::GetCapture(cap_idx));
         }
-        let str_idx = self.chunk().add_string(name);
-        Ok(Op::GetGlobal(str_idx))
+        let sym_id = self.syms.intern(name);
+        Ok(Op::GetGlobal(sym_id))
     }
 
     fn resolve_capture(
@@ -143,8 +166,11 @@ impl Compiler {
             let last = i + 1 == body.len();
             self.compile_expr(expr, is_tail && last)?;
             if !last {
-                self.chunk().emit(Op::Pop, expr.span);
+                self.emit(Op::Pop, expr.span);
             }
+        }
+        if let Some(last_expr) = body.last() {
+            self.flush_ticks(last_expr.span);
         }
         Ok(())
     }
@@ -156,8 +182,8 @@ impl Compiler {
         body: &[Expr],
         span: Span,
     ) -> Result<Rc<FnProto>, Error> {
-        let arity = u32::try_from(params.len())
-            .map_err(|_| Error::parse(span, "too many parameters"))?;
+        let arity =
+            u32::try_from(params.len()).map_err(|_| Error::parse(span, "too many parameters"))?;
         let mut inner = Scope::new(self.module.clone());
         for p in params {
             inner.alloc_slot(p.clone(), span)?;
@@ -166,8 +192,6 @@ impl Compiler {
         self.compile_body(body, true)?;
         let finished = self.scopes.pop().unwrap();
         let captures: Vec<Capture> = finished.captures.into_iter().map(|(_, c)| c).collect();
-    let approx_bytes = 0; // FnProto bytecode lives outside Pool's per-instance budget
-    let _ = approx_bytes;
         Ok(Rc::new(FnProto {
             name,
             module: finished.module,
@@ -181,10 +205,9 @@ impl Compiler {
     fn patch_jump(&mut self, op_idx: usize, target: usize) {
         let code = &mut self.chunk().code;
         match &mut code[op_idx] {
-            Op::Jump(t)
-            | Op::JumpIfFalse(t)
-            | Op::JumpIfFalsePeek(t)
-            | Op::JumpIfTruePeek(t) => *t = target,
+            Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfFalsePeek(t) | Op::JumpIfTruePeek(t) => {
+                *t = target
+            }
             Op::TryMatch { fail_ip, .. } => *fail_ip = target,
             _ => unreachable!(),
         }
@@ -192,7 +215,7 @@ impl Compiler {
 
     fn compile_expr(&mut self, expr: &Expr, is_tail: bool) -> Result<(), Error> {
         let span = expr.span;
-        self.chunk().emit(Op::Tick, span);
+        self.scopes.last_mut().unwrap().pending_ticks += 1;
 
         match &expr.kind {
             ExprKind::Int(n) => {
@@ -210,25 +233,32 @@ impl Compiler {
             }
             ExprKind::Str(s) => {
                 let idx = self.chunk().add_string(s);
-                self.chunk().emit(Op::Str(idx), span);
+                self.emit(Op::Str(idx), span);
             }
             ExprKind::None => {
                 self.chunk().emit(Op::None, span);
             }
             ExprKind::Ident(name) => {
                 let op = self.resolve_var(name, span)?;
-                self.chunk().emit(op, span);
+                match op {
+                    Op::GetGlobal(_) => {
+                        self.emit(op, span);
+                    }
+                    _ => {
+                        self.chunk().emit(op, span);
+                    }
+                }
             }
             ExprKind::List(items) => {
                 let count = u32::try_from(items.len())
                     .map_err(|_| Error::parse(span, "list literal too large"))?;
                 if count == 0 {
-                    self.chunk().emit(Op::EmptyList, span);
+                    self.emit(Op::EmptyList, span);
                 } else {
                     for item in items {
                         self.compile_expr(item, false)?;
                     }
-                    self.chunk().emit(Op::MakeList(count), span);
+                    self.emit(Op::MakeList(count), span);
                 }
             }
             ExprKind::Tuple(items) => {
@@ -237,7 +267,7 @@ impl Compiler {
                 for item in items {
                     self.compile_expr(item, false)?;
                 }
-                self.chunk().emit(Op::MakeTuple(count), span);
+                self.emit(Op::MakeTuple(count), span);
             }
             ExprKind::Struct { name, fields } => {
                 let mut field_names = Vec::with_capacity(fields.len());
@@ -249,16 +279,15 @@ impl Compiler {
                     name: Rc::from(name.as_str()),
                     fields: field_names,
                 });
-                self.chunk().emit(Op::MakeStruct(s_idx), span);
+                self.emit(Op::MakeStruct(s_idx), span);
             }
             ExprKind::With { target, fields } => {
                 self.compile_expr(target, false)?;
-                self.chunk().emit(Op::WithCheckStruct, span);
+                self.emit(Op::WithCheckStruct, span);
                 let mut field_names = Vec::with_capacity(fields.len());
                 for (idx, (fname, fexpr)) in fields.iter().enumerate() {
                     let f_idx = self.chunk().add_string(fname);
-                    self.chunk()
-                        .emit(Op::WithCheckField(f_idx, idx as u32), span);
+                    self.emit(Op::WithCheckField(f_idx, idx as u32), span);
                     self.compile_expr(fexpr, false)?;
                     field_names.push(Rc::from(fname.as_str()));
                 }
@@ -266,7 +295,7 @@ impl Compiler {
                     name: Rc::from(""),
                     fields: field_names,
                 });
-                self.chunk().emit(Op::WithFinish(s_idx), span);
+                self.emit(Op::WithFinish(s_idx), span);
             }
             ExprKind::Variant {
                 type_name,
@@ -279,7 +308,7 @@ impl Compiler {
                 }
                 let t_idx = self.chunk().add_string(type_name);
                 let v_idx = self.chunk().add_string(variant);
-                self.chunk().emit(
+                self.emit(
                     Op::MakeVariant {
                         type_name: t_idx,
                         variant: v_idx,
@@ -290,41 +319,41 @@ impl Compiler {
             }
             ExprKind::Some(inner) => {
                 self.compile_expr(inner, false)?;
-                self.chunk().emit(Op::MakeSome, span);
+                self.emit(Op::MakeSome, span);
             }
             ExprKind::Ok(inner) => {
                 self.compile_expr(inner, false)?;
-                self.chunk().emit(Op::MakeOk, span);
+                self.emit(Op::MakeOk, span);
             }
             ExprKind::Err(inner) => {
                 self.compile_expr(inner, false)?;
-                self.chunk().emit(Op::MakeErr, span);
+                self.emit(Op::MakeErr, span);
             }
             ExprKind::Field { target, field } => {
                 self.compile_expr(target, false)?;
                 let f_idx = self.chunk().add_string(field);
-                self.chunk().emit(Op::GetField(f_idx), span);
+                self.emit(Op::GetField(f_idx), span);
             }
             ExprKind::Index { target, index } => {
                 self.compile_expr(target, false)?;
                 self.compile_expr(index, false)?;
-                self.chunk().emit(Op::GetIndex, span);
+                self.emit(Op::GetIndex, span);
             }
             ExprKind::Def { name, value } => {
                 self.compile_expr(value, false)?;
-                let n_idx = self.chunk().add_string(name);
-                self.chunk().emit(Op::DefGlobal(n_idx), span);
+                let n_idx = self.syms.intern(name);
+                self.emit(Op::DefGlobal(n_idx), span);
             }
             ExprKind::Defn { name, params, body } => {
                 let proto = self.compile_fn_proto(Some(name.clone()), params, body, span)?;
                 let p_idx = self.chunk().add_proto(proto);
-                let n_idx = self.chunk().add_string(name);
-                self.chunk().emit(Op::DefFn(n_idx, p_idx), span);
+                let n_idx = self.syms.intern(name);
+                self.emit(Op::DefFn(n_idx, p_idx), span);
             }
             ExprKind::Fn { params, body } => {
                 let proto = self.compile_fn_proto(None, params, body, span)?;
                 let p_idx = self.chunk().add_proto(proto);
-                self.chunk().emit(Op::MakeClosure(p_idx), span);
+                self.emit(Op::MakeClosure(p_idx), span);
             }
             ExprKind::Let { bindings, body } => {
                 let saved_locals_len = self.scopes.last().unwrap().locals.len();
@@ -349,20 +378,21 @@ impl Compiler {
                 else_branch,
             } => {
                 self.compile_expr(cond, false)?;
-                let j_else = self.chunk().emit(Op::JumpIfFalse(0), cond.span);
+                let j_else = self.emit(Op::JumpIfFalse(0), cond.span);
                 self.compile_expr(then_branch, is_tail)?;
-                let j_end = self.chunk().emit(Op::Jump(0), span);
+                let j_end = self.emit(Op::Jump(0), span);
                 let else_ip = self.chunk().code.len();
                 self.patch_jump(j_else, else_ip);
                 self.compile_expr(else_branch, is_tail)?;
+                self.flush_ticks(span);
                 let end_ip = self.chunk().code.len();
                 self.patch_jump(j_end, end_ip);
             }
             ExprKind::When { cond, body } => {
                 self.compile_expr(cond, false)?;
-                let j_end = self.chunk().emit(Op::JumpIfFalse(0), cond.span);
+                let j_end = self.emit(Op::JumpIfFalse(0), cond.span);
                 self.compile_body(body, false)?;
-                self.chunk().emit(Op::Pop, span);
+                self.emit(Op::Pop, span);
                 let end_ip = self.chunk().code.len();
                 self.patch_jump(j_end, end_ip);
                 self.chunk().emit(Op::Void, span);
@@ -372,7 +402,7 @@ impl Compiler {
                 let mut end_jumps = Vec::with_capacity(arms.len());
                 for arm in arms {
                     let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
-                    let try_ip = self.chunk().emit(
+                    let try_ip = self.emit(
                         Op::TryMatch {
                             pat_idx,
                             fail_ip: 0,
@@ -394,12 +424,12 @@ impl Compiler {
                     let scope = self.scopes.last_mut().unwrap();
                     scope.locals.truncate(saved_locals_len);
                     scope.next_slot = saved_next_slot;
-                    end_jumps.push(self.chunk().emit(Op::Jump(0), arm.span));
+                    end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
                     self.patch_jump(try_ip, fail_ip);
                 }
                 self.chunk().emit(Op::Pop, span);
-                self.chunk().emit(Op::MatchFail, span);
+                self.emit(Op::MatchFail, span);
                 let end_ip = self.chunk().code.len();
                 for j in end_jumps {
                     self.patch_jump(j, end_ip);
@@ -425,15 +455,15 @@ impl Compiler {
                 } else {
                     Op::Call(argc)
                 };
-                self.chunk().emit(call_op, span);
+                self.emit(call_op, span);
             }
             ExprKind::Import { name } => {
-                let idx = self.chunk().add_string(name);
-                self.chunk().emit(Op::Import(idx), span);
+                let idx = self.syms.intern(name);
+                self.emit(Op::Import(idx), span);
             }
             ExprKind::Export { names } => {
                 let idx = self.chunk().add_exports(names.clone());
-                self.chunk().emit(Op::Export(idx), span);
+                self.emit(Op::Export(idx), span);
             }
         }
         Ok(())
@@ -447,16 +477,16 @@ impl Compiler {
     ) -> Result<(), Error> {
         if args.is_empty() {
             let op = if is_and { Op::And } else { Op::Or };
-            self.chunk().emit(op, span);
+            self.emit(op, span);
             return Ok(());
         }
         let mut jumps = Vec::with_capacity(args.len());
         for arg in args {
             self.compile_expr(arg, false)?;
             let j = if is_and {
-                self.chunk().emit(Op::JumpIfFalsePeek(0), arg.span)
+                self.emit(Op::JumpIfFalsePeek(0), arg.span)
             } else {
-                self.chunk().emit(Op::JumpIfTruePeek(0), arg.span)
+                self.emit(Op::JumpIfTruePeek(0), arg.span)
             };
             jumps.push(j);
         }

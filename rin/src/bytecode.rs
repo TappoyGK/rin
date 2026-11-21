@@ -178,6 +178,28 @@ impl BuiltinId {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SymTable {
+    pub names: Vec<Rc<str>>,
+    ids: HashMap<String, u32>,
+}
+
+impl SymTable {
+    pub fn intern(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        let id = self.names.len() as u32;
+        self.names.push(Rc::from(name));
+        self.ids.insert(name.to_string(), id);
+        id
+    }
+
+    pub fn get(&self, name: &str) -> Option<u32> {
+        self.ids.get(name).copied()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capture {
     Local(u32),
@@ -280,7 +302,7 @@ impl Chunk {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
-    Tick,
+    Tick(u32),
     Void,
     Int(i64),
     Float(u32),
