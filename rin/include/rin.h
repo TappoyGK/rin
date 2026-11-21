@@ -60,6 +60,7 @@ RinEvalResult rin_eval(RinMachine *machine, const char *source);
 RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source);
 RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc);
 RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
+const char *rin_last_backtrace(const RinMachine *machine);
 void rin_res_free(RinEvalResult *res);
 
 RinValue *rin_int(int64_t n);

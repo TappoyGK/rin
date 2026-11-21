@@ -1,3 +1,5 @@
+//! 外部アロケータ上で動作する参照カウント付きオブジェクトプールを実装する。
+
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -8,11 +10,11 @@ use crate::value::Value;
 
 const CHUNK_SLOTS: usize = 256;
 
-/// Handle to a refcounted object inside Rin's internal pool.
+/// 内部プール内の参照カウント付きオブジェクトへのハンドル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ObjId(pub u32);
 
-/// Compact runtime value stored in variables, stacks, and pool objects.
+/// 変数・スタック・プールオブジェクトに格納する軽量な実行時値。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RVal {
     Void,
@@ -159,14 +161,13 @@ enum Slot {
     Live { rc: u32, bytes: usize, obj: Obj },
 }
 
-/// Refcounted object pool backed by chunked slabs from a caller-provided `Allocator`.
+/// 呼び出し側の `Allocator` から確保したスラブ群で動く参照カウント付きオブジェクトプール。
 ///
-/// Dead objects are returned to a free-list and reused immediately on subsequent
-/// allocations, preventing monotonic memory growth within a single arena/session.
+/// 不要になったスロットはフリーリストへ返し、次回確保時に即座に再利用する。
 pub(crate) struct Pool<'a> {
     alloc: &'a mut dyn Allocator,
     chunks: Vec<AllocBuf<Slot>>,
-    /// Number of initialized slots in the last chunk.
+    /// 最終チャンク内の初期化済みスロット数。
     last_chunk_len: usize,
     free_head: Option<u32>,
     live_bytes: usize,
@@ -330,7 +331,7 @@ impl<'a> Pool<'a> {
         let in_chunk = self.last_chunk_len;
         let global_idx = (chunk_idx * CHUNK_SLOTS + in_chunk) as u32;
         let slot = Slot::Live { rc: 1, bytes, obj };
-        // SAFETY: `in_chunk < CHUNK_SLOTS` and is uninitialized.
+        // SAFETY: `in_chunk < CHUNK_SLOTS` かつ未初期化。
         unsafe { self.chunks[chunk_idx].write_at(in_chunk, slot) };
         self.last_chunk_len += 1;
         self.live_bytes = next_live;
@@ -363,7 +364,7 @@ impl<'a> Pool<'a> {
         }
     }
 
-    /// Exports a runtime `RVal` into a standalone `Value`.
+    /// 実行時値 `RVal` をホスト向けの独立した `Value` へ変換する。
     pub fn export(&self, val: RVal) -> Value {
         match val {
             RVal::Void => Value::Void,
@@ -418,7 +419,7 @@ impl<'a> Pool<'a> {
         }
     }
 
-    /// Imports an external `Value` into the pool.
+    /// ホスト側の `Value` をプール内の実行時値 `RVal` へ取り込む。
     pub fn import(&mut self, val: &Value, span: Span) -> Result<RVal, Error> {
         match val {
             Value::Void => Ok(RVal::Void),

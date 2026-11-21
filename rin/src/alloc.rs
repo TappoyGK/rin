@@ -1,25 +1,26 @@
+//! ランタイムプールが利用する外部メモリ割り当て境界とアリーナ実装を定義する。
+
 use std::alloc::Layout;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-/// External memory allocator interface for Rin's runtime pool.
+/// Rin のランタイムプールが利用する外部メモリアロケータ境界。
 ///
-/// Hosts (such as an arena-backed runtime) can implement this trait to control
-/// where Rin allocates its backing memory slabs.
+/// ホスト（アリーナベースのランタイムなど）はこのトレイトを実装して
+/// メモリスラブの確保先を制御できる。
 pub trait Allocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>>;
 
-    /// Releases a previously allocated block.
+    /// 以前に確保したブロックを解放する。
     ///
-    /// Arena implementations may treat this as a no-op and reclaim all memory
-    /// when the arena scope ends.
+    /// アリーナ実装では個別解放を無視し、スコープ終了時に一括回収してもよい。
     ///
     /// # Safety
-    /// `ptr` must have been returned by `self.alloc(layout)` and not yet deallocated.
+    /// `ptr` は `self.alloc(layout)` が返した未解放のポインタでなければならない。
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout);
 }
 
-/// Default allocator backed by Rust's global heap allocator.
+/// Rust の標準グローバルヒープを使う既定のアロケータ。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HeapAllocator;
 
@@ -28,7 +29,7 @@ impl Allocator for HeapAllocator {
         if layout.size() == 0 {
             return Some(NonNull::dangling());
         }
-        // SAFETY: `layout.size() > 0` is checked above.
+        // SAFETY: 直前で `layout.size() > 0` を確認済み。
         let ptr = unsafe { std::alloc::alloc(layout) };
         NonNull::new(ptr)
     }
@@ -37,15 +38,14 @@ impl Allocator for HeapAllocator {
         if layout.size() == 0 {
             return;
         }
-        // SAFETY: Caller guarantees `ptr` came from `std::alloc::alloc(layout)`.
+        // SAFETY: 呼び出し側が `std::alloc::alloc(layout)` 由来のポインタであることを保証する。
         unsafe { std::alloc::dealloc(ptr.as_ptr(), layout) };
     }
 }
 
-/// Bump-pointer arena allocator over a caller-provided byte slice.
+/// 呼び出し側が渡したバイトスライス上で動作するバンプポインタ型アリーナ。
 ///
-/// Individual `dealloc` calls are no-ops; all memory is reclaimed when the
-/// underlying slice is dropped or reset.
+/// 個別の `dealloc` は何もしない。スライスの破棄またはリセット時に一括解放する。
 pub struct ArenaAllocator<'a> {
     buf: &'a mut [u8],
     offset: usize,
@@ -77,17 +77,17 @@ impl Allocator for ArenaAllocator<'_> {
             return None;
         }
         self.offset = end;
-        // SAFETY: `aligned < end <= self.buf.len()`.
+        // SAFETY: `aligned < end <= self.buf.len()` が成り立つ。
         let ptr = unsafe { self.buf.as_mut_ptr().add(aligned) };
         NonNull::new(ptr)
     }
 
     unsafe fn dealloc(&mut self, _ptr: NonNull<u8>, _layout: Layout) {
-        // Arena reclaims memory in bulk when the backing buffer is dropped/reset.
+        // アリーナは背後バッファの破棄またはリセット時に一括回収するため個別解放は不要。
     }
 }
 
-/// Contiguous buffer of `T` allocated from an `Allocator`.
+/// `Allocator` から確保した連続領域バッファ。
 pub(crate) struct AllocBuf<T> {
     ptr: NonNull<T>,
     cap: usize,
@@ -121,7 +121,7 @@ impl<T> AllocBuf<T> {
         if len == 0 {
             return &[];
         }
-        // SAFETY: `len <= self.cap` and elements `0..len` are initialized.
+        // SAFETY: `len <= self.cap` かつ `0..len` が初期化済み。
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), len) }
     }
 
@@ -130,32 +130,32 @@ impl<T> AllocBuf<T> {
         if len == 0 {
             return &mut [];
         }
-        // SAFETY: `len <= self.cap` and elements `0..len` are initialized.
+        // SAFETY: `len <= self.cap` かつ `0..len` が初期化済み。
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), len) }
     }
 
-    /// Writes `value` at uninitialized index `idx`.
+    /// 未初期化の位置 `idx` に `value` を書き込む。
     ///
     /// # Safety
-    /// `idx < self.cap` and slot `idx` must currently be uninitialized.
+    /// `idx < self.cap` かつ位置 `idx` が未初期化でなければならない。
     pub unsafe fn write_at(&mut self, idx: usize, value: T) {
         debug_assert!(idx < self.cap);
-        // SAFETY: Caller guarantees `idx < self.cap` and slot is uninitialized.
+        // SAFETY: 呼び出し側が `idx < self.cap` と未初期化を保証する。
         unsafe { self.ptr.as_ptr().add(idx).write(value) };
     }
 
-    /// Releases the backing allocation via `alloc` after dropping `0..len` initialized items.
+    /// 初期化済みの `0..len` 要素を破棄した後、`alloc` 経由で領域を解放する。
     pub fn destroy(&mut self, alloc: &mut dyn Allocator, len: usize) {
         debug_assert!(len <= self.cap);
         if self.cap == 0 || std::mem::size_of::<T>() == 0 {
             return;
         }
         for i in 0..len {
-            // SAFETY: `0..len` are initialized.
+            // SAFETY: `0..len` は初期化済み。
             unsafe { std::ptr::drop_in_place(self.ptr.as_ptr().add(i)) };
         }
         if let Ok(layout) = Layout::array::<T>(self.cap) {
-            // SAFETY: `self.ptr` was allocated with `layout` from `alloc`.
+            // SAFETY: `self.ptr` は `alloc` から `layout` で確保した領域。
             unsafe { alloc.dealloc(self.ptr.cast::<u8>(), layout) };
         }
         self.ptr = NonNull::dangling();

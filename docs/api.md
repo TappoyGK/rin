@@ -76,10 +76,30 @@ pub enum ErrorKind {
     TooMuchMemory,
 }
 
+pub struct StackFrame {
+    pub module: Option<String>,
+    pub name: Option<String>,
+    pub caller_module: Option<String>,
+    pub at: Span,
+    pub tail_calls: usize,
+    pub tail_target_module: Option<String>,
+    pub tail_target_name: Option<String>,
+    pub repeat_count: usize,
+    pub from_host: bool,
+    pub via_builtin: Option<String>,
+}
+
 pub struct Error {
     pub kind: ErrorKind,
     pub at: Span, // 1始まりの line, col
     pub message: String,
+}
+
+impl Error {
+    pub fn module(&self) -> Option<&str>;
+    pub fn backtrace(&self) -> &[StackFrame];
+    pub fn omitted_frames(&self) -> usize;
+    pub fn format_backtrace(&self) -> String;
 }
 ```
 
@@ -110,6 +130,7 @@ pub struct Error {
 | `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む |
 | `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す |
 | `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す |
+| `const char *rin_last_backtrace(const RinMachine *machine)` | 直近のエラーのコールスタック文字列を返す（なければ `NULL`、次の呼び出しまたは `rin_free` まで有効） |
 | `void rin_res_free(RinEvalResult *res)` | `rin_eval` の結果（`value` / `error_message`）を解放する |
 
 ### 2.3 値の生成と解放

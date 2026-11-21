@@ -1,3 +1,5 @@
+//! Rin の値構造を検証するスキーマ DSL の構文解析と照合を実装する。
+
 use std::collections::BTreeMap;
 
 use crate::error::{Error, Span};
@@ -30,7 +32,7 @@ pub enum TypeExpr {
     Ref(String),
 }
 
-/// Compiled Rin schema for validating `Value` structures.
+/// `Value` の構造を検証するコンパイル済み Rin スキーマ。
 #[derive(Debug, Clone)]
 pub struct Schema {
     defs: BTreeMap<String, TypeExpr>,
@@ -38,7 +40,7 @@ pub struct Schema {
 }
 
 impl Schema {
-    /// Parses one or more `(defschema Name TypeExpr)` declarations followed by a root `TypeExpr`.
+    /// 0 個以上の `(defschema Name TypeExpr)` 宣言と末尾のルート `TypeExpr` を解析する。
     pub fn parse(source: &str) -> Result<Self, Error> {
         let tokens = tokenize(source)?;
         let mut p = SchemaParser { tokens, pos: 0 };
@@ -125,7 +127,7 @@ impl Schema {
         }
     }
 
-    /// Checks whether `value` conforms to this schema.
+    /// `value` がこのスキーマに適合するか検証する。
     pub fn check(&self, value: &Value) -> Result<(), Error> {
         self.check_type(value, &self.root, "$")
     }

@@ -1,3 +1,5 @@
+//! バイトコード VM の実行環境 `Machine` と `Runner` を定義する。
+
 mod builtins;
 mod ops;
 mod vm;
@@ -13,13 +15,13 @@ use crate::parser::parse_program;
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
-/// Evaluates Rin source code using the default `HeapAllocator`.
+/// 既定の `HeapAllocator` を用いて Rin ソースを評価する。
 pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
 }
 
-/// Evaluates Rin source code using a caller-provided `Allocator`.
+/// 呼び出し側が指定した `Allocator` を用いて Rin ソースを評価する。
 pub fn eval_with_allocator(
     source: &str,
     bindings: &[(&str, Value)],
@@ -33,11 +35,10 @@ pub fn eval_with_allocator(
     machine.eval(source)
 }
 
-/// Persistent Rin execution environment backed by a caller-provided `Allocator`.
+/// 呼び出し側の `Allocator` 上で動作する永続的な Rin 実行環境。
 ///
-/// Top-level definitions (`def` / `defn`) persist across `eval` calls, while
-/// temporary values created during evaluation are reclaimed via reference
-/// counting and reused from the pool's free-list.
+/// トップレベル定義（`def` / `defn`）は `eval` 呼び出しをまたいで保持され、
+/// 評価中に作られた一時値は参照カウントとフリーリストで即座に再利用する。
 pub struct Machine<'a> {
     limits: Limits,
     pool: Pool<'a>,
@@ -45,6 +46,7 @@ pub struct Machine<'a> {
     globals: Vec<Option<RVal>>,
     modules: BTreeMap<String, RVal>,
     module_ids: BTreeMap<String, u32>,
+    module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
 }
 
@@ -73,6 +75,7 @@ impl<'a> Machine<'a> {
             globals,
             modules: BTreeMap::new(),
             module_ids: BTreeMap::new(),
+            module_names: Vec::new(),
             module_envs: Vec::new(),
         }
     }
@@ -90,35 +93,32 @@ impl<'a> Machine<'a> {
         self.pool.live_bytes()
     }
 
-    /// Loads and evaluates a named module from host-provided source.
+    /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
+        let with_mod = |mut err: Error| {
+            err.resolve_module(Some(name.to_string()));
+            err
+        };
         let mod_id = match self.module_ids.get(name).copied() {
             Some(id) => id,
             None => {
                 let id = self.module_envs.len() as u32;
                 self.module_ids.insert(name.to_string(), id);
+                self.module_names.push(name.to_string());
                 self.module_envs.push(Vec::new());
                 id
             }
         };
-        let exprs = parse_program(source)?;
-        let chunk = compile_program(&exprs, Some(mod_id), &mut self.syms)?;
+        let exprs = parse_program(source).map_err(with_mod)?;
+        let chunk = compile_program(&exprs, Some(mod_id), &mut self.syms).map_err(with_mod)?;
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
             .into_iter()
             .flatten()
         {
             self.pool.release_val(v);
         }
-        let mut runner = Runner::new(
-            self.limits,
-            &mut self.pool,
-            &self.syms,
-            &mut self.globals,
-            &self.modules,
-            &mut self.module_envs,
-            Some(mod_id),
-        );
-        let v = runner.run_top_chunk(&chunk)?;
+        let mut runner = self.runner(Some(mod_id));
+        let v = runner.run_top_chunk(&chunk).map_err(with_mod)?;
         runner.pool.release_val(v);
         let export_filter = runner.export_list.take();
         let mod_env = &self.module_envs[mod_id as usize];
@@ -170,22 +170,14 @@ impl<'a> Machine<'a> {
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         let exprs = parse_program(source)?;
         let chunk = compile_program(&exprs, None, &mut self.syms)?;
-        let mut runner = Runner::new(
-            self.limits,
-            &mut self.pool,
-            &self.syms,
-            &mut self.globals,
-            &self.modules,
-            &mut self.module_envs,
-            None,
-        );
+        let mut runner = self.runner(None);
         let last = runner.run_top_chunk(&chunk)?;
         let exported = runner.pool.export(last);
         runner.pool.release_val(last);
         Ok(exported)
     }
 
-    /// Calls a previously defined global function directly without re-parsing source.
+    /// 定義済みの大域関数をソース再解析なしで直接呼び出す。
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
         let Some(callee) = self
             .syms
@@ -200,7 +192,7 @@ impl<'a> Machine<'a> {
         self.call_rval(callee, args)
     }
 
-    /// Calls an exported function from a loaded module directly without re-parsing source.
+    /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
     pub fn call_in(
         &mut self,
         mod_name: &str,
@@ -239,16 +231,8 @@ impl<'a> Machine<'a> {
             }
         }
         self.pool.retain_val(callee);
-        let mut runner = Runner::new(
-            self.limits,
-            &mut self.pool,
-            &self.syms,
-            &mut self.globals,
-            &self.modules,
-            &mut self.module_envs,
-            None,
-        );
-        let res = runner.apply(callee, &r_args, Span::default());
+        let mut runner = self.runner(None);
+        let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
         runner.pool.release_val(callee);
         runner.release_all(r_args);
         let val = res?;
@@ -277,6 +261,32 @@ impl Drop for Machine<'_> {
     }
 }
 
+impl<'a> Machine<'a> {
+    fn runner(&mut self, active_module: Option<u32>) -> Runner<'_, 'a> {
+        Runner {
+            limits: self.limits,
+            steps: 0,
+            depth: 0,
+            pool: &mut self.pool,
+            syms: &self.syms,
+            globals: &mut self.globals,
+            modules: &self.modules,
+            module_names: &self.module_names,
+            module_envs: &mut self.module_envs,
+            active_module,
+            export_list: None,
+            stack: Vec::with_capacity(64),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CallOrigin<'a> {
+    Rin(Span),
+    Host,
+    Builtin { name: &'a str, at: Span },
+}
+
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
     pub(super) steps: usize,
@@ -285,6 +295,7 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) syms: &'a SymTable,
     pub(super) globals: &'a mut Vec<Option<RVal>>,
     pub(super) modules: &'a BTreeMap<String, RVal>,
+    pub(super) module_names: &'a [String],
     pub(super) module_envs: &'a mut Vec<Vec<Option<RVal>>>,
     pub(super) active_module: Option<u32>,
     pub(super) export_list: Option<Vec<String>>,
@@ -292,30 +303,6 @@ pub(super) struct Runner<'a, 'p> {
 }
 
 impl<'a, 'p> Runner<'a, 'p> {
-    pub(super) fn new(
-        limits: Limits,
-        pool: &'a mut Pool<'p>,
-        syms: &'a SymTable,
-        globals: &'a mut Vec<Option<RVal>>,
-        modules: &'a BTreeMap<String, RVal>,
-        module_envs: &'a mut Vec<Vec<Option<RVal>>>,
-        active_module: Option<u32>,
-    ) -> Self {
-        Self {
-            limits,
-            steps: 0,
-            depth: 0,
-            pool,
-            syms,
-            globals,
-            modules,
-            module_envs,
-            active_module,
-            export_list: None,
-            stack: Vec::with_capacity(64),
-        }
-    }
-
     #[inline(always)]
     pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
         let next = self.steps + count as usize;
@@ -437,6 +424,8 @@ impl<'a, 'p> Runner<'a, 'p> {
             Rc::from([]),
             base,
             chunk.local_count as usize,
+            None,
+            self.active_module,
         );
         match res {
             Ok(val) => {
@@ -451,7 +440,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
-    pub(super) fn apply(&mut self, callee: RVal, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn apply(
+        &mut self,
+        callee: RVal,
+        args: &[RVal],
+        span: Span,
+        origin: CallOrigin<'_>,
+    ) -> Result<RVal, Error> {
         match callee {
             RVal::Obj(id) => {
                 let (proto, captures) = match self.pool.get(id) {
@@ -479,7 +474,14 @@ impl<'a, 'p> Runner<'a, 'p> {
                     self.stack.push(val);
                 }
                 self.stack.resize(base + local_count, RVal::Void);
-                let res = self.exec_frame(FrameSource::Proto(proto), captures, base, local_count);
+                let res = self.exec_frame(
+                    FrameSource::Proto(proto),
+                    captures,
+                    base,
+                    local_count,
+                    Some(origin),
+                    prev_mod,
+                );
                 self.active_module = prev_mod;
                 self.leave_depth();
                 match res {

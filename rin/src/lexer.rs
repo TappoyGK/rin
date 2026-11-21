@@ -1,3 +1,5 @@
+//! Rin ソース文字列を位置付きの字句トークン列へ分解する。
+
 use crate::error::{Error, Span};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,7 +25,7 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
-    /// True if there was no whitespace or comment immediately before this token.
+    /// 直前に空白やコメントがない場合に true となる。
     pub attached: bool,
 }
 
@@ -200,7 +202,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_string(&mut self, span: Span) -> Result<String, Error> {
-        self.bump(); // opening "
+        self.bump(); // 開始の '"'
         let mut out = String::new();
         loop {
             let Some(b) = self.bump() else {
@@ -211,7 +213,7 @@ impl<'a> Lexer<'a> {
                 b'\\' => out.push(self.lex_escape(span)?),
                 _ if b < 0x80 => out.push(b as char),
                 _ => {
-                    // Decode UTF-8 multi-byte char from slice
+                    // スライスから UTF-8 マルチバイト文字を読み取る。
                     let start = self.pos - 1;
                     while let Some(next) = self.peek() {
                         if (next & 0xC0) != 0x80 {
@@ -228,7 +230,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_char(&mut self, span: Span) -> Result<char, Error> {
-        self.bump(); // opening '
+        self.bump(); // 開始の '\''
         let Some(b) = self.bump() else {
             return Err(Error::lex(span, "unterminated char literal"));
         };

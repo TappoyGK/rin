@@ -1,8 +1,10 @@
+//! ホスト境界で受け渡しする不変値 `Value` とコンスリスト `ConsList` を定義する。
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
-/// Persistent cons-cell linked list with O(1) cons, car, cdr, and len.
+/// `cons`・`car`・`cdr`・`len` を O(1) で行う永続コンスリスト。
 #[derive(Debug, Clone)]
 pub enum ListNode {
     Nil,
@@ -116,7 +118,7 @@ impl<'a> Iterator for ListIter<'a> {
     }
 }
 
-/// A Rin runtime value. All values are immutable.
+/// Rin の不変な値表現。
 #[derive(Debug, Clone)]
 pub enum Value {
     Void,
@@ -188,7 +190,7 @@ impl Value {
         }
     }
 
-    /// Rough byte-size estimate for memory budget accounting.
+    /// メモリ予算管理用の概算バイトサイズを返す。
     pub fn approx_bytes(&self) -> usize {
         match self {
             Value::Void | Value::None | Value::Builtin(_) => 8,

@@ -1,3 +1,5 @@
+//! 構文解析で生成する抽象構文木（AST）とパターン表現を定義する。
+
 use crate::error::Span;
 
 #[derive(Debug, Clone)]

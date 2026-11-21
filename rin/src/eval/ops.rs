@@ -1,3 +1,5 @@
+//! リスト補助、同値・順序比較、算術・数学演算を実装する。
+
 use crate::bytecode::BuiltinId;
 use crate::error::{Error, Span};
 use crate::pool::{Obj, RVal};

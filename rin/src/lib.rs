@@ -1,3 +1,5 @@
+//! 純粋関数型 Lisp 系言語 Rin の処理系。
+
 pub mod alloc;
 mod ast;
 mod bytecode;
@@ -12,12 +14,12 @@ pub mod schema;
 pub mod value;
 
 pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
-pub use error::{Error, ErrorKind, Limits, Span};
+pub use error::{Error, ErrorKind, Limits, Span, StackFrame};
 pub use eval::{Machine, eval_with, eval_with_allocator};
 pub use schema::Schema;
 pub use value::Value;
 
-/// Evaluates Rin source code with default limits and no external bindings.
+/// 既定の上限値・外部束縛なしで Rin ソースを評価する。
 pub fn eval(source: &str) -> Result<Value, Error> {
     eval_with(source, &[], Limits::default())
 }

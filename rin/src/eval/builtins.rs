@@ -1,8 +1,10 @@
+//! 組み込み関数および高階リスト・配列演算を実装する。
+
 use crate::bytecode::BuiltinId;
 use crate::error::{Error, Span};
 use crate::pool::{Obj, RVal};
 
-use super::Runner;
+use super::{CallOrigin, Runner};
 
 impl Runner<'_, '_> {
     pub(super) fn apply_builtin(
@@ -365,7 +367,15 @@ impl Runner<'_, '_> {
                 self.expect_list("find", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
                 for x in items {
-                    let res = self.apply(*f, &[x], span)?;
+                    let res = self.apply(
+                        *f,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    )?;
                     match res {
                         RVal::Bool(true) => {
                             self.pool.retain_val(x);
@@ -391,7 +401,15 @@ impl Runner<'_, '_> {
                 self.expect_list("any", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
                 for x in items {
-                    let res = self.apply(*f, &[x], span)?;
+                    let res = self.apply(
+                        *f,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    )?;
                     match res {
                         RVal::Bool(true) => return Ok(RVal::Bool(true)),
                         RVal::Bool(false) => {}
@@ -414,7 +432,15 @@ impl Runner<'_, '_> {
                 self.expect_list("all", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
                 for x in items {
-                    let res = self.apply(*f, &[x], span)?;
+                    let res = self.apply(
+                        *f,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    )?;
                     match res {
                         RVal::Bool(true) => {}
                         RVal::Bool(false) => return Ok(RVal::Bool(false)),
@@ -438,7 +464,15 @@ impl Runner<'_, '_> {
                 let items = self.list_to_vec(*list_v);
                 let mut out = Vec::with_capacity(items.len());
                 for x in items {
-                    match self.apply(*f, &[x], span) {
+                    match self.apply(
+                        *f,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    ) {
                         Ok(v) => out.push(v),
                         Err(e) => {
                             self.release_all(out);
@@ -459,7 +493,15 @@ impl Runner<'_, '_> {
                 let items = self.list_to_vec(*list_v);
                 let mut out = Vec::new();
                 for x in items {
-                    let res = match self.apply(*f, &[x], span) {
+                    let res = match self.apply(
+                        *f,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    ) {
                         Ok(v) => v,
                         Err(e) => {
                             self.release_all(out);
@@ -496,7 +538,15 @@ impl Runner<'_, '_> {
                 let items = self.list_to_vec(*list_v);
                 let mut out = Vec::new();
                 for x in items {
-                    let mapped = match self.apply(*f, &[x], span) {
+                    let mapped = match self.apply(
+                        *f,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    ) {
                         Ok(v) => v,
                         Err(e) => {
                             self.release_all(out);
@@ -528,7 +578,15 @@ impl Runner<'_, '_> {
                 let mut acc = *init;
                 self.pool.retain_val(acc);
                 for x in items {
-                    match self.apply(*f, &[acc, x], span) {
+                    match self.apply(
+                        *f,
+                        &[acc, x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    ) {
                         Ok(next) => {
                             self.pool.release_val(acc);
                             acc = next;
@@ -611,7 +669,15 @@ impl Runner<'_, '_> {
                 let items = self.list_to_vec(*list_v);
                 let mut keyed = Vec::with_capacity(items.len());
                 for x in items {
-                    match self.apply(*key_fn, &[x], span) {
+                    match self.apply(
+                        *key_fn,
+                        &[x],
+                        span,
+                        CallOrigin::Builtin {
+                            name: b.name(),
+                            at: span,
+                        },
+                    ) {
                         Ok(k) => keyed.push((k, x)),
                         Err(e) => {
                             for (k, _) in keyed {

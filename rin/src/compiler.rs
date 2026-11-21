@@ -1,3 +1,5 @@
+//! AST をスロット解決付きのバイトコードチャンクへコンパイルする。
+
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind, Pattern};

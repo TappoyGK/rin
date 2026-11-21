@@ -1,17 +1,106 @@
+//! バイトコード命令の実行ループとスタックフレーム巻き戻し処理を実装する。
+
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
-use crate::error::{Error, Span};
+use crate::error::{Error, Span, StackFrame};
 use crate::pool::{Obj, RVal};
 
-use super::{FrameSource, Runner};
+use super::{CallOrigin, FrameSource, Runner};
 
 impl Runner<'_, '_> {
     pub(super) fn exec_frame(
         &mut self,
-        mut source: FrameSource<'_>,
+        entry: FrameSource<'_>,
+        captures: Rc<[RVal]>,
+        base: usize,
+        local_count: usize,
+        origin: Option<CallOrigin<'_>>,
+        caller_module: Option<u32>,
+    ) -> Result<RVal, Error> {
+        let mut tail_source: Option<FrameSource<'_>> = None;
+        let mut tail_calls = 0usize;
+        let mut res = self.exec_frame_inner(
+            &entry,
+            &mut tail_source,
+            &mut tail_calls,
+            captures,
+            base,
+            local_count,
+        );
+        if let Err(ref mut err) = res {
+            self.record_unwind_frame(
+                err,
+                &entry,
+                tail_source.as_ref(),
+                tail_calls,
+                origin,
+                caller_module,
+            );
+        }
+        res
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_unwind_frame(
+        &self,
+        err: &mut Error,
+        entry: &FrameSource<'_>,
+        tail_source: Option<&FrameSource<'_>>,
+        tail_calls: usize,
+        origin: Option<CallOrigin<'_>>,
+        caller_module_id: Option<u32>,
+    ) {
+        let active_mod = match tail_source.unwrap_or(entry) {
+            FrameSource::Proto(tp) => tp.module,
+            FrameSource::Top(_) => self.active_module,
+        };
+        err.resolve_module(active_mod.map(|id| self.module_names[id as usize].clone()));
+        let (Some(orig), FrameSource::Proto(proto)) = (origin, entry) else {
+            return;
+        };
+        let module = proto
+            .module
+            .map(|id| self.module_names[id as usize].clone());
+        let caller_module = caller_module_id.map(|id| self.module_names[id as usize].clone());
+        let (tail_target_module, tail_target_name) = if tail_calls > 0
+            && let Some(FrameSource::Proto(tp)) = tail_source
+        {
+            (
+                tp.module.map(|id| self.module_names[id as usize].clone()),
+                tp.name.clone(),
+            )
+        } else {
+            (None, None)
+        };
+        let (at, from_host, via_builtin) = match orig {
+            CallOrigin::Rin(s) => (s, false, None),
+            CallOrigin::Host => (Span::default(), true, None),
+            CallOrigin::Builtin { name, at } => (at, false, Some(name.to_string())),
+        };
+        err.push_frame(StackFrame {
+            module,
+            name: proto.name.clone(),
+            caller_module,
+            at,
+            tail_calls,
+            tail_target_module,
+            tail_target_name,
+            repeat_count: 1,
+            from_host,
+            via_builtin,
+        });
+    }
+
+    #[inline(always)]
+    fn exec_frame_inner(
+        &mut self,
+        entry: &FrameSource<'_>,
+        tail_source: &mut Option<FrameSource<'_>>,
+        tail_calls: &mut usize,
         mut captures: Rc<[RVal]>,
         base: usize,
         local_count: usize,
@@ -19,7 +108,7 @@ impl Runner<'_, '_> {
         let mut ip = 0usize;
         let mut frame_stack_start = base + local_count;
         'frame: loop {
-            let chunk = source.chunk();
+            let chunk = tail_source.as_ref().unwrap_or(entry).chunk();
             while ip < chunk.code.len() {
                 let op = chunk.code[ip];
                 ip += 1;
@@ -364,7 +453,7 @@ impl Runner<'_, '_> {
                                     ));
                                 }
                                 self.enter_depth(span)?;
-                                // Leave callee at arg_start - 1 so args stay in place (no memmove).
+                                // 呼び出し対象を arg_start - 1 に残し、引数の memmove を避ける。
                                 let child_base = arg_start;
                                 let child_locals = proto.local_count as usize;
                                 self.stack.resize(child_base + child_locals, RVal::Void);
@@ -375,6 +464,8 @@ impl Runner<'_, '_> {
                                     cap,
                                     child_base,
                                     child_locals,
+                                    Some(CallOrigin::Rin(span)),
+                                    prev_mod,
                                 );
                                 self.active_module = prev_mod;
                                 self.leave_depth();
@@ -398,7 +489,12 @@ impl Runner<'_, '_> {
                         let arg_start = self.stack.len() - argc;
                         let callee = self.stack[arg_start - 1];
                         match callee {
-                            RVal::Obj(id) if matches!(source, FrameSource::Proto(_)) => {
+                            RVal::Obj(id)
+                                if matches!(
+                                    tail_source.as_ref().unwrap_or(entry),
+                                    FrameSource::Proto(_)
+                                ) =>
+                            {
                                 let (proto, cap) = match self.pool.get(id) {
                                     Obj::Closure { proto, captures } => {
                                         (Rc::clone(proto), Rc::clone(captures))
@@ -419,7 +515,7 @@ impl Runner<'_, '_> {
                                         format!("expected {} arguments, got {}", proto.arity, argc),
                                     ));
                                 }
-                                // Release old frame's locals and any temporaries below `arg_start - 1`
+                                // 旧フレームのローカル変数と `arg_start - 1` 未満の一時値を解放する。
                                 for i in base..(arg_start - 1) {
                                     let old = self.stack[i];
                                     self.pool.release_val(old);
@@ -432,7 +528,8 @@ impl Runner<'_, '_> {
                                 self.stack.resize(base + new_locals, RVal::Void);
                                 self.pool.release_val(callee);
                                 self.active_module = proto.module;
-                                source = FrameSource::Proto(proto);
+                                *tail_source = Some(FrameSource::Proto(proto));
+                                *tail_calls += 1;
                                 captures = cap;
                                 frame_stack_start = base + new_locals;
                                 ip = 0;
@@ -443,7 +540,7 @@ impl Runner<'_, '_> {
                                 self.stack.push(res?);
                             }
                             _ => {
-                                // Fallback for non-closure or top-level
+                                // クロージャ以外の呼び出し対象に対するエラー経路。
                                 return Err(Error::runtime(
                                     span,
                                     format!(
@@ -642,7 +739,7 @@ impl Runner<'_, '_> {
             }
             _ => {
                 let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
-                self.stack.pop(); // callee
+                self.stack.pop(); // 呼び出し対象を除去
                 let res = self.apply_builtin(b, &args, span);
                 self.release_all(args);
                 res
