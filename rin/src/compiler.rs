@@ -2,10 +2,12 @@
 //!
 //! 深い入れ子でもネイティブスタックを消費しないよう、明示的タスクスタックでコンパイルする。
 
+use std::cell::OnceCell;
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
-use crate::bytecode::{Capture, Chunk, FnProto, LocalName, NameInfo, Op, StructDesc, SymTable};
+use crate::bytecode::{Capture, Chunk, FnProto, NameInfo, NameNode, Op, StructDesc, SymTable};
+use crate::diagnostic::needs_name_candidates;
 use crate::error::{Error, Span};
 
 const SHALLOW_COMPILE_DEPTH: usize = 6;
@@ -20,6 +22,8 @@ pub(crate) fn compile_program(
         scopes: vec![Scope::new(module)],
         module,
         syms,
+        name_nodes: Vec::new(),
+        shared_names: None,
     };
     if exprs.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
@@ -27,14 +31,20 @@ pub(crate) fn compile_program(
         compiler.compile_body_shallow(exprs, false, 0)?;
         compiler.flush_ticks();
     }
+    if let Some(names) = compiler.shared_names.take() {
+        names
+            .set(compiler.name_nodes)
+            .expect("name nodes are set once");
+    }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
     Ok(finished.chunk)
 }
 
-struct Scope {
+struct Scope<'a> {
     module: Option<u32>,
-    locals: Vec<(Rc<str>, u32, usize)>,
+    // AST の名前を借用し、診断に必要になった束縛だけノードの添字を記録する。
+    locals: Vec<(&'a str, u32, Option<usize>)>,
     next_slot: u32,
     max_slots: u32,
     captures: Vec<(String, Capture)>,
@@ -42,7 +52,7 @@ struct Scope {
     chunk: Chunk,
 }
 
-impl Scope {
+impl<'a> Scope<'a> {
     fn new(module: Option<u32>) -> Self {
         Self {
             module,
@@ -55,7 +65,7 @@ impl Scope {
         }
     }
 
-    fn alloc_slot(&mut self, name: &str, span: Span) -> Result<u32, Error> {
+    fn alloc_slot(&mut self, name: &'a str, span: Span) -> Result<u32, Error> {
         let slot = self.next_slot;
         self.next_slot = self
             .next_slot
@@ -64,29 +74,15 @@ impl Scope {
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
-        let name: Rc<str> = Rc::from(name);
-        let names = self.chunk.names.get_or_insert_with(Default::default);
-        let binding = names.locals.len();
-        names.locals.push(LocalName {
-            name: Rc::clone(&name),
-            start: self.chunk.code.len(),
-            end: None,
-        });
-        self.locals.push((name, slot, binding));
+        self.locals.push((name, slot, None));
         Ok(slot)
-    }
-
-    fn restore_locals(&mut self, len: usize) {
-        for (_, _, binding) in self.locals.drain(len..) {
-            self.chunk.names.as_mut().unwrap().locals[binding].end = Some(self.chunk.code.len());
-        }
     }
 
     fn find_local(&self, name: &str) -> Option<u32> {
         self.locals
             .iter()
             .rev()
-            .find(|(n, _, _)| n.as_ref() == name)
+            .find(|(n, _, _)| *n == name)
             .map(|(_, slot, _)| *slot)
     }
 
@@ -177,7 +173,7 @@ enum Step<'a> {
     },
     FlushTicks,
     BindLocal {
-        name: String,
+        name: &'a str,
         span: Span,
     },
     RestoreLocals {
@@ -211,31 +207,44 @@ pub(crate) fn step_size() -> usize {
 }
 
 struct Compiler<'a> {
-    scopes: Vec<Scope>,
+    scopes: Vec<Scope<'a>>,
     module: Option<u32>,
     syms: &'a mut SymTable,
+    name_nodes: Vec<NameNode>,
+    shared_names: Option<Rc<OnceCell<Vec<NameNode>>>>,
 }
 
 impl<'a> Compiler<'a> {
-    fn new_scope(&self) -> Scope {
-        let mut inner = Scope::new(self.module);
-        let parent = self.scopes.last().unwrap();
-        let outer = parent
-            .chunk
-            .names
-            .as_deref()
-            .map_or(&[][..], |names| names.outer.as_slice());
-        if !outer.is_empty() || !parent.locals.is_empty() {
-            inner.chunk.names = Some(Box::new(NameInfo {
-                locals: Vec::new(),
-                outer: outer
-                    .iter()
-                    .cloned()
-                    .chain(parent.locals.iter().map(|(name, _, _)| Rc::clone(name)))
-                    .collect(),
-            }));
+    // 最後に記録したノードまで戻り、増えた束縛だけを追加する。
+    // 兄弟の関数・クロージャは同じ親ノードを参照する。
+    fn visible_name_head(&mut self) -> Option<usize> {
+        let mut pending_from = None;
+        let mut head = None;
+        'scopes: for (scope_index, scope) in self.scopes.iter().enumerate().rev() {
+            for (local_index, (_, _, saved)) in scope.locals.iter().enumerate().rev() {
+                if let Some(saved) = saved {
+                    head = Some(*saved);
+                    break 'scopes;
+                }
+                pending_from = Some((scope_index, local_index));
+            }
         }
-        inner
+        if let Some((first_scope, first_local)) = pending_from {
+            for (index, scope) in self.scopes.iter_mut().enumerate().skip(first_scope) {
+                let start = if index == first_scope { first_local } else { 0 };
+                for (name, _, saved) in &mut scope.locals[start..] {
+                    debug_assert!(saved.is_none());
+                    let index = self.name_nodes.len();
+                    self.name_nodes.push(NameNode {
+                        name: (*name).into(),
+                        parent: head,
+                    });
+                    *saved = Some(index);
+                    head = Some(index);
+                }
+            }
+        }
+        head
     }
 
     fn chunk(&mut self) -> &mut Chunk {
@@ -255,7 +264,26 @@ impl<'a> Compiler<'a> {
 
     fn emit(&mut self, op: Op, span: Span) -> usize {
         self.flush_ticks();
-        self.chunk().emit(op, span)
+        let ip = self.chunk().emit(op, span);
+        if let Op::GetGlobal(id) = op
+            && needs_name_candidates(&self.syms.names[id as usize])
+            && let Some(head) = self.visible_name_head()
+        {
+            if let Some(names) = &mut self.chunk().names {
+                names.other_sites.push((ip, head));
+            } else {
+                let nodes = Rc::clone(
+                    self.shared_names
+                        .get_or_insert_with(|| Rc::new(OnceCell::new())),
+                );
+                self.chunk().names = Some(Box::new(NameInfo {
+                    nodes,
+                    first_site: (ip, head),
+                    other_sites: Vec::new(),
+                }));
+            }
+        }
+        ip
     }
 
     fn resolve_var(&mut self, name: &str, span: Span) -> Result<Op, Error> {
@@ -507,7 +535,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
+                let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p, span)?;
                 }
@@ -531,7 +559,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
+                let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p, span)?;
                 }
@@ -565,7 +593,7 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_body_shallow(body, is_tail, depth + 1)?;
                 let scope = self.scopes.last_mut().unwrap();
-                scope.restore_locals(saved_locals_len);
+                scope.locals.truncate(saved_locals_len);
                 scope.next_slot = saved_next_slot;
             }
             ExprKind::If {
@@ -612,13 +640,13 @@ impl<'a> Compiler<'a> {
                             .scopes
                             .last_mut()
                             .unwrap()
-                            .alloc_slot(&bind_name, arm.span)?;
+                            .alloc_slot(bind_name, arm.span)?;
                         self.chunk().emit(Op::SetLocal(slot), arm.span);
                     }
                     self.chunk().emit(Op::Pop, arm.span);
                     self.compile_body_shallow(&arm.body, is_tail, depth + 1)?;
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.restore_locals(saved_locals_len);
+                    scope.locals.truncate(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                     end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
@@ -696,7 +724,7 @@ impl<'a> Compiler<'a> {
                     self.flush_ticks();
                 }
                 Step::BindLocal { name, span } => {
-                    let slot = self.scopes.last_mut().unwrap().alloc_slot(&name, span)?;
+                    let slot = self.scopes.last_mut().unwrap().alloc_slot(name, span)?;
                     self.chunk().emit(Op::SetLocal(slot), span);
                 }
                 Step::RestoreLocals {
@@ -704,7 +732,7 @@ impl<'a> Compiler<'a> {
                     saved_next_slot,
                 } => {
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.restore_locals(saved_locals_len);
+                    scope.locals.truncate(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                 }
                 Step::FinishStruct(fs) => {
@@ -809,7 +837,7 @@ impl<'a> Compiler<'a> {
                             .scopes
                             .last_mut()
                             .unwrap()
-                            .alloc_slot(&bind_name, arm.span)?;
+                            .alloc_slot(bind_name, arm.span)?;
                         self.chunk().emit(Op::SetLocal(slot), arm.span);
                     }
                     self.chunk().emit(Op::Pop, arm.span);
@@ -828,7 +856,7 @@ impl<'a> Compiler<'a> {
                 Step::MatchAfterArm(mut ma) => {
                     let arm = &ma.arms[ma.idx];
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.restore_locals(ma.saved_locals_len);
+                    scope.locals.truncate(ma.saved_locals_len);
                     scope.next_slot = ma.saved_next_slot;
                     ma.end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
@@ -1080,7 +1108,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
+                let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p, span)?;
                 }
@@ -1096,7 +1124,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
+                let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p, span)?;
                 }
@@ -1119,7 +1147,7 @@ impl<'a> Compiler<'a> {
                 self.push_body(steps, body, is_tail);
                 for (name, val_expr) in bindings.iter().rev() {
                     steps.push(Step::BindLocal {
-                        name: name.clone(),
+                        name,
                         span: val_expr.span,
                     });
                     steps.push(Step::Expr {
@@ -1223,16 +1251,16 @@ impl<'a> Compiler<'a> {
     }
 }
 
-fn pattern_binding(pat: &Pattern) -> Option<String> {
+fn pattern_binding(pat: &Pattern) -> Option<&str> {
     match pat {
-        Pattern::Var(name) => Some(name.clone()),
+        Pattern::Var(name) => Some(name.as_str()),
         Pattern::Some(Some(name))
         | Pattern::Ok(Some(name))
         | Pattern::Err(Some(name))
         | Pattern::Variant {
             binding: Some(name),
             ..
-        } => Some(name.clone()),
+        } => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1241,6 +1269,93 @@ fn pattern_binding(pat: &Pattern) -> Option<String> {
 mod tests {
     use super::*;
     use crate::ErrorKind;
+
+    fn compile(source: &str) -> Chunk {
+        let mut scratch = crate::parser::ParseScratch::new();
+        let exprs = crate::parser::parse_program_with_scratch(source, &mut scratch).unwrap();
+        compile_program(exprs, None, &mut SymTable::default()).unwrap()
+    }
+
+    #[test]
+    fn names_are_only_kept_at_global_lookups_and_shared_between_closures() {
+        for source in [
+            "(let (damage 7) damage)",
+            "(let (damage 7) (fn () damage))",
+            // `*` は GetGlobal だが、2 文字以下には候補を表示しない。
+            "(let (damage 7) (* damage damage))",
+            "(let (damage 7) (fn (x) (* damage x)))",
+        ] {
+            let chunk = compile(source);
+            assert!(chunk.names.is_none());
+            assert!(chunk.protos.iter().all(|proto| proto.chunk.names.is_none()));
+        }
+        for depth in [0, 12] {
+            let bindings = (0..20).map(|i| format!("local{i} 1 ")).collect::<String>();
+            let children = "(fn (argument) missing) ".repeat(20);
+            let source = format!(
+                "{}(let ({bindings}) {children} 0){}",
+                "(let () ".repeat(depth),
+                ")".repeat(depth)
+            );
+            let chunk = compile(&source);
+            // 親自身に GetGlobal がなくても、子は必要な外側の束縛を参照できる。
+            assert!(chunk.names.is_none());
+            let first = chunk.protos[0].chunk.names.as_ref().unwrap();
+            assert_eq!(first.nodes.get().unwrap().len(), 40); // 外側 20 + 各関数の引数 1
+            assert_eq!(chunk.protos.len(), 20);
+            for proto in &chunk.protos {
+                let names = proto.chunk.names.as_ref().unwrap();
+                assert!(Rc::ptr_eq(&names.nodes, &first.nodes));
+                let ip = names.first_site.0;
+                assert_eq!(proto.chunk.visible_names(ip).count(), 21);
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_sites_keep_their_own_scope_snapshot() {
+        for depth in [0, 12] {
+            let source = format!(
+                "{}(let (damage 1) known (let (health 2) known)) (let (armor 3) known){}",
+                "(let () ".repeat(depth),
+                ")".repeat(depth)
+            );
+            let chunk = compile(&source);
+            let names = chunk.names.as_ref().unwrap();
+            let sites: Vec<_> = std::iter::once(names.first_site)
+                .chain(names.other_sites.iter().copied())
+                .collect();
+            assert_eq!(sites.len(), 3);
+            assert_eq!(names.nodes.get().unwrap().len(), 3);
+            for ((ip, _), expected) in
+                sites
+                    .into_iter()
+                    .zip([vec!["damage"], vec!["health", "damage"], vec!["armor"]])
+            {
+                assert_eq!(chunk.visible_names(ip).collect::<Vec<_>>(), expected);
+            }
+            assert_eq!(chunk.visible_names(usize::MAX).count(), 0);
+        }
+    }
+
+    #[test]
+    fn nested_name_nodes_grow_linearly() {
+        let depth = 30;
+        let source = format!(
+            "{}0{}",
+            "(fn (a b c d e) missing ".repeat(depth),
+            ")".repeat(depth)
+        );
+        let chunk = compile(&source);
+        let mut current = &chunk;
+        let first = chunk.protos[0].chunk.names.as_ref().unwrap();
+        assert_eq!(first.nodes.get().unwrap().len(), depth * 5);
+        for _ in 0..depth {
+            current = &current.protos[0].chunk;
+            let names = current.names.as_ref().unwrap();
+            assert!(Rc::ptr_eq(&names.nodes, &first.nodes));
+        }
+    }
 
     #[test]
     fn local_slot_overflow_reports_capacity_rule() {

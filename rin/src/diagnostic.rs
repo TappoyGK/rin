@@ -27,17 +27,21 @@ pub(crate) fn available<'a>(
     message
 }
 
+/// 2 文字以下には候補を出さないため、コンパイラも名前情報を記録しなくてよい。
+pub(crate) fn needs_name_candidates(name: &str) -> bool {
+    name.chars().take(3).count() == 3
+}
+
 pub(crate) fn suggest<'a>(
     mut message: String,
     name: &str,
     names: impl Iterator<Item = &'a str>,
 ) -> String {
+    if !needs_name_candidates(name) {
+        return message;
+    }
     let query: Vec<char> = name.chars().collect();
-    let limit = match query.len() {
-        0..=2 => return message,
-        3..=5 => 1,
-        _ => 2,
-    };
+    let limit = if query.len() <= 5 { 1 } else { 2 };
     // 最大 3 件だけ保持する。同距離は名前順、重複候補は 1 件とする。
     let mut best = BTreeSet::new();
     for candidate in names {
@@ -67,38 +71,64 @@ pub(crate) fn suggest<'a>(
 // Unicode scalar 値単位の Levenshtein 距離。閾値の帯だけを計算する。
 // 長い識別子でも O(limit * length) とし、距離が閾値を超えたら打ち切る。
 fn distance(query: &[char], candidate: &str, limit: usize) -> Option<usize> {
+    debug_assert!(limit <= 2);
     let n = query.len();
-    let m = candidate.chars().count();
-    if n.abs_diff(m) > limit {
+    let max_chars = n.saturating_add(limit);
+    // 1 scalar は 1〜4 バイト。Unicode でも誤って候補を捨てない下限・上限。
+    if candidate.len() < n.saturating_sub(limit) || candidate.len() > max_chars.saturating_mul(4) {
         return None;
     }
     let far = limit + 1;
-    let mut prev = vec![far; n + 1];
-    let mut next = vec![far; n + 1];
-    for (j, cell) in prev.iter_mut().enumerate().take(limit + 1) {
+    let mut prev = [far; 5];
+    let mut prev_start = 0;
+    let mut prev_end = n.min(limit);
+    for (j, cell) in prev.iter_mut().enumerate().take(prev_end + 1) {
         *cell = j;
     }
-    for (index, ch) in candidate.chars().enumerate() {
+    // 数え上げと DP を同じ上限付き走査で行い、先頭不一致なら末尾を読まず終了する。
+    for (index, ch) in candidate
+        .chars()
+        .take(max_chars.saturating_add(1))
+        .enumerate()
+    {
         let i = index + 1;
-        let start = i.saturating_sub(limit).max(1);
-        let end = (i + limit).min(n);
-        next[start - 1] = if start == 1 { i.min(far) } else { far };
-        let mut minimum = next[start - 1];
-        for j in start..=end {
-            next[j] = (prev[j] + 1)
-                .min(next[j - 1] + 1)
-                .min(prev[j - 1] + usize::from(query[j - 1] != ch));
-            minimum = minimum.min(next[j]);
+        if i > max_chars {
+            return None;
         }
-        if end < n {
-            next[end + 1] = far;
+        let start = i.saturating_sub(limit);
+        let end = (i + limit).min(n);
+        let mut next = [far; 5];
+        let get = |j: usize| {
+            if (prev_start..=prev_end).contains(&j) {
+                prev[j - prev_start]
+            } else {
+                far
+            }
+        };
+        let mut minimum = far;
+        for j in start..=end {
+            let value = if j == 0 {
+                i
+            } else {
+                let left = if j > start { next[j - start - 1] } else { far };
+                (get(j) + 1)
+                    .min(left + 1)
+                    .min(get(j - 1) + usize::from(query[j - 1] != ch))
+            };
+            next[j - start] = value;
+            minimum = minimum.min(value);
         }
         if minimum > limit {
             return None;
         }
-        std::mem::swap(&mut prev, &mut next);
+        prev = next;
+        prev_start = start;
+        prev_end = end;
     }
-    (prev[n] <= limit).then_some(prev[n])
+    if !(prev_start..=prev_end).contains(&n) {
+        return None;
+    }
+    (prev[n - prev_start] <= limit).then_some(prev[n - prev_start])
 }
 
 #[cfg(test)]

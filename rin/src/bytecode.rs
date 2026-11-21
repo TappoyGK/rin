@@ -1,5 +1,6 @@
 //! バイトコード VM の命令列、定数チャンク、関数プロトタイプ、シンボルテーブルを定義する。
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -224,18 +225,35 @@ pub(crate) struct FnProto {
     pub chunk: Chunk,
 }
 
-/// ローカル名が見える命令範囲。診断時だけ参照する。
-#[derive(Debug, Clone)]
-pub(crate) struct LocalName {
-    pub name: Rc<str>,
-    pub start: usize,
-    pub end: Option<usize>,
+/// 名前と親ノードの添字。平坦な配列で共有し、解放も再帰させない。
+#[derive(Debug)]
+pub(crate) struct NameNode {
+    pub name: Box<str>,
+    pub parent: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// コンパイル終了時に一度だけ確定する共有配列と、GetGlobal ごとの先頭。
+#[derive(Debug, Clone)]
 pub(crate) struct NameInfo {
-    pub locals: Vec<LocalName>,
-    pub outer: Vec<Rc<str>>,
+    pub nodes: Rc<OnceCell<Vec<NameNode>>>,
+    // 参照位置が 1 個なら追加の Vec バッファを確保しない。
+    pub first_site: (usize, usize),
+    pub other_sites: Vec<(usize, usize)>,
+}
+
+struct VisibleNames<'a> {
+    nodes: &'a [NameNode],
+    head: Option<usize>,
+}
+
+impl<'a> Iterator for VisibleNames<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = &self.nodes[self.head?];
+        self.head = node.parent;
+        Some(&node.name)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -256,17 +274,22 @@ pub(crate) struct Chunk {
 
 impl Chunk {
     pub fn visible_names(&self, ip: usize) -> impl Iterator<Item = &str> {
-        self.names.iter().flat_map(move |names| {
-            names.outer.iter().map(|name| name.as_ref()).chain(
+        let (nodes, head) = self.names.as_deref().map_or((&[][..], None), |names| {
+            let head = if ip == names.first_site.0 {
+                Some(names.first_site.1)
+            } else {
                 names
-                    .locals
-                    .iter()
-                    .filter(move |binding| {
-                        binding.start <= ip && binding.end.is_none_or(|end| ip < end)
-                    })
-                    .map(|binding| binding.name.as_ref()),
+                    .other_sites
+                    .binary_search_by_key(&ip, |(site, _)| *site)
+                    .ok()
+                    .map(|index| names.other_sites[index].1)
+            };
+            (
+                names.nodes.get().expect("name nodes finalized").as_slice(),
+                head,
             )
-        })
+        });
+        VisibleNames { nodes, head }
     }
 
     pub fn emit(&mut self, op: Op, span: Span) -> usize {
