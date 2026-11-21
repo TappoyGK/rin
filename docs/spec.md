@@ -194,7 +194,7 @@ true false none some ok err inf nan
 
 **[eval.limits]** 評価器は 1 回の評価ごとに上限値 `Limits`（`steps`、`depth`、`memory_bytes`）を監視する。
 - `steps`：式評価およびループ生成ごとのステップ数が上限を超えると `TooManySteps` エラーを返す。
-- `depth`：ユーザー定義関数の呼び出しネスト深さが上限を超えると `TooDeep` エラーを返す。
+- `depth`：ユーザー定義関数の呼び出しネスト深さが上限を超えると `TooDeep` エラーを返す（末尾呼び出し最適化が適用された呼び出しはネスト深さに数えない）。
 - `memory_bytes`：確保された値の概算バイト数が上限を超えると `TooMuchMemory` エラーを返す。
 
 **[eval.error]** すべてのエラーは発生箇所の位置情報（1 始まりの行・列）と種別・メッセージを保持する。

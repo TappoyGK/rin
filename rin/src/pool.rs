@@ -63,12 +63,12 @@ pub(crate) enum Obj {
     Str(Rc<str>),
     Tuple(Vec<RVal>),
     Struct {
-        name: String,
-        fields: BTreeMap<String, RVal>,
+        name: Rc<str>,
+        fields: BTreeMap<Rc<str>, RVal>,
     },
     Variant {
-        type_name: String,
-        variant: String,
+        type_name: Rc<str>,
+        variant: Rc<str>,
         data: Option<RVal>,
     },
     Some(RVal),
@@ -79,8 +79,8 @@ pub(crate) enum Obj {
         captures: Rc<[RVal]>,
     },
     Module {
-        name: String,
-        exports: BTreeMap<String, RVal>,
+        name: Rc<str>,
+        exports: BTreeMap<Rc<str>, RVal>,
     },
 }
 
@@ -96,7 +96,7 @@ impl Obj {
                 type_name, variant, ..
             } => 48 + type_name.len() + variant.len(),
             Obj::Some(_) | Obj::Ok(_) | Obj::Err(_) => 24,
-            Obj::Closure { proto, captures } => 64 + captures.len() * 16 + proto.approx_bytes,
+            Obj::Closure { captures, .. } => 64 + captures.len() * 16,
             Obj::Module { name, exports } => 48 + name.len() + exports.len() * 32,
         }
     }
@@ -341,21 +341,15 @@ impl<'a> Pool<'a> {
         let tail_len = self.list_len(tail);
         self.retain_val(head);
         self.retain_val(tail);
-        match self.alloc_obj(
+        let id = self.alloc_obj(
             Obj::Cons {
                 head,
                 tail,
                 len: tail_len + 1,
             },
             span,
-        ) {
-            Ok(id) => Ok(RVal::Obj(id)),
-            Err(e) => {
-                self.release_val(head);
-                self.release_val(tail);
-                Err(e)
-            }
-        }
+        )?;
+        Ok(RVal::Obj(id))
     }
 
     pub fn list_len(&self, val: RVal) -> usize {
@@ -399,17 +393,17 @@ impl<'a> Pool<'a> {
                 Obj::Struct { name, fields } => {
                     let map = fields
                         .iter()
-                        .map(|(k, v)| (k.clone(), self.export(*v)))
+                        .map(|(k, v)| (k.to_string(), self.export(*v)))
                         .collect();
-                    Value::structure(name.clone(), map)
+                    Value::structure(name.as_ref(), map)
                 }
                 Obj::Variant {
                     type_name,
                     variant,
                     data,
                 } => Value::variant(
-                    type_name.clone(),
-                    variant.clone(),
+                    type_name.as_ref(),
+                    variant.as_ref(),
                     data.map(|d| self.export(d)),
                 ),
                 Obj::Some(v) => Value::Some(std::rc::Rc::new(self.export(*v))),
@@ -473,11 +467,11 @@ impl<'a> Pool<'a> {
             Value::Struct { name, fields } => {
                 let mut map = BTreeMap::new();
                 for (k, v) in fields.iter() {
-                    map.insert(k.clone(), self.import(v, span)?);
+                    map.insert(Rc::from(k.as_str()), self.import(v, span)?);
                 }
                 Ok(RVal::Obj(self.alloc_obj(
                     Obj::Struct {
-                        name: (**name).clone(),
+                        name: Rc::from(name.as_str()),
                         fields: map,
                     },
                     span,
@@ -494,8 +488,8 @@ impl<'a> Pool<'a> {
                 };
                 Ok(RVal::Obj(self.alloc_obj(
                     Obj::Variant {
-                        type_name: (**type_name).clone(),
-                        variant: (**variant).clone(),
+                        type_name: Rc::from(type_name.as_str()),
+                        variant: Rc::from(variant.as_str()),
                         data: d,
                     },
                     span,

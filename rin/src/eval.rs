@@ -101,13 +101,16 @@ impl<'a> Machine<'a> {
             Some(names) => {
                 for sym in names {
                     let Some(&val) = mod_env.get(&sym) else {
+                        for v in exports.into_values() {
+                            self.pool.release_val(v);
+                        }
                         return Err(Error::runtime(
                             Span::default(),
                             format!("module '{name}' cannot export unknown symbol '{sym}'"),
                         ));
                     };
                     self.pool.retain_val(val);
-                    exports.insert(sym, val);
+                    exports.insert(Rc::from(sym.as_str()), val);
                 }
             }
             None => {
@@ -115,26 +118,18 @@ impl<'a> Machine<'a> {
                     let is_module = matches!(val, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Module { .. }));
                     if !is_module {
                         self.pool.retain_val(val);
-                        exports.insert(sym.clone(), val);
+                        exports.insert(Rc::from(sym.as_str()), val);
                     }
                 }
             }
         }
-        let mod_id = match self.pool.alloc_obj(
+        let mod_id = self.pool.alloc_obj(
             Obj::Module {
-                name: name.to_string(),
-                exports: exports.clone(),
+                name: Rc::from(name),
+                exports,
             },
             Span::default(),
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                for v in exports.into_values() {
-                    self.pool.release_val(v);
-                }
-                return Err(e);
-            }
-        };
+        )?;
         if let Some(prev) = self.modules.insert(name.to_string(), RVal::Obj(mod_id)) {
             self.pool.release_val(prev);
         }
@@ -364,19 +359,22 @@ impl<'a, 'p> Runner<'a, 'p> {
         base: usize,
         span: Span,
     ) -> Result<RVal, Error> {
-        let mut cap_vals = Vec::with_capacity(proto.captures.len());
-        for cap in &proto.captures {
-            let v = match cap {
-                Capture::Local(slot) => self.stack[base + *slot as usize],
-                Capture::Upvalue(idx) => captures[*idx as usize],
-            };
-            self.pool.retain_val(v);
-            cap_vals.push(v);
-        }
+        let cap_vals: Rc<[RVal]> = proto
+            .captures
+            .iter()
+            .map(|cap| {
+                let v = match cap {
+                    Capture::Local(slot) => self.stack[base + *slot as usize],
+                    Capture::Upvalue(idx) => captures[*idx as usize],
+                };
+                self.pool.retain_val(v);
+                v
+            })
+            .collect();
         let id = self.pool.alloc_obj(
             Obj::Closure {
                 proto: Rc::clone(proto),
-                captures: Rc::from(cap_vals),
+                captures: cap_vals,
             },
             span,
         )?;
@@ -469,17 +467,14 @@ impl<'a, 'p> Runner<'a, 'p> {
         local_count: usize,
     ) -> Result<RVal, Error> {
         let mut ip = 0usize;
-        let frame_stack_start = base + local_count;
-
-        loop {
+        let mut frame_stack_start = base + local_count;
+        'frame: loop {
             let chunk = source.chunk();
-            if ip >= chunk.code.len() {
-                break;
-            }
-            let op = chunk.code[ip];
-            ip += 1;
+            while ip < chunk.code.len() {
+                let op = chunk.code[ip];
+                ip += 1;
 
-            match op {
+                match op {
                 Op::Tick => {
                     self.tick(chunk, ip)?;
                 }
@@ -554,14 +549,14 @@ impl<'a, 'p> Runner<'a, 'p> {
                     let mut map = BTreeMap::new();
                     for (idx, fname) in desc.fields.iter().enumerate() {
                         let val = self.stack[start + idx];
-                        if let Some(prev) = map.insert(fname.to_string(), val) {
+                        if let Some(prev) = map.insert(Rc::clone(fname), val) {
                             self.pool.release_val(prev);
                         }
                     }
                     self.stack.truncate(start);
                     let id = self.pool.alloc_obj(
                         Obj::Struct {
-                            name: desc.name.to_string(),
+                            name: Rc::clone(&desc.name),
                             fields: map,
                         },
                         span,
@@ -619,7 +614,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     }
                     for (idx, fname) in desc.fields.iter().enumerate() {
                         let val = self.stack[val_start + idx];
-                        if let Some(prev) = updated.insert(fname.to_string(), val) {
+                        if let Some(prev) = updated.insert(Rc::clone(fname), val) {
                             self.pool.release_val(prev);
                         }
                     }
@@ -647,8 +642,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                     };
                     let id = self.pool.alloc_obj(
                         Obj::Variant {
-                            type_name: chunk.strings[type_name as usize].to_string(),
-                            variant: chunk.strings[variant as usize].to_string(),
+                            type_name: Rc::clone(&chunk.strings[type_name as usize]),
+                            variant: Rc::clone(&chunk.strings[variant as usize]),
                             data,
                         },
                         span,
@@ -790,10 +785,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     let callee = self.stack[arg_start - 1];
                     match callee {
                         RVal::Builtin(b) => {
-                            let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
-                            self.stack.pop(); // callee
-                            let res = self.apply_builtin(b, &args, span);
-                            self.release_all(args);
+                            let res = self.call_builtin_from_stack(b, arg_start, argc, span);
                             self.stack.push(res?);
                         }
                         RVal::Obj(id) => {
@@ -893,13 +885,12 @@ impl<'a, 'p> Runner<'a, 'p> {
                             self.active_module = proto.module.clone();
                             source = FrameSource::Proto(proto);
                             captures = cap;
+                            frame_stack_start = base + new_locals;
                             ip = 0;
+                            continue 'frame;
                         }
                         RVal::Builtin(b) => {
-                            let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
-                            self.stack.pop(); // callee
-                            let res = self.apply_builtin(b, &args, span);
-                            self.release_all(args);
+                            let res = self.call_builtin_from_stack(b, arg_start, argc, span);
                             self.stack.push(res?);
                         }
                         _ => {
@@ -1005,10 +996,35 @@ impl<'a, 'p> Runner<'a, 'p> {
                     list.extend(names.iter().cloned());
                     self.stack.push(RVal::Void);
                 }
+                }
             }
+            break;
         }
         debug_assert_eq!(self.stack.len(), frame_stack_start + 1);
         Ok(self.stack.pop().unwrap_or(RVal::Void))
+    }
+
+    fn call_builtin_from_stack(
+        &mut self,
+        b: BuiltinId,
+        arg_start: usize,
+        argc: usize,
+        span: Span,
+    ) -> Result<RVal, Error> {
+        if argc <= 4 {
+            let mut buf = [RVal::Void; 4];
+            buf[..argc].copy_from_slice(&self.stack[arg_start..arg_start + argc]);
+            self.stack.truncate(arg_start - 1);
+            let res = self.apply_builtin(b, &buf[..argc], span);
+            self.release_all(buf[..argc].iter().copied());
+            res
+        } else {
+            let args: Vec<RVal> = self.stack.drain(arg_start..).collect();
+            self.stack.pop(); // callee
+            let res = self.apply_builtin(b, &args, span);
+            self.release_all(args);
+            res
+        }
     }
 }
 
@@ -1181,6 +1197,42 @@ impl Runner<'_, '_> {
             BuiltinId::Lt | BuiltinId::Le | BuiltinId::Gt | BuiltinId::Ge => {
                 self.ord_cmp(b, args, span)
             }
+            BuiltinId::And => {
+                if args.is_empty() {
+                    return Err(Error::runtime(span, "'and' requires at least 1 argument"));
+                }
+                for v in args {
+                    match v {
+                        RVal::Bool(true) => {}
+                        RVal::Bool(false) => return Ok(RVal::Bool(false)),
+                        other => {
+                            return Err(Error::runtime(
+                                span,
+                                format!("expected bool, got {}", other.type_name(self.pool)),
+                            ));
+                        }
+                    }
+                }
+                Ok(RVal::Bool(true))
+            }
+            BuiltinId::Or => {
+                if args.is_empty() {
+                    return Err(Error::runtime(span, "'or' requires at least 1 argument"));
+                }
+                for v in args {
+                    match v {
+                        RVal::Bool(true) => return Ok(RVal::Bool(true)),
+                        RVal::Bool(false) => {}
+                        other => {
+                            return Err(Error::runtime(
+                                span,
+                                format!("expected bool, got {}", other.type_name(self.pool)),
+                            ));
+                        }
+                    }
+                }
+                Ok(RVal::Bool(false))
+            }
             BuiltinId::Not => {
                 let [v] = args else {
                     return Err(Error::runtime(span, "'not' takes 1 argument"));
@@ -1270,13 +1322,7 @@ impl Runner<'_, '_> {
                     }
                     let item = arr[idx as usize];
                     self.pool.retain_val(item);
-                    return match self.pool.alloc_obj(Obj::Some(item), span) {
-                        Ok(sid) => Ok(RVal::Obj(sid)),
-                        Err(e) => {
-                            self.pool.release_val(item);
-                            Err(e)
-                        }
-                    };
+                    return Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(item), span)?));
                 }
                 self.expect_list("get", *list_v, span)?;
                 if idx < 0 {
@@ -1285,13 +1331,7 @@ impl Runner<'_, '_> {
                 match self.list_get(*list_v, idx as usize) {
                     Some(item) => {
                         self.pool.retain_val(item);
-                        match self.pool.alloc_obj(Obj::Some(item), span) {
-                            Ok(id) => Ok(RVal::Obj(id)),
-                            Err(e) => {
-                                self.pool.release_val(item);
-                                Err(e)
-                            }
-                        }
+                        Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(item), span)?))
                     }
                     None => Ok(RVal::None),
                 }
@@ -1301,13 +1341,7 @@ impl Runner<'_, '_> {
                 match self.list_head(xs) {
                     Some(head) => {
                         self.pool.retain_val(head);
-                        match self.pool.alloc_obj(Obj::Some(head), span) {
-                            Ok(id) => Ok(RVal::Obj(id)),
-                            Err(e) => {
-                                self.pool.release_val(head);
-                                Err(e)
-                            }
-                        }
+                        Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(head), span)?))
                     }
                     None => Ok(RVal::None),
                 }
@@ -1324,13 +1358,7 @@ impl Runner<'_, '_> {
                 match items.last().copied() {
                     Some(v) => {
                         self.pool.retain_val(v);
-                        match self.pool.alloc_obj(Obj::Some(v), span) {
-                            Ok(id) => Ok(RVal::Obj(id)),
-                            Err(e) => {
-                                self.pool.release_val(v);
-                                Err(e)
-                            }
-                        }
+                        Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(v), span)?))
                     }
                     None => Ok(RVal::None),
                 }
@@ -1504,13 +1532,7 @@ impl Runner<'_, '_> {
                     match res {
                         RVal::Bool(true) => {
                             self.pool.retain_val(x);
-                            return match self.pool.alloc_obj(Obj::Some(x), span) {
-                                Ok(id) => Ok(RVal::Obj(id)),
-                                Err(e) => {
-                                    self.pool.release_val(x);
-                                    Err(e)
-                                }
-                            };
+                            return Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(x), span)?));
                         }
                         RVal::Bool(false) => {}
                         other => {
@@ -1694,8 +1716,6 @@ impl Runner<'_, '_> {
                     match self.pool.alloc_obj(Obj::Tuple(vec![x, y]), span) {
                         Ok(id) => out.push(RVal::Obj(id)),
                         Err(e) => {
-                            self.pool.release_val(x);
-                            self.pool.release_val(y);
                             self.release_all(out);
                             return Err(e);
                         }
@@ -1715,7 +1735,6 @@ impl Runner<'_, '_> {
                     {
                         Ok(id) => out.push(RVal::Obj(id)),
                         Err(e) => {
-                            self.pool.release_val(x);
                             self.release_all(out);
                             return Err(e);
                         }
@@ -2140,7 +2159,7 @@ impl Runner<'_, '_> {
                     type_name: vt,
                     variant: vv,
                     data,
-                } if type_name == vt && variant == vv => match (binding, data) {
+                } if type_name == vt.as_ref() && variant == vv.as_ref() => match (binding, data) {
                     (Some(_), Some(d)) => Some(Some(*d)),
                     (None, _) => Some(None),
                     (Some(_), None) => None,

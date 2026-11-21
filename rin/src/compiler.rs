@@ -166,7 +166,8 @@ impl Compiler {
         self.compile_body(body, true)?;
         let finished = self.scopes.pop().unwrap();
         let captures: Vec<Capture> = finished.captures.into_iter().map(|(_, c)| c).collect();
-        let approx_bytes = finished.chunk.approx_bytes();
+    let approx_bytes = 0; // FnProto bytecode lives outside Pool's per-instance budget
+    let _ = approx_bytes;
         Ok(Rc::new(FnProto {
             name,
             module: finished.module,
@@ -174,7 +175,6 @@ impl Compiler {
             local_count: finished.max_slots,
             captures,
             chunk: finished.chunk,
-            approx_bytes,
         }))
     }
 
@@ -258,7 +258,7 @@ impl Compiler {
                 for (idx, (fname, fexpr)) in fields.iter().enumerate() {
                     let f_idx = self.chunk().add_string(fname);
                     self.chunk()
-                        .emit(Op::WithCheckField(f_idx, idx as u32), fexpr.span);
+                        .emit(Op::WithCheckField(f_idx, idx as u32), span);
                     self.compile_expr(fexpr, false)?;
                     field_names.push(Rc::from(fname.as_str()));
                 }

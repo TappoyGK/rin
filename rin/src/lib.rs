@@ -666,4 +666,71 @@ mod tests {
         let err2 = eval("(with Card { cost: 1 } { missing: (/ 1 0) })").unwrap_err();
         assert!(err2.message.contains("no field 'missing'"), "{err2}");
     }
+
+    #[test]
+    fn memory_limit_does_not_double_free_shared_values_or_modules() {
+        // Repro 1: sharing a global string in a list that exceeds memory_bytes
+        let mut alloc = HeapAllocator;
+        let mut m = Machine::new(
+            Limits {
+                steps: 100_000,
+                depth: 200,
+                memory_bytes: 4000,
+            },
+            &mut alloc,
+        );
+        m.eval(r#"(def s "hello")"#).unwrap();
+        let big_list = format!("[{}]", vec!["s"; 200].join(" "));
+        let err = m.eval(&big_list).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::TooMuchMemory);
+        assert_eq!(m.eval("s").unwrap(), Value::str("hello"));
+
+        // Repro 2: load_module failing at memory_bytes limit must not corrupt globals
+        let mut alloc2 = HeapAllocator;
+        let mut m2 = Machine::new(
+            Limits {
+                steps: 100_000,
+                depth: 200,
+                memory_bytes: 100,
+            },
+            &mut alloc2,
+        );
+        let merr = m2.load_module("m", r#"(def s "abc")"#).unwrap_err();
+        assert_eq!(merr.kind, ErrorKind::TooMuchMemory);
+        m2.eval(r#"(def t "xyz")"#).unwrap();
+        assert_eq!(m2.eval("t").unwrap(), Value::str("xyz"));
+    }
+
+    #[test]
+    fn cross_function_tail_calls_and_first_class_and_or() {
+        let src = r#"
+            (defn g (x) (let (a 1 b 2) (+ x a b)))
+            (defn f (x) (g x))
+            (defn h () (g 10))
+            (+ (f 1) (h))
+        "#;
+        assert_eq!(eval(src).unwrap(), Value::Int(17));
+
+        let diff_arity = r#"
+            (defn g3 (x y z) (+ x y z))
+            (defn f0 () (g3 1 2 3))
+            (f0)
+        "#;
+        assert_eq!(eval(diff_arity).unwrap(), Value::Int(6));
+
+        let mut alloc = HeapAllocator;
+        let mut m = Machine::new(Limits::default(), &mut alloc);
+        m.load_module(
+            "m",
+            r#"
+            (defn helper (x) (let (k 10) (+ x k)))
+            (defn entry (x) (helper x))
+            "#,
+        )
+        .unwrap();
+        assert_eq!(m.call_in("m", "entry", &[Value::Int(5)]).unwrap(), Value::Int(15));
+
+        assert_eq!(eval("(let (f and) (f true false))").unwrap(), Value::Bool(false));
+        assert_eq!(eval("(let (f or) (f false true))").unwrap(), Value::Bool(true));
+    }
 }

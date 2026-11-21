@@ -18,6 +18,8 @@ pub(crate) enum BuiltinId {
     Le,
     Gt,
     Ge,
+    And,
+    Or,
     Not,
     AsF64,
     AsI64,
@@ -73,6 +75,8 @@ impl BuiltinId {
         Self::Le,
         Self::Gt,
         Self::Ge,
+        Self::And,
+        Self::Or,
         Self::Not,
         Self::AsF64,
         Self::AsI64,
@@ -128,6 +132,8 @@ impl BuiltinId {
             Self::Le => "<=",
             Self::Gt => ">",
             Self::Ge => ">=",
+            Self::And => "and",
+            Self::Or => "or",
             Self::Not => "not",
             Self::AsF64 => "as_f64",
             Self::AsI64 => "as_i64",
@@ -192,7 +198,6 @@ pub(crate) struct FnProto {
     pub local_count: u32,
     pub captures: Vec<Capture>,
     pub chunk: Chunk,
-    pub approx_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -201,7 +206,7 @@ pub(crate) struct Chunk {
     pub code: Vec<Op>,
     pub spans: Vec<Span>,
     pub strings: Vec<Rc<str>>,
-    string_map: HashMap<String, u32>,
+    string_map: Option<HashMap<Rc<str>, u32>>,
     pub floats: Vec<f64>,
     pub structs: Vec<StructDesc>,
     pub patterns: Vec<Pattern>,
@@ -218,13 +223,27 @@ impl Chunk {
     }
 
     pub fn add_string(&mut self, s: &str) -> u32 {
-        if let Some(&idx) = self.string_map.get(s) {
-            return idx;
+        if let Some(map) = &self.string_map {
+            if let Some(&idx) = map.get(s) {
+                return idx;
+            }
+        } else {
+            if let Some(pos) = self.strings.iter().position(|x| x.as_ref() == s) {
+                return pos as u32;
+            }
         }
         let idx = self.strings.len() as u32;
         let rc: Rc<str> = Rc::from(s);
-        self.strings.push(rc);
-        self.string_map.insert(s.to_string(), idx);
+        self.strings.push(Rc::clone(&rc));
+        if let Some(map) = &mut self.string_map {
+            map.insert(rc, idx);
+        } else if self.strings.len() > 16 {
+            let mut map = HashMap::with_capacity(self.strings.len() * 2);
+            for (i, st) in self.strings.iter().enumerate() {
+                map.insert(Rc::clone(st), i as u32);
+            }
+            self.string_map = Some(map);
+        }
         idx
     }
 
@@ -256,13 +275,6 @@ impl Chunk {
         let idx = self.export_lists.len() as u32;
         self.export_lists.push(names);
         idx
-    }
-
-    pub fn approx_bytes(&self) -> usize {
-        64 + self.code.len() * std::mem::size_of::<Op>()
-            + self.strings.iter().map(|s| 16 + s.len()).sum::<usize>()
-            + self.floats.len() * 8
-            + self.patterns.len() * 32
     }
 }
 
