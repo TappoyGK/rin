@@ -224,6 +224,20 @@ pub(crate) struct FnProto {
     pub chunk: Chunk,
 }
 
+/// ローカル名が見える命令範囲。診断時だけ参照する。
+#[derive(Debug, Clone)]
+pub(crate) struct LocalName {
+    pub name: Rc<str>,
+    pub start: usize,
+    pub end: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NameInfo {
+    pub locals: Vec<LocalName>,
+    pub outer: Vec<Rc<str>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Chunk {
     pub local_count: u32,
@@ -237,9 +251,24 @@ pub(crate) struct Chunk {
     pub patterns: Vec<Pattern>,
     pub protos: Vec<Rc<FnProto>>,
     pub export_lists: Vec<Vec<String>>,
+    pub names: Option<Box<NameInfo>>,
 }
 
 impl Chunk {
+    pub fn visible_names(&self, ip: usize) -> impl Iterator<Item = &str> {
+        self.names.iter().flat_map(move |names| {
+            names.outer.iter().map(|name| name.as_ref()).chain(
+                names
+                    .locals
+                    .iter()
+                    .filter(move |binding| {
+                        binding.start <= ip && binding.end.is_none_or(|end| ip < end)
+                    })
+                    .map(|binding| binding.name.as_ref()),
+            )
+        })
+    }
+
     pub fn emit(&mut self, op: Op, span: Span) -> usize {
         let idx = self.code.len();
         self.code.push(op);

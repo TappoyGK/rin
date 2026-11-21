@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::alloc::{Allocator, HeapAllocator};
 use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
 use crate::compiler::compile_program;
+use crate::diagnostic::{available, suggest};
 use crate::error::{Error, ErrorKind, Limits, Span};
 use crate::parser::{ParseScratch, ParseScratchGuard};
 use crate::pool::{Obj, Pool, RVal};
@@ -49,6 +50,16 @@ pub struct Machine<'a> {
     module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
     parse_scratch: ParseScratch,
+}
+
+fn bound_names<'a>(
+    syms: &'a SymTable,
+    values: &'a [Option<RVal>],
+) -> impl Iterator<Item = &'a str> {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(id, value)| value.map(|_| syms.names[id].as_ref()))
 }
 
 fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
@@ -196,7 +207,11 @@ impl<'a> Machine<'a> {
             return Err(Error::runtime(
                 "expr.name",
                 Span::default(),
-                format!("unknown function '{fn_name}'"),
+                suggest(
+                    format!("unknown function '{fn_name}'"),
+                    fn_name,
+                    bound_names(&self.syms, &self.globals),
+                ),
             ));
         };
         self.call_rval(callee, args)
@@ -213,7 +228,11 @@ impl<'a> Machine<'a> {
             return Err(Error::runtime(
                 "expr.module",
                 Span::default(),
-                format!("unknown module '{mod_name}'"),
+                suggest(
+                    format!("unknown module '{mod_name}'"),
+                    mod_name,
+                    self.modules.keys().map(String::as_str),
+                ),
             ));
         };
         let Obj::Module { exports, .. } = self.pool.get(mod_id) else {
@@ -223,7 +242,11 @@ impl<'a> Machine<'a> {
             return Err(Error::runtime(
                 "expr.module",
                 Span::default(),
-                format!("module '{mod_name}' has no export '{fn_name}'"),
+                available(
+                    format!("module '{mod_name}' has no export '{fn_name}'"),
+                    "exports",
+                    exports.keys().map(|name| name.as_ref()),
+                ),
             ));
         };
         self.call_rval(callee, args)
@@ -360,7 +383,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    pub(super) fn lookup_global(&mut self, id: u32, span: Span) -> Result<RVal, Error> {
+    pub(super) fn lookup_global(
+        &mut self,
+        id: u32,
+        span: Span,
+        chunk: &Chunk,
+        ip: usize,
+    ) -> Result<RVal, Error> {
         let idx = id as usize;
         if let Some(mod_id) = self.active_module
             && let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied()
@@ -372,12 +401,33 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.pool.retain_val(v);
             return Ok(v);
         }
-        let name = self.syms.names.get(idx).map(|s| s.as_ref()).unwrap_or("?");
-        Err(Error::runtime(
+        Err(self.unknown_name(id, span, chunk, ip))
+    }
+
+    #[cold]
+    fn unknown_name(&self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> Error {
+        let name = self
+            .syms
+            .names
+            .get(id as usize)
+            .map(|s| s.as_ref())
+            .unwrap_or("?");
+        Error::runtime(
             "expr.name",
             span,
-            format!("unknown name '{name}'"),
-        ))
+            suggest(
+                format!("unknown name '{name}'"),
+                name,
+                chunk
+                    .visible_names(ip)
+                    .chain(bound_names(self.syms, self.globals))
+                    .chain(
+                        self.active_module
+                            .into_iter()
+                            .flat_map(|id| bound_names(self.syms, &self.module_envs[id as usize])),
+                    ),
+            ),
+        )
     }
 
     pub(super) fn define_top(&mut self, id: u32, val: RVal) {

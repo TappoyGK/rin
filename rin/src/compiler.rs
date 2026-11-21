@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
-use crate::bytecode::{Capture, Chunk, FnProto, Op, StructDesc, SymTable};
+use crate::bytecode::{Capture, Chunk, FnProto, LocalName, NameInfo, Op, StructDesc, SymTable};
 use crate::error::{Error, Span};
 
 const SHALLOW_COMPILE_DEPTH: usize = 6;
@@ -34,7 +34,7 @@ pub(crate) fn compile_program(
 
 struct Scope {
     module: Option<u32>,
-    locals: Vec<(String, u32)>,
+    locals: Vec<(Rc<str>, u32, usize)>,
     next_slot: u32,
     max_slots: u32,
     captures: Vec<(String, Capture)>,
@@ -55,7 +55,7 @@ impl Scope {
         }
     }
 
-    fn alloc_slot(&mut self, name: String, span: Span) -> Result<u32, Error> {
+    fn alloc_slot(&mut self, name: &str, span: Span) -> Result<u32, Error> {
         let slot = self.next_slot;
         self.next_slot = self
             .next_slot
@@ -64,16 +64,30 @@ impl Scope {
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
-        self.locals.push((name, slot));
+        let name: Rc<str> = Rc::from(name);
+        let names = self.chunk.names.get_or_insert_with(Default::default);
+        let binding = names.locals.len();
+        names.locals.push(LocalName {
+            name: Rc::clone(&name),
+            start: self.chunk.code.len(),
+            end: None,
+        });
+        self.locals.push((name, slot, binding));
         Ok(slot)
+    }
+
+    fn restore_locals(&mut self, len: usize) {
+        for (_, _, binding) in self.locals.drain(len..) {
+            self.chunk.names.as_mut().unwrap().locals[binding].end = Some(self.chunk.code.len());
+        }
     }
 
     fn find_local(&self, name: &str) -> Option<u32> {
         self.locals
             .iter()
             .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, slot)| *slot)
+            .find(|(n, _, _)| n.as_ref() == name)
+            .map(|(_, slot, _)| *slot)
     }
 
     fn find_or_add_capture(&mut self, name: &str, cap: Capture, span: Span) -> Result<u32, Error> {
@@ -203,6 +217,27 @@ struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
+    fn new_scope(&self) -> Scope {
+        let mut inner = Scope::new(self.module);
+        let parent = self.scopes.last().unwrap();
+        let outer = parent
+            .chunk
+            .names
+            .as_deref()
+            .map_or(&[][..], |names| names.outer.as_slice());
+        if !outer.is_empty() || !parent.locals.is_empty() {
+            inner.chunk.names = Some(Box::new(NameInfo {
+                locals: Vec::new(),
+                outer: outer
+                    .iter()
+                    .cloned()
+                    .chain(parent.locals.iter().map(|(name, _, _)| Rc::clone(name)))
+                    .collect(),
+            }));
+        }
+        inner
+    }
+
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.scopes.last_mut().unwrap().chunk
     }
@@ -472,9 +507,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 self.compile_body_shallow(body, true, depth + 1)?;
@@ -496,9 +531,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 self.compile_body_shallow(body, true, depth + 1)?;
@@ -525,12 +560,12 @@ impl<'a> Compiler<'a> {
                         .scopes
                         .last_mut()
                         .unwrap()
-                        .alloc_slot(name.clone(), val_expr.span)?;
+                        .alloc_slot(name, val_expr.span)?;
                     self.chunk().emit(Op::SetLocal(slot), val_expr.span);
                 }
                 self.compile_body_shallow(body, is_tail, depth + 1)?;
                 let scope = self.scopes.last_mut().unwrap();
-                scope.locals.truncate(saved_locals_len);
+                scope.restore_locals(saved_locals_len);
                 scope.next_slot = saved_next_slot;
             }
             ExprKind::If {
@@ -577,13 +612,13 @@ impl<'a> Compiler<'a> {
                             .scopes
                             .last_mut()
                             .unwrap()
-                            .alloc_slot(bind_name, arm.span)?;
+                            .alloc_slot(&bind_name, arm.span)?;
                         self.chunk().emit(Op::SetLocal(slot), arm.span);
                     }
                     self.chunk().emit(Op::Pop, arm.span);
                     self.compile_body_shallow(&arm.body, is_tail, depth + 1)?;
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
+                    scope.restore_locals(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                     end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
@@ -661,7 +696,7 @@ impl<'a> Compiler<'a> {
                     self.flush_ticks();
                 }
                 Step::BindLocal { name, span } => {
-                    let slot = self.scopes.last_mut().unwrap().alloc_slot(name, span)?;
+                    let slot = self.scopes.last_mut().unwrap().alloc_slot(&name, span)?;
                     self.chunk().emit(Op::SetLocal(slot), span);
                 }
                 Step::RestoreLocals {
@@ -669,7 +704,7 @@ impl<'a> Compiler<'a> {
                     saved_next_slot,
                 } => {
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
+                    scope.restore_locals(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                 }
                 Step::FinishStruct(fs) => {
@@ -774,7 +809,7 @@ impl<'a> Compiler<'a> {
                             .scopes
                             .last_mut()
                             .unwrap()
-                            .alloc_slot(bind_name, arm.span)?;
+                            .alloc_slot(&bind_name, arm.span)?;
                         self.chunk().emit(Op::SetLocal(slot), arm.span);
                     }
                     self.chunk().emit(Op::Pop, arm.span);
@@ -793,7 +828,7 @@ impl<'a> Compiler<'a> {
                 Step::MatchAfterArm(mut ma) => {
                     let arm = &ma.arms[ma.idx];
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(ma.saved_locals_len);
+                    scope.restore_locals(ma.saved_locals_len);
                     scope.next_slot = ma.saved_next_slot;
                     ma.end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
@@ -1045,9 +1080,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 steps.push(Step::FinishFn(Box::new(FinishFnStep {
@@ -1061,9 +1096,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 steps.push(Step::FinishFn(Box::new(FinishFnStep {
@@ -1213,8 +1248,8 @@ mod tests {
         let mut scope = Scope::new(None);
         scope.next_slot = u32::MAX - 1;
         let at = Span::new(3, 5);
-        assert_eq!(scope.alloc_slot("last".into(), at).unwrap(), u32::MAX - 1);
-        let err = scope.alloc_slot("overflow".into(), at).unwrap_err();
+        assert_eq!(scope.alloc_slot("last", at).unwrap(), u32::MAX - 1);
+        let err = scope.alloc_slot("overflow", at).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.rule(), "compile.capacity");
         assert_eq!(err.at, at);

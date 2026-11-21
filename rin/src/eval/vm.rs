@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
+use crate::diagnostic::{available, suggest};
 use crate::error::{Error, Span, StackFrame};
 use crate::pool::{Obj, RVal};
 
@@ -147,7 +148,7 @@ impl Runner<'_, '_> {
                     }
                     Op::GetGlobal(id) => {
                         let span = chunk.spans[ip - 1];
-                        let v = self.lookup_global(id, span)?;
+                        let v = self.lookup_global(id, span, chunk, ip - 1)?;
                         self.stack.push(v);
                     }
                     Op::DefGlobal(id) => {
@@ -235,7 +236,11 @@ impl Runner<'_, '_> {
                             return Err(Error::runtime(
                                 "expr.with",
                                 span,
-                                format!("{name} has no field '{fname}'"),
+                                available(
+                                    format!("{name} has no field '{fname}'"),
+                                    "fields",
+                                    fields.keys().map(|name| name.as_ref()),
+                                ),
                             ));
                         }
                     }
@@ -327,7 +332,11 @@ impl Runner<'_, '_> {
                                         None => Err(Error::runtime(
                                             "expr.field",
                                             span,
-                                            format!("{name} has no field '{field}'"),
+                                            available(
+                                                format!("{name} has no field '{field}'"),
+                                                "fields",
+                                                fields.keys().map(|name| name.as_ref()),
+                                            ),
                                         )),
                                     }
                                 }
@@ -340,7 +349,11 @@ impl Runner<'_, '_> {
                                         None => Err(Error::runtime(
                                             "expr.module",
                                             span,
-                                            format!("module '{name}' has no export '{field}'"),
+                                            available(
+                                                format!("module '{name}' has no export '{field}'"),
+                                                "exports",
+                                                exports.keys().map(|name| name.as_ref()),
+                                            ),
                                         )),
                                     }
                                 }
@@ -672,7 +685,11 @@ impl Runner<'_, '_> {
                             return Err(Error::runtime(
                                 "expr.module",
                                 span,
-                                format!("unknown module '{name}'"),
+                                suggest(
+                                    format!("unknown module '{name}'"),
+                                    name,
+                                    self.modules.keys().map(String::as_str),
+                                ),
                             ));
                         };
                         self.pool.retain_val(mod_val);
