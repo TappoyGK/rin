@@ -941,7 +941,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             .contains("in <lambda> (called by fold at 1:1)")
     );
 
-    // 6. C FFI の rin_last_backtrace と早期リターン時の履歴クリア。
+    // 6. C FFI の rin_last_error と早期リターン時の履歴クリア。
     unsafe {
         let cm = crate::ffi::rin_new(
             crate::ffi::rin_limits_default(),
@@ -954,7 +954,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         let c_src = std::ffi::CString::new(src).unwrap();
         let mut res = crate::ffi::rin_eval(cm, c_src.as_ptr());
         assert!(!res.ok);
-        let bt_ptr = crate::ffi::rin_last_backtrace(cm);
+        let bt_ptr = (*crate::ffi::rin_last_error(cm)).backtrace;
         assert!(!bt_ptr.is_null());
         let bt_str = std::ffi::CStr::from_ptr(bt_ptr).to_str().unwrap();
         assert!(bt_str.contains("in inner (at 2:22)"));
@@ -965,7 +965,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         let bad_utf8 = [0xffu8, 0x00];
         let mut bad_res = crate::ffi::rin_eval(cm, bad_utf8.as_ptr().cast());
         assert!(!bad_res.ok);
-        assert!(crate::ffi::rin_last_backtrace(cm).is_null());
+        assert!((*crate::ffi::rin_last_error(cm)).backtrace.is_null());
         crate::ffi::rin_res_free(&mut bad_res);
 
         crate::ffi::rin_free(cm);

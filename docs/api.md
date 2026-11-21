@@ -107,7 +107,7 @@ impl Error {
 
 ## 2. C FFI API
 
-ヘッダ：[rin.h](file:///Users/tappoy/proj/rin/rin/include/rin.h)
+ヘッダ：[rin.h](../rin/include/rin.h)
 
 ### 2.1 型定義
 
@@ -116,7 +116,7 @@ impl Error {
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
   - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
 - `RinMachine` / `RinValue`：不透明ハンドル型。
-- `RinEvalResult`：`{ bool ok; RinValue *value; char *error_message; size_t error_line; size_t error_col; }`
+- `RinEvalResult`：`{ bool ok; RinValue *value; }`
 
 ### 2.2 マシン操作
 
@@ -130,8 +130,53 @@ impl Error {
 | `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む |
 | `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す |
 | `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す |
-| `const char *rin_last_backtrace(const RinMachine *machine)` | 直近のエラーのコールスタック文字列を返す（なければ `NULL`、次の呼び出しまたは `rin_free` まで有効） |
-| `void rin_res_free(RinEvalResult *res)` | `rin_eval` の結果（`value` / `error_message`）を解放する |
+| `const RinError *rin_last_error(const RinMachine *machine)` | 直近の対象操作のエラーを借用する（エラーなし・NULL machine は NULL） |
+| `void rin_res_free(RinEvalResult *res)` | 結果の `value` を解放し NULL にする（エラー情報は保持する） |
+
+#### エラー情報の借用
+
+`RinError` は次の情報を持つ。ホストは構造体・文字列のいずれも解放しない。
+
+```c
+typedef enum RinErrorKind {
+    RIN_ERR_LEX = 0, RIN_ERR_PARSE = 1, RIN_ERR_RUNTIME = 2,
+    RIN_ERR_TOO_MANY_STEPS = 3, RIN_ERR_TOO_DEEP = 4,
+    RIN_ERR_TOO_MUCH_MEMORY = 5, RIN_ERR_HOST = 6
+} RinErrorKind;
+
+typedef struct RinError {
+    RinErrorKind kind;
+    const char *message;
+    const char *module;
+    const char *rule;
+    size_t line;
+    size_t col;
+    const char *backtrace;
+    const char *text;
+} RinError;
+```
+
+- `message` は見出しの本文、`text` は Rust の `Error::to_string()` 相当の見出しと履歴全体であり、必ず非 NULL の UTF-8・NUL 終端文字列である。内部 NUL は可視の `\0` に置き換える。ほかの文字列にも同じ変換を適用する。
+- `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は規則名の対応まで NULL とする。
+- `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
+- `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
+- 対象操作は `rin_eval` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` の 5 関数である。同じ machine への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ machine の対象操作・解放と並行して参照してはならない。
+- 対象操作は引数検査の前に前回の情報をクリアする。有効な machine への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
+- NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `rule` / `backtrace` は NULL、`line` / `col` は 0、`message` / `text` は引数エラーの文言とする。machine 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
+- `RinEvalResult.value` は評価・関数呼び出し成功時にはホストが所有する値であり、`rin_res_free` で解放する。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
+
+有効な `m` に対する利用例：
+
+```c
+RinEvalResult result = rin_eval(m, source);
+if (!result.ok) {
+    const RinError *error = rin_last_error(m);
+    fprintf(stderr, "%s\n", error->text);
+}
+rin_res_free(&result);
+```
+
+以前の `RinEvalResult.error_message` / `error_line` / `error_col` および `rin_last_backtrace` は削除した。呼び出し側は `rin_last_error` の各欄を使う。
 
 ### 2.3 値の生成と解放
 
