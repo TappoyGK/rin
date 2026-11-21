@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::alloc::{Allocator, HeapAllocator};
-use crate::ast::{Expr, ExprKind, Pattern};
+use crate::ast::Pattern;
+use crate::bytecode::{Capture, Chunk, Op};
+use crate::compiler::compile_program;
 use crate::error::{Error, ErrorKind, Limits, Span};
 use crate::parser::parse_program;
 use crate::pool::{Obj, Pool, RVal};
@@ -83,6 +86,7 @@ impl<'a> Machine<'a> {
     /// Loads and evaluates a named module from host-provided source.
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         let exprs = parse_program(source)?;
+        let chunk = compile_program(&exprs, Some(name.to_string()))?;
         if let Some(prev_env) = self.module_envs.insert(name.to_string(), BTreeMap::new()) {
             for v in prev_env.into_values() {
                 self.pool.release_val(v);
@@ -99,11 +103,10 @@ impl<'a> Machine<'a> {
             active_module: Some(name.to_string()),
             export_list: None,
         };
-        let empty_env = BTreeMap::new();
-        for expr in &exprs {
-            let v = runner.eval_expr(expr, &empty_env)?;
-            runner.pool.release_val(v);
-        }
+        let mut locals = vec![RVal::Void; chunk.local_count as usize];
+        let v = runner.exec_chunk(&chunk, &[], &mut locals);
+        runner.release_all(locals);
+        runner.pool.release_val(v?);
         let export_filter = runner.export_list.take();
         let mod_env = self.module_envs.get(name).unwrap();
         let mut exports = BTreeMap::new();
@@ -153,6 +156,7 @@ impl<'a> Machine<'a> {
 
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         let exprs = parse_program(source)?;
+        let chunk = compile_program(&exprs, None)?;
         let mut runner = Runner {
             limits: self.limits,
             steps: 0,
@@ -164,12 +168,10 @@ impl<'a> Machine<'a> {
             active_module: None,
             export_list: None,
         };
-        let empty_env = BTreeMap::new();
-        let mut last = RVal::Void;
-        for expr in &exprs {
-            runner.pool.release_val(last);
-            last = runner.eval_expr(expr, &empty_env)?;
-        }
+        let mut locals = vec![RVal::Void; chunk.local_count as usize];
+        let last = runner.exec_chunk(&chunk, &[], &mut locals);
+        runner.release_all(locals);
+        let last = last?;
         let exported = runner.pool.export(last);
         runner.pool.release_val(last);
         Ok(exported)
@@ -301,11 +303,7 @@ impl Runner<'_, '_> {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    fn lookup(&mut self, name: &str, env: &BTreeMap<String, RVal>, span: Span) -> Result<RVal, Error> {
-        if let Some(&v) = env.get(name) {
-            self.pool.retain_val(v);
-            return Ok(v);
-        }
+    fn lookup_global(&mut self, name: &str, span: Span) -> Result<RVal, Error> {
         if let Some(mod_name) = &self.active_module
             && let Some(mod_env) = self.module_envs.get(mod_name)
             && let Some(&v) = mod_env.get(name)
@@ -337,529 +335,490 @@ impl Runner<'_, '_> {
         }
     }
 
-    fn retain_env(&mut self, env: &BTreeMap<String, RVal>) -> BTreeMap<String, RVal> {
-        for &v in env.values() {
+    fn build_closure(
+        &mut self,
+        proto: &Rc<crate::bytecode::FnProto>,
+        captures: &[RVal],
+        locals: &[RVal],
+        span: Span,
+    ) -> Result<RVal, Error> {
+        let mut cap_vals = Vec::with_capacity(proto.captures.len());
+        for cap in &proto.captures {
+            let v = match cap {
+                Capture::Local(slot) => locals[*slot as usize],
+                Capture::Upvalue(idx) => captures[*idx as usize],
+            };
             self.pool.retain_val(v);
+            cap_vals.push(v);
         }
-        env.clone()
+        match self.pool.alloc_obj(
+            Obj::Closure {
+                proto: Rc::clone(proto),
+                captures: cap_vals.clone(),
+            },
+            span,
+        ) {
+            Ok(id) => Ok(RVal::Obj(id)),
+            Err(e) => {
+                self.release_all(cap_vals);
+                Err(e)
+            }
+        }
     }
 
-    fn release_env(&mut self, env: BTreeMap<String, RVal>) {
-        for v in env.into_values() {
-            self.pool.release_val(v);
+    fn exec_chunk(
+        &mut self,
+        chunk: &Chunk,
+        captures: &[RVal],
+        locals: &mut [RVal],
+    ) -> Result<RVal, Error> {
+        let mut stack: Vec<RVal> = Vec::new();
+        let res = self.exec_loop(chunk, captures, locals, &mut stack);
+        if res.is_err() {
+            self.release_all(stack);
         }
+        res
     }
 
-    fn eval_body(&mut self, body: &[Expr], env: &BTreeMap<String, RVal>) -> Result<RVal, Error> {
-        let mut last = RVal::Void;
-        for expr in body {
-            self.pool.release_val(last);
-            last = self.eval_expr(expr, env)?;
-        }
-        Ok(last)
-    }
+    fn exec_loop(
+        &mut self,
+        chunk: &Chunk,
+        captures: &[RVal],
+        locals: &mut [RVal],
+        stack: &mut Vec<RVal>,
+    ) -> Result<RVal, Error> {
+        let mut ip = 0usize;
+        while ip < chunk.code.len() {
+            let op = chunk.code[ip];
+            let span = chunk.spans[ip];
+            ip += 1;
+            self.tick(span)?;
 
-    fn eval_expr(&mut self, expr: &Expr, env: &BTreeMap<String, RVal>) -> Result<RVal, Error> {
-        self.tick(expr.span)?;
-        let span = expr.span;
-
-        match &expr.kind {
-            ExprKind::Int(n) => Ok(RVal::Int(*n)),
-            ExprKind::Float(x) => Ok(RVal::Float(*x)),
-            ExprKind::Bool(b) => Ok(RVal::Bool(*b)),
-            ExprKind::Char(c) => Ok(RVal::Char(*c)),
-            ExprKind::Str(s) => Ok(RVal::Obj(
-                self.pool.alloc_obj(Obj::Str(s.clone()), span)?,
-            )),
-            ExprKind::None => Ok(RVal::None),
-            ExprKind::Ident(name) => self.lookup(name, env, span),
-            ExprKind::List(items) => {
-                let mut evaluated = Vec::with_capacity(items.len());
-                for item in items {
-                    match self.eval_expr(item, env) {
-                        Ok(v) => evaluated.push(v),
+            match op {
+                Op::Void => stack.push(RVal::Void),
+                Op::Int(n) => stack.push(RVal::Int(n)),
+                Op::Float(idx) => stack.push(RVal::Float(chunk.floats[idx as usize])),
+                Op::Bool(b) => stack.push(RVal::Bool(b)),
+                Op::Char(c) => stack.push(RVal::Char(c)),
+                Op::Str(idx) => {
+                    let s = chunk.strings[idx as usize].clone();
+                    let id = self.pool.alloc_obj(Obj::Str(s), span)?;
+                    stack.push(RVal::Obj(id));
+                }
+                Op::None => stack.push(RVal::None),
+                Op::EmptyList => stack.push(RVal::EmptyList),
+                Op::GetLocal(slot) => {
+                    let v = locals[slot as usize];
+                    self.pool.retain_val(v);
+                    stack.push(v);
+                }
+                Op::SetLocal(slot) => {
+                    let v = stack.pop().unwrap();
+                    let old = std::mem::replace(&mut locals[slot as usize], v);
+                    self.pool.release_val(old);
+                }
+                Op::GetCapture(idx) => {
+                    let v = captures[idx as usize];
+                    self.pool.retain_val(v);
+                    stack.push(v);
+                }
+                Op::GetGlobal(idx) => {
+                    let v = self.lookup_global(&chunk.strings[idx as usize], span)?;
+                    stack.push(v);
+                }
+                Op::DefGlobal(idx) => {
+                    let v = stack.pop().unwrap();
+                    self.define_top(chunk.strings[idx as usize].clone(), v);
+                    stack.push(RVal::Void);
+                }
+                Op::DefFn(name_idx, proto_idx) => {
+                    let proto = &chunk.protos[proto_idx as usize];
+                    let closure = self.build_closure(proto, captures, locals, span)?;
+                    self.define_top(chunk.strings[name_idx as usize].clone(), closure);
+                    stack.push(RVal::Void);
+                }
+                Op::MakeClosure(proto_idx) => {
+                    let proto = &chunk.protos[proto_idx as usize];
+                    let closure = self.build_closure(proto, captures, locals, span)?;
+                    stack.push(closure);
+                }
+                Op::MakeList(n) => {
+                    let start = stack.len() - n as usize;
+                    let items: Vec<RVal> = stack.drain(start..).collect();
+                    let list = self.build_list_from_owned(items, span)?;
+                    stack.push(list);
+                }
+                Op::MakeTuple(n) => {
+                    let start = stack.len() - n as usize;
+                    let items: Vec<RVal> = stack.drain(start..).collect();
+                    match self.pool.alloc_obj(Obj::Tuple(items.clone()), span) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
                         Err(e) => {
-                            self.release_all(evaluated);
+                            self.release_all(items);
                             return Err(e);
                         }
                     }
                 }
-                let res = self.build_list_from_owned(evaluated, span);
-                res
-            }
-            ExprKind::Tuple(items) => {
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    match self.eval_expr(item, env) {
-                        Ok(v) => out.push(v),
-                        Err(e) => {
-                            self.release_all(out);
-                            return Err(e);
+                Op::MakeStruct(s_idx) => {
+                    let desc = &chunk.structs[s_idx as usize];
+                    let start = stack.len() - desc.fields.len();
+                    let vals: Vec<RVal> = stack.drain(start..).collect();
+                    let mut map = BTreeMap::new();
+                    for (fname, val) in desc.fields.iter().zip(vals) {
+                        if let Some(prev) = map.insert(fname.clone(), val) {
+                            self.pool.release_val(prev);
                         }
                     }
-                }
-                match self.pool.alloc_obj(Obj::Tuple(out.clone()), span) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.release_all(out);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Struct { name, fields } => {
-                let mut map = BTreeMap::new();
-                for (k, v_expr) in fields {
-                    match self.eval_expr(v_expr, env) {
-                        Ok(v) => {
-                            if let Some(prev) = map.insert(k.clone(), v) {
-                                self.pool.release_val(prev);
-                            }
-                        }
-                        Err(e) => {
-                            self.release_env(map);
-                            return Err(e);
-                        }
-                    }
-                }
-                match self.pool.alloc_obj(
-                    Obj::Struct {
-                        name: name.clone(),
-                        fields: map.clone(),
-                    },
-                    span,
-                ) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.release_env(map);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                let val = match data {
-                    Some(d) => Some(self.eval_expr(d, env)?),
-                    None => None,
-                };
-                match self.pool.alloc_obj(
-                    Obj::Variant {
-                        type_name: type_name.clone(),
-                        variant: variant.clone(),
-                        data: val,
-                    },
-                    span,
-                ) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        if let Some(v) = val {
-                            self.pool.release_val(v);
-                        }
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Some(inner) => {
-                let val = self.eval_expr(inner, env)?;
-                match self.pool.alloc_obj(Obj::Some(val), span) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.pool.release_val(val);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Ok(inner) => {
-                let val = self.eval_expr(inner, env)?;
-                match self.pool.alloc_obj(Obj::Ok(val), span) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.pool.release_val(val);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Err(inner) => {
-                let val = self.eval_expr(inner, env)?;
-                match self.pool.alloc_obj(Obj::Err(val), span) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.pool.release_val(val);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Field { target, field } => {
-                let val = self.eval_expr(target, env)?;
-                let res = match val {
-                    RVal::Obj(id) => match self.pool.get(id) {
-                        Obj::Struct { name, fields } => match fields.get(field).copied() {
-                            Some(fv) => {
-                                self.pool.retain_val(fv);
-                                Ok(fv)
-                            }
-                            None => Err(Error::runtime(
-                                span,
-                                format!("{name} has no field '{field}'"),
-                            )),
+                    match self.pool.alloc_obj(
+                        Obj::Struct {
+                            name: desc.name.clone(),
+                            fields: map.clone(),
                         },
-                        Obj::Module { name, exports } => match exports.get(field).copied() {
-                            Some(fv) => {
-                                self.pool.retain_val(fv);
-                                Ok(fv)
+                        span,
+                    ) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
+                        Err(e) => {
+                            for v in map.into_values() {
+                                self.pool.release_val(v);
                             }
-                            None => Err(Error::runtime(
-                                span,
-                                format!("module '{name}' has no export '{field}'"),
-                            )),
-                        },
-                        _ => Err(Error::runtime(
-                            span,
-                            format!(
-                                "cannot read field '{field}' on {}",
-                                val.type_name(self.pool)
-                            ),
-                        )),
-                    },
-                    other => Err(Error::runtime(
-                        span,
-                        format!(
-                            "cannot read field '{field}' on {}",
-                            other.type_name(self.pool)
-                        ),
-                    )),
-                };
-                self.pool.release_val(val);
-                res
-            }
-            ExprKind::Index { target, index } => {
-                let list_val = self.eval_expr(target, env)?;
-                let idx_val = match self.eval_expr(index, env) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.pool.release_val(list_val);
-                        return Err(e);
-                    }
-                };
-                let idx = match idx_val {
-                    RVal::Int(i) => i,
-                    other => {
-                        let tname = other.type_name(self.pool);
-                        self.pool.release_val(idx_val);
-                        self.pool.release_val(list_val);
-                        return Err(Error::runtime(
-                            span,
-                            format!("index must be i64, got {tname}"),
-                        ));
-                    }
-                };
-                self.pool.release_val(idx_val);
-
-                let res = if let RVal::Obj(id) = list_val
-                    && let Obj::Array(arr) = self.pool.get(id)
-                {
-                    if idx < 0 || (idx as usize) >= arr.len() {
-                        Err(Error::runtime(
-                            span,
-                            format!("index {idx} out of range (length {})", arr.len()),
-                        ))
-                    } else {
-                        let v = arr[idx as usize];
-                        self.pool.retain_val(v);
-                        Ok(v)
-                    }
-                } else if !self.is_list(list_val) {
-                    Err(Error::runtime(
-                        span,
-                        format!("cannot index into {}", list_val.type_name(self.pool)),
-                    ))
-                } else if idx < 0 {
-                    Err(Error::runtime(
-                        span,
-                        format!(
-                            "index {idx} out of range (length {})",
-                            self.pool.list_len(list_val)
-                        ),
-                    ))
-                } else {
-                    match self.list_get(list_val, idx as usize) {
-                        Some(v) => {
-                            self.pool.retain_val(v);
-                            Ok(v)
+                            return Err(e);
                         }
-                        None => Err(Error::runtime(
-                            span,
-                            format!(
-                                "index {idx} out of range (length {})",
-                                self.pool.list_len(list_val)
-                            ),
-                        )),
                     }
-                };
-                self.pool.release_val(list_val);
-                res
-            }
-            ExprKind::With { target, fields } => {
-                let base = self.eval_expr(target, env)?;
-                let (name, mut updated) = match base {
-                    RVal::Obj(id) => match self.pool.get(id) {
-                        Obj::Struct { name, fields } => (name.clone(), fields.clone()),
-                        _ => {
-                            let tname = base.type_name(self.pool);
+                }
+                Op::WithStruct(s_idx) => {
+                    let desc = &chunk.structs[s_idx as usize];
+                    let start = stack.len() - desc.fields.len();
+                    let vals: Vec<RVal> = stack.drain(start..).collect();
+                    let base = stack.pop().unwrap();
+                    let (name, mut updated) = match base {
+                        RVal::Obj(id) => match self.pool.get(id) {
+                            Obj::Struct { name, fields } => (name.clone(), fields.clone()),
+                            _ => {
+                                let tname = base.type_name(self.pool);
+                                self.pool.release_val(base);
+                                self.release_all(vals);
+                                return Err(Error::runtime(
+                                    span,
+                                    format!("'with' requires a struct, got {tname}"),
+                                ));
+                            }
+                        },
+                        other => {
+                            let tname = other.type_name(self.pool);
                             self.pool.release_val(base);
+                            self.release_all(vals);
                             return Err(Error::runtime(
                                 span,
                                 format!("'with' requires a struct, got {tname}"),
                             ));
                         }
-                    },
-                    other => {
-                        let tname = other.type_name(self.pool);
-                        self.pool.release_val(base);
+                    };
+                    for &v in updated.values() {
+                        self.pool.retain_val(v);
+                    }
+                    self.pool.release_val(base);
+
+                    for (idx, (fname, val)) in desc.fields.iter().zip(vals.iter()).enumerate() {
+                        if !updated.contains_key(fname) {
+                            for &v in updated.values() {
+                                self.pool.release_val(v);
+                            }
+                            for &rem in &vals[idx..] {
+                                self.pool.release_val(rem);
+                            }
+                            return Err(Error::runtime(
+                                span,
+                                format!("{name} has no field '{fname}'"),
+                            ));
+                        }
+                        if let Some(prev) = updated.insert(fname.clone(), *val) {
+                            self.pool.release_val(prev);
+                        }
+                    }
+                    match self.pool.alloc_obj(
+                        Obj::Struct {
+                            name,
+                            fields: updated.clone(),
+                        },
+                        span,
+                    ) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
+                        Err(e) => {
+                            for v in updated.into_values() {
+                                self.pool.release_val(v);
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Op::MakeVariant {
+                    type_name,
+                    variant,
+                    has_data,
+                } => {
+                    let data = if has_data {
+                        Some(stack.pop().unwrap())
+                    } else {
+                        None
+                    };
+                    match self.pool.alloc_obj(
+                        Obj::Variant {
+                            type_name: chunk.strings[type_name as usize].clone(),
+                            variant: chunk.strings[variant as usize].clone(),
+                            data,
+                        },
+                        span,
+                    ) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
+                        Err(e) => {
+                            if let Some(d) = data {
+                                self.pool.release_val(d);
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Op::MakeSome => {
+                    let v = stack.pop().unwrap();
+                    match self.pool.alloc_obj(Obj::Some(v), span) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
+                        Err(e) => {
+                            self.pool.release_val(v);
+                            return Err(e);
+                        }
+                    }
+                }
+                Op::MakeOk => {
+                    let v = stack.pop().unwrap();
+                    match self.pool.alloc_obj(Obj::Ok(v), span) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
+                        Err(e) => {
+                            self.pool.release_val(v);
+                            return Err(e);
+                        }
+                    }
+                }
+                Op::MakeErr => {
+                    let v = stack.pop().unwrap();
+                    match self.pool.alloc_obj(Obj::Err(v), span) {
+                        Ok(id) => stack.push(RVal::Obj(id)),
+                        Err(e) => {
+                            self.pool.release_val(v);
+                            return Err(e);
+                        }
+                    }
+                }
+                Op::GetField(f_idx) => {
+                    let field = &chunk.strings[f_idx as usize];
+                    let val = stack.pop().unwrap();
+                    let res = match val {
+                        RVal::Obj(id) => match self.pool.get(id) {
+                            Obj::Struct { name, fields } => match fields.get(field).copied() {
+                                Some(fv) => {
+                                    self.pool.retain_val(fv);
+                                    Ok(fv)
+                                }
+                                None => Err(Error::runtime(
+                                    span,
+                                    format!("{name} has no field '{field}'"),
+                                )),
+                            },
+                            Obj::Module { name, exports } => match exports.get(field).copied() {
+                                Some(fv) => {
+                                    self.pool.retain_val(fv);
+                                    Ok(fv)
+                                }
+                                None => Err(Error::runtime(
+                                    span,
+                                    format!("module '{name}' has no export '{field}'"),
+                                )),
+                            },
+                            _ => Err(Error::runtime(
+                                span,
+                                format!(
+                                    "cannot read field '{field}' on {}",
+                                    val.type_name(self.pool)
+                                ),
+                            )),
+                        },
+                        other => Err(Error::runtime(
+                            span,
+                            format!(
+                                "cannot read field '{field}' on {}",
+                                other.type_name(self.pool)
+                            ),
+                        )),
+                    };
+                    self.pool.release_val(val);
+                    stack.push(res?);
+                }
+                Op::GetIndex => {
+                    let idx_val = stack.pop().unwrap();
+                    let list_val = stack.pop().unwrap();
+                    let idx = match idx_val {
+                        RVal::Int(i) => i,
+                        other => {
+                            let tname = other.type_name(self.pool);
+                            self.pool.release_val(idx_val);
+                            self.pool.release_val(list_val);
+                            return Err(Error::runtime(
+                                span,
+                                format!("index must be i64, got {tname}"),
+                            ));
+                        }
+                    };
+                    self.pool.release_val(idx_val);
+
+                    let res = if let RVal::Obj(id) = list_val
+                        && let Obj::Array(arr) = self.pool.get(id)
+                    {
+                        if idx < 0 || (idx as usize) >= arr.len() {
+                            Err(Error::runtime(
+                                span,
+                                format!("index {idx} out of range (length {})", arr.len()),
+                            ))
+                        } else {
+                            let v = arr[idx as usize];
+                            self.pool.retain_val(v);
+                            Ok(v)
+                        }
+                    } else if !self.is_list(list_val) {
+                        Err(Error::runtime(
+                            span,
+                            format!("cannot index into {}", list_val.type_name(self.pool)),
+                        ))
+                    } else if idx < 0 {
+                        Err(Error::runtime(
+                            span,
+                            format!(
+                                "index {idx} out of range (length {})",
+                                self.pool.list_len(list_val)
+                            ),
+                        ))
+                    } else {
+                        match self.list_get(list_val, idx as usize) {
+                            Some(v) => {
+                                self.pool.retain_val(v);
+                                Ok(v)
+                            }
+                            None => Err(Error::runtime(
+                                span,
+                                format!(
+                                    "index {idx} out of range (length {})",
+                                    self.pool.list_len(list_val)
+                                ),
+                            )),
+                        }
+                    };
+                    self.pool.release_val(list_val);
+                    stack.push(res?);
+                }
+                Op::Call(argc) => {
+                    let start = stack.len() - argc as usize;
+                    let args: Vec<RVal> = stack.drain(start..).collect();
+                    let callee = stack.pop().unwrap();
+                    let res = self.apply(callee, &args, span);
+                    self.pool.release_val(callee);
+                    self.release_all(args);
+                    stack.push(res?);
+                }
+                Op::And => {
+                    return Err(Error::runtime(span, "'and' requires at least 1 argument"));
+                }
+                Op::Or => {
+                    return Err(Error::runtime(span, "'or' requires at least 1 argument"));
+                }
+                Op::Jump(target) => {
+                    ip = target;
+                }
+                Op::JumpIfFalse(target) => {
+                    let cond = stack.pop().unwrap();
+                    match cond {
+                        RVal::Bool(true) => {}
+                        RVal::Bool(false) => ip = target,
+                        other => {
+                            let tname = other.type_name(self.pool);
+                            self.pool.release_val(cond);
+                            return Err(Error::runtime(span, format!("expected bool, got {tname}")));
+                        }
+                    }
+                }
+                Op::JumpIfFalsePeek(target) => {
+                    let cond = *stack.last().unwrap();
+                    match cond {
+                        RVal::Bool(true) => {
+                            stack.pop();
+                        }
+                        RVal::Bool(false) => ip = target,
+                        other => {
+                            let tname = other.type_name(self.pool);
+                            return Err(Error::runtime(span, format!("expected bool, got {tname}")));
+                        }
+                    }
+                }
+                Op::JumpIfTruePeek(target) => {
+                    let cond = *stack.last().unwrap();
+                    match cond {
+                        RVal::Bool(false) => {
+                            stack.pop();
+                        }
+                        RVal::Bool(true) => ip = target,
+                        other => {
+                            let tname = other.type_name(self.pool);
+                            return Err(Error::runtime(span, format!("expected bool, got {tname}")));
+                        }
+                    }
+                }
+                Op::Pop => {
+                    if let Some(v) = stack.pop() {
+                        self.pool.release_val(v);
+                    }
+                }
+                Op::TryMatch { pat_idx, fail_ip } => {
+                    let val = *stack.last().unwrap();
+                    if let Some(extra) = self.match_pattern(&chunk.patterns[pat_idx as usize], val) {
+                        for (_, v) in extra {
+                            self.pool.retain_val(v);
+                            stack.push(v);
+                        }
+                    } else {
+                        ip = fail_ip;
+                    }
+                }
+                Op::MatchFail => {
+                    return Err(Error::runtime(span, "non-exhaustive match"));
+                }
+                Op::Import(idx) => {
+                    let name = &chunk.strings[idx as usize];
+                    let Some(&mod_val) = self.modules.get(name) else {
+                        return Err(Error::runtime(span, format!("unknown module '{name}'")));
+                    };
+                    self.pool.retain_val(mod_val);
+                    self.define_top(name.clone(), mod_val);
+                    stack.push(RVal::Void);
+                }
+                Op::Export(idx) => {
+                    if self.active_module.is_none() {
                         return Err(Error::runtime(
                             span,
-                            format!("'with' requires a struct, got {tname}"),
+                            "'export' can only be used inside a module",
                         ));
                     }
-                };
-                for &v in updated.values() {
-                    self.pool.retain_val(v);
+                    let names = &chunk.export_lists[idx as usize];
+                    let list = self.export_list.get_or_insert_with(Vec::new);
+                    list.extend(names.iter().cloned());
+                    stack.push(RVal::Void);
                 }
-                self.pool.release_val(base);
-
-                for (k, v_expr) in fields {
-                    if !updated.contains_key(k) {
-                        self.release_env(updated);
-                        return Err(Error::runtime(span, format!("{name} has no field '{k}'")));
-                    }
-                    match self.eval_expr(v_expr, env) {
-                        Ok(val) => {
-                            if let Some(prev) = updated.insert(k.clone(), val) {
-                                self.pool.release_val(prev);
-                            }
-                        }
-                        Err(e) => {
-                            self.release_env(updated);
-                            return Err(e);
-                        }
-                    }
-                }
-                match self.pool.alloc_obj(
-                    Obj::Struct {
-                        name,
-                        fields: updated.clone(),
-                    },
-                    span,
-                ) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.release_env(updated);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Def { name, value } => {
-                let val = self.eval_expr(value, env)?;
-                self.define_top(name.clone(), val);
-                Ok(RVal::Void)
-            }
-            ExprKind::Import { name } => {
-                let Some(&mod_val) = self.modules.get(name) else {
-                    return Err(Error::runtime(span, format!("unknown module '{name}'")));
-                };
-                self.pool.retain_val(mod_val);
-                self.define_top(name.clone(), mod_val);
-                Ok(RVal::Void)
-            }
-            ExprKind::Export { names } => {
-                if self.active_module.is_none() {
-                    return Err(Error::runtime(
-                        span,
-                        "'export' can only be used inside a module",
-                    ));
-                }
-                let list = self.export_list.get_or_insert_with(Vec::new);
-                list.extend(names.iter().cloned());
-                Ok(RVal::Void)
-            }
-            ExprKind::Defn { name, params, body } => {
-                let captured = self.retain_env(env);
-                let id = match self.pool.alloc_obj(
-                    Obj::Closure {
-                        name: Some(name.clone()),
-                        module: self.active_module.clone(),
-                        params: params.clone(),
-                        body: body.clone(),
-                        env: captured.clone(),
-                    },
-                    span,
-                ) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        self.release_env(captured);
-                        return Err(e);
-                    }
-                };
-                self.define_top(name.clone(), RVal::Obj(id));
-                Ok(RVal::Void)
-            }
-            ExprKind::Fn { params, body } => {
-                let captured = self.retain_env(env);
-                match self.pool.alloc_obj(
-                    Obj::Closure {
-                        name: None,
-                        module: self.active_module.clone(),
-                        params: params.clone(),
-                        body: body.clone(),
-                        env: captured.clone(),
-                    },
-                    span,
-                ) {
-                    Ok(id) => Ok(RVal::Obj(id)),
-                    Err(e) => {
-                        self.release_env(captured);
-                        Err(e)
-                    }
-                }
-            }
-            ExprKind::Let { bindings, body } => {
-                let mut next = self.retain_env(env);
-                for (name, val_expr) in bindings {
-                    match self.eval_expr(val_expr, &next) {
-                        Ok(val) => {
-                            if let Some(prev) = next.insert(name.clone(), val) {
-                                self.pool.release_val(prev);
-                            }
-                        }
-                        Err(e) => {
-                            self.release_env(next);
-                            return Err(e);
-                        }
-                    }
-                }
-                let res = self.eval_body(body, &next);
-                self.release_env(next);
-                res
-            }
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                if self.eval_bool(cond, env)? {
-                    self.eval_expr(then_branch, env)
-                } else {
-                    self.eval_expr(else_branch, env)
-                }
-            }
-            ExprKind::When { cond, body } => {
-                if self.eval_bool(cond, env)? {
-                    let v = self.eval_body(body, env)?;
-                    self.pool.release_val(v);
-                }
-                Ok(RVal::Void)
-            }
-            ExprKind::Match { scrutinee, arms } => {
-                let val = self.eval_expr(scrutinee, env)?;
-                for arm in arms {
-                    if let Some(extra) = self.match_pattern(&arm.pattern, val) {
-                        let mut next = self.retain_env(env);
-                        for (k, v) in extra {
-                            self.pool.retain_val(v);
-                            if let Some(prev) = next.insert(k, v) {
-                                self.pool.release_val(prev);
-                            }
-                        }
-                        self.pool.release_val(val);
-                        let res = self.eval_body(&arm.body, &next);
-                        self.release_env(next);
-                        return res;
-                    }
-                }
-                self.pool.release_val(val);
-                Err(Error::runtime(span, "non-exhaustive match"))
-            }
-            ExprKind::Call { callee, args } => {
-                if let ExprKind::Ident(op) = &callee.kind {
-                    if op == "and" {
-                        return self.eval_and(args, env, span);
-                    }
-                    if op == "or" {
-                        return self.eval_or(args, env, span);
-                    }
-                }
-                let callee_val = self.eval_expr(callee, env)?;
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for arg in args {
-                    match self.eval_expr(arg, env) {
-                        Ok(v) => arg_vals.push(v),
-                        Err(e) => {
-                            self.pool.release_val(callee_val);
-                            self.release_all(arg_vals);
-                            return Err(e);
-                        }
-                    }
-                }
-                let res = self.apply(callee_val, &arg_vals, span);
-                self.pool.release_val(callee_val);
-                self.release_all(arg_vals);
-                res
             }
         }
-    }
-
-    fn eval_bool(&mut self, expr: &Expr, env: &BTreeMap<String, RVal>) -> Result<bool, Error> {
-        let val = self.eval_expr(expr, env)?;
-        match val {
-            RVal::Bool(b) => Ok(b),
-            other => {
-                let tname = other.type_name(self.pool);
-                self.pool.release_val(val);
-                Err(Error::runtime(
-                    expr.span,
-                    format!("expected bool, got {tname}"),
-                ))
-            }
-        }
-    }
-
-    fn eval_and(&mut self, args: &[Expr], env: &BTreeMap<String, RVal>, span: Span) -> Result<RVal, Error> {
-        if args.is_empty() {
-            return Err(Error::runtime(span, "'and' requires at least 1 argument"));
-        }
-        for arg in args {
-            if !self.eval_bool(arg, env)? {
-                return Ok(RVal::Bool(false));
-            }
-        }
-        Ok(RVal::Bool(true))
-    }
-
-    fn eval_or(&mut self, args: &[Expr], env: &BTreeMap<String, RVal>, span: Span) -> Result<RVal, Error> {
-        if args.is_empty() {
-            return Err(Error::runtime(span, "'or' requires at least 1 argument"));
-        }
-        for arg in args {
-            if self.eval_bool(arg, env)? {
-                return Ok(RVal::Bool(true));
-            }
-        }
-        Ok(RVal::Bool(false))
+        Ok(stack.pop().unwrap_or(RVal::Void))
     }
 
     fn apply(&mut self, callee: RVal, args: &[RVal], span: Span) -> Result<RVal, Error> {
         match callee {
             RVal::Obj(id) => {
-                let (params, body, captured, mod_owner) = match self.pool.get(id) {
-                    Obj::Closure {
-                        params,
-                        body,
-                        env,
-                        module,
-                        ..
-                    } => (params.clone(), body.clone(), env.clone(), module.clone()),
+                let (proto, captures) = match self.pool.get(id) {
+                    Obj::Closure { proto, captures } => (Rc::clone(proto), captures.clone()),
                     _ => {
                         return Err(Error::runtime(
                             span,
@@ -867,23 +826,21 @@ impl Runner<'_, '_> {
                         ));
                     }
                 };
-                if params.len() != args.len() {
+                if proto.arity as usize != args.len() {
                     return Err(Error::runtime(
                         span,
-                        format!("expected {} arguments, got {}", params.len(), args.len()),
+                        format!("expected {} arguments, got {}", proto.arity, args.len()),
                     ));
                 }
                 self.enter_depth(span)?;
-                let prev_mod = std::mem::replace(&mut self.active_module, mod_owner);
-                let mut next = self.retain_env(&captured);
-                for (param, &val) in params.iter().zip(args.iter()) {
+                let prev_mod = std::mem::replace(&mut self.active_module, proto.module.clone());
+                let mut locals = vec![RVal::Void; proto.local_count as usize];
+                for (i, &val) in args.iter().enumerate() {
                     self.pool.retain_val(val);
-                    if let Some(prev) = next.insert(param.clone(), val) {
-                        self.pool.release_val(prev);
-                    }
+                    locals[i] = val;
                 }
-                let res = self.eval_body(&body, &next);
-                self.release_env(next);
+                let res = self.exec_chunk(&proto.chunk, &captures, &mut locals);
+                self.release_all(locals);
                 self.active_module = prev_mod;
                 self.leave_depth();
                 res

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::alloc::{AllocBuf, Allocator};
-use crate::ast::Expr;
+use crate::bytecode::FnProto;
 use crate::error::{Error, ErrorKind, Span};
 use crate::value::Value;
 
@@ -74,11 +75,8 @@ pub(crate) enum Obj {
     Ok(RVal),
     Err(RVal),
     Closure {
-        name: Option<String>,
-        module: Option<String>,
-        params: Vec<String>,
-        body: Vec<Expr>,
-        env: BTreeMap<String, RVal>,
+        proto: Rc<FnProto>,
+        captures: Vec<RVal>,
     },
     Module {
         name: String,
@@ -98,9 +96,7 @@ impl Obj {
                 type_name, variant, ..
             } => 48 + type_name.len() + variant.len(),
             Obj::Some(_) | Obj::Ok(_) | Obj::Err(_) => 24,
-            Obj::Closure {
-                params, body, env, ..
-            } => 64 + params.len() * 16 + body.len() * 24 + env.len() * 32,
+            Obj::Closure { captures, .. } => 64 + captures.len() * 16,
             Obj::Module { name, exports } => 48 + name.len() + exports.len() * 32,
         }
     }
@@ -140,8 +136,8 @@ impl Obj {
                     out.push(*id);
                 }
             }
-            Obj::Closure { env, .. } => {
-                for v in env.values() {
+            Obj::Closure { captures, .. } => {
+                for v in captures {
                     if let RVal::Obj(id) = v {
                         out.push(*id);
                     }
@@ -388,7 +384,7 @@ impl<'a> Pool<'a> {
                 Obj::Some(v) => Value::Some(std::rc::Rc::new(self.export(*v))),
                 Obj::Ok(v) => Value::Ok(std::rc::Rc::new(self.export(*v))),
                 Obj::Err(v) => Value::Err(std::rc::Rc::new(self.export(*v))),
-                Obj::Closure { name, .. } => Value::Builtin(match name.as_deref() {
+                Obj::Closure { proto, .. } => Value::Builtin(match proto.name.as_deref() {
                     Some(_) => "<defn>",
                     None => "<fn>",
                 }),
@@ -479,22 +475,10 @@ impl<'a> Pool<'a> {
                 let inner = self.import(v, span)?;
                 Ok(RVal::Obj(self.alloc_obj(Obj::Err(inner), span)?))
             }
-            Value::Fn(c) => {
-                let mut env = BTreeMap::new();
-                for (k, v) in c.env.iter() {
-                    env.insert(k.clone(), self.import(v, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(
-                    Obj::Closure {
-                        name: c.name.clone(),
-                        module: None,
-                        params: c.params.clone(),
-                        body: c.body.clone(),
-                        env,
-                    },
-                    span,
-                )?))
-            }
+            Value::Fn(_) => Err(Error::runtime(
+                span,
+                "cannot import function value across host boundary",
+            )),
         }
     }
 }

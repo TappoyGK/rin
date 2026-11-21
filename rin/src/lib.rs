@@ -1,5 +1,7 @@
 pub mod alloc;
 mod ast;
+mod bytecode;
+mod compiler;
 pub mod error;
 mod eval;
 pub mod ffi;
