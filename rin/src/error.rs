@@ -150,6 +150,7 @@ pub struct Error {
     pub kind: ErrorKind,
     pub at: Span,
     pub message: String,
+    rule: &'static str,
     module: Option<String>,
     module_resolved: bool,
     backtrace: Vec<StackFrame>,
@@ -157,8 +158,14 @@ pub struct Error {
 }
 
 impl Error {
-    pub fn new(kind: ErrorKind, at: Span, message: impl Into<String>) -> Self {
+    /// 規則名を指定してエラーを作る。
+    ///
+    /// # Panics
+    /// `rule` が空の場合は panic する。
+    pub fn new(rule: &'static str, kind: ErrorKind, at: Span, message: impl Into<String>) -> Self {
+        assert!(!rule.is_empty(), "error rule must not be empty");
         Self {
+            rule,
             kind,
             at,
             message: message.into(),
@@ -169,16 +176,21 @@ impl Error {
         }
     }
 
-    pub fn lex(at: Span, message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Lex, at, message)
+    pub fn lex(rule: &'static str, at: Span, message: impl Into<String>) -> Self {
+        Self::new(rule, ErrorKind::Lex, at, message)
     }
 
-    pub fn parse(at: Span, message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Parse, at, message)
+    pub fn parse(rule: &'static str, at: Span, message: impl Into<String>) -> Self {
+        Self::new(rule, ErrorKind::Parse, at, message)
     }
 
-    pub fn runtime(at: Span, message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Runtime, at, message)
+    pub fn runtime(rule: &'static str, at: Span, message: impl Into<String>) -> Self {
+        Self::new(rule, ErrorKind::Runtime, at, message)
+    }
+
+    /// 根拠となる仕様の規則名（角括弧を含まない）。
+    pub fn rule(&self) -> &'static str {
+        self.rule
     }
 
     /// エラーが発生したモジュール名を返す（モジュール外なら `None`）。
@@ -243,6 +255,7 @@ impl fmt::Display for Error {
         } else {
             write!(f, "{}: {}", self.at, self.message)?;
         }
+        write!(f, " [{}]", self.rule)?;
         let bt = self.format_backtrace();
         if !bt.is_empty() {
             write!(f, "\n{bt}")?;

@@ -1,6 +1,6 @@
 //! C ホストに借用させるエラー情報と、その文字列の所有を管理する。
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorKind, Span};
 use std::ffi::{CString, c_char};
 
 #[repr(C)]
@@ -45,6 +45,7 @@ pub(super) struct StoredError {
     pub view: RinError,
     // CString のバッファは移動しない。view が参照する間、所有を保持する。
     _message: CString,
+    _rule: CString,
     _module: Option<CString>,
     _backtrace: Option<CString>,
     _text: CString,
@@ -59,11 +60,11 @@ impl StoredError {
     pub fn from_error(err: Error) -> Self {
         let backtrace = err.format_backtrace();
         Self::new(
+            err.rule(),
             err.kind.into(),
             &err.message,
             err.module(),
-            err.at.line,
-            err.at.col,
+            err.at,
             if backtrace.is_empty() {
                 None
             } else {
@@ -74,18 +75,27 @@ impl StoredError {
     }
 
     pub fn host(message: &str) -> Self {
-        Self::new(RinErrorKind::Host, message, None, 0, 0, None, message)
+        Self::new(
+            "host.argument",
+            RinErrorKind::Host,
+            message,
+            None,
+            Span::default(),
+            None,
+            &format!("{message} [host.argument]"),
+        )
     }
 
     fn new(
+        rule: &str,
         kind: RinErrorKind,
         message: &str,
         module: Option<&str>,
-        line: usize,
-        col: usize,
+        at: Span,
         backtrace: Option<&str>,
         text: &str,
     ) -> Self {
+        let rule = c_string(rule);
         let message = c_string(message);
         let module = module.map(c_string);
         let backtrace = backtrace.map(c_string);
@@ -95,12 +105,13 @@ impl StoredError {
                 kind,
                 message: message.as_ptr(),
                 module: module.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-                rule: std::ptr::null(),
-                line,
-                col,
+                rule: rule.as_ptr(),
+                line: at.line,
+                col: at.col,
                 backtrace: backtrace.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
                 text: text.as_ptr(),
             },
+            _rule: rule,
             _message: message,
             _module: module,
             _backtrace: backtrace,

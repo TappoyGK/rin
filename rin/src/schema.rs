@@ -555,6 +555,7 @@ impl Schema {
                         drop_deep_type(&mut ty);
                     }
                     return Err(Error::parse(
+                        "schema.program",
                         p.peek().span,
                         "expected end of schema after root type expression",
                     ));
@@ -566,6 +567,7 @@ impl Schema {
 
         let root = root.ok_or_else(|| {
             Error::parse(
+                "schema.program",
                 Span::new(1, 1),
                 "schema must end with a root type expression",
             )
@@ -595,6 +597,7 @@ impl Schema {
                 && !self.defs.contains_key(name)
             {
                 return Err(Error::parse(
+                    "schema.reference",
                     Span::new(1, 1),
                     format!("unknown schema name '{name}'"),
                 ));
@@ -637,6 +640,7 @@ impl Schema {
                 TypeExpr::Ref(name) => {
                     if !self.defs.contains_key(name) {
                         return Err(Error::parse(
+                            "schema.reference",
                             Span::new(1, 1),
                             format!("unknown schema name '{name}'"),
                         ));
@@ -663,6 +667,7 @@ fn expect_match(ok: bool, expected: &str, actual: &Value, path: &str) -> Result<
 
 fn mismatch(expected: &str, actual: &str, path: &str) -> Result<(), Error> {
     Err(Error::runtime(
+        "schema.type",
         Span::default(),
         format!("{path}: expected {expected}, got {actual}"),
     ))
@@ -770,7 +775,11 @@ impl SchemaParser {
             self.advance();
             Ok(())
         } else {
-            Err(Error::parse(tok.span, format!("expected {what}")))
+            Err(Error::parse(
+                "schema.syntax",
+                tok.span,
+                format!("expected {what}"),
+            ))
         }
     }
 
@@ -783,7 +792,11 @@ impl SchemaParser {
             };
             Ok((s, span))
         } else {
-            Err(Error::parse(tok.span, format!("expected {what}")))
+            Err(Error::parse(
+                "schema.syntax",
+                tok.span,
+                format!("expected {what}"),
+            ))
         }
     }
 
@@ -824,6 +837,7 @@ impl SchemaParser {
                     }
                     if self.frames.len() >= MAX_SYNTAX_NESTING {
                         return Err(Error::parse(
+                            "src.nesting-limit",
                             span,
                             format!("schema nesting limit exceeded ({MAX_SYNTAX_NESTING})"),
                         ));
@@ -864,6 +878,7 @@ impl SchemaParser {
                                 "tuple" => {
                                     if self.peek().kind == TokenKind::RParen {
                                         return Err(Error::parse(
+                                            "schema.tuple",
                                             head_span,
                                             "'tuple' schema requires at least 2 element types",
                                         ));
@@ -920,13 +935,20 @@ impl SchemaParser {
                                 }
                                 other => {
                                     return Err(Error::parse(
+                                        "schema.syntax",
                                         head_span,
                                         format!("unknown schema constructor '{other}'"),
                                     ));
                                 }
                             }
                         }
-                        _ => return Err(Error::parse(span, "expected type expression")),
+                        _ => {
+                            return Err(Error::parse(
+                                "schema.syntax",
+                                span,
+                                "expected type expression",
+                            ));
+                        }
                     }
                 }
                 Next::Have(ty) => {
@@ -960,6 +982,7 @@ impl SchemaParser {
                                 self.advance();
                                 if elems.len() < 2 {
                                     return Err(Error::parse(
+                                        "schema.tuple",
                                         head_span,
                                         "'tuple' schema requires at least 2 element types",
                                     ));

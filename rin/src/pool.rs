@@ -299,6 +299,7 @@ impl<'a> Pool<'a> {
         if next_live > self.max_bytes {
             self.release_unallocated(obj);
             return Err(Error::new(
+                "eval.limits",
                 ErrorKind::TooMuchMemory,
                 span,
                 format!("memory limit exceeded ({} bytes)", self.max_bytes),
@@ -321,6 +322,7 @@ impl<'a> Pool<'a> {
             let Some(buf) = AllocBuf::<Slot>::with_capacity(self.alloc, CHUNK_SLOTS) else {
                 self.release_unallocated(obj);
                 return Err(Error::new(
+                    "eval.limits",
                     ErrorKind::TooMuchMemory,
                     span,
                     "allocator exhausted while growing pool",

@@ -215,6 +215,7 @@ impl Runner<'_, '_> {
                         if !is_struct {
                             let tname = base_val.type_name(self.pool);
                             return Err(Error::runtime(
+                                "expr.with",
                                 span,
                                 format!("'with' requires a struct, got {tname}"),
                             ));
@@ -232,6 +233,7 @@ impl Runner<'_, '_> {
                         };
                         if !fields.contains_key(fname.as_ref()) {
                             return Err(Error::runtime(
+                                "expr.with",
                                 span,
                                 format!("{name} has no field '{fname}'"),
                             ));
@@ -323,6 +325,7 @@ impl Runner<'_, '_> {
                                             Ok(fv)
                                         }
                                         None => Err(Error::runtime(
+                                            "expr.field",
                                             span,
                                             format!("{name} has no field '{field}'"),
                                         )),
@@ -335,12 +338,14 @@ impl Runner<'_, '_> {
                                             Ok(fv)
                                         }
                                         None => Err(Error::runtime(
+                                            "expr.module",
                                             span,
                                             format!("module '{name}' has no export '{field}'"),
                                         )),
                                     }
                                 }
                                 _ => Err(Error::runtime(
+                                    "expr.field",
                                     span,
                                     format!(
                                         "cannot read field '{field}' on {}",
@@ -349,6 +354,7 @@ impl Runner<'_, '_> {
                                 )),
                             },
                             other => Err(Error::runtime(
+                                "expr.field",
                                 span,
                                 format!(
                                     "cannot read field '{field}' on {}",
@@ -370,6 +376,7 @@ impl Runner<'_, '_> {
                                 self.pool.release_val(idx_val);
                                 self.pool.release_val(list_val);
                                 return Err(Error::runtime(
+                                    "expr.index",
                                     span,
                                     format!("index must be i64, got {tname}"),
                                 ));
@@ -382,6 +389,7 @@ impl Runner<'_, '_> {
                         {
                             if idx < 0 || (idx as usize) >= arr.len() {
                                 Err(Error::runtime(
+                                    "expr.index",
                                     span,
                                     format!("index {idx} out of range (length {})", arr.len()),
                                 ))
@@ -392,11 +400,13 @@ impl Runner<'_, '_> {
                             }
                         } else if !self.is_list(list_val) {
                             Err(Error::runtime(
+                                "expr.index",
                                 span,
                                 format!("cannot index into {}", list_val.type_name(self.pool)),
                             ))
                         } else if idx < 0 {
                             Err(Error::runtime(
+                                "expr.index",
                                 span,
                                 format!(
                                     "index {idx} out of range (length {})",
@@ -410,6 +420,7 @@ impl Runner<'_, '_> {
                                     Ok(v)
                                 }
                                 None => Err(Error::runtime(
+                                    "expr.index",
                                     span,
                                     format!(
                                         "index {idx} out of range (length {})",
@@ -438,6 +449,7 @@ impl Runner<'_, '_> {
                                     }
                                     _ => {
                                         return Err(Error::runtime(
+                                            "expr.call",
                                             span,
                                             format!(
                                                 "cannot call value of type {}",
@@ -448,6 +460,7 @@ impl Runner<'_, '_> {
                                 };
                                 if proto.arity as usize != argc {
                                     return Err(Error::runtime(
+                                        "expr.call",
                                         span,
                                         format!("expected {} arguments, got {}", proto.arity, argc),
                                     ));
@@ -474,6 +487,7 @@ impl Runner<'_, '_> {
                             }
                             other => {
                                 return Err(Error::runtime(
+                                    "expr.call",
                                     span,
                                     format!(
                                         "cannot call value of type {}",
@@ -501,6 +515,7 @@ impl Runner<'_, '_> {
                                     }
                                     _ => {
                                         return Err(Error::runtime(
+                                            "expr.call",
                                             span,
                                             format!(
                                                 "cannot call value of type {}",
@@ -511,6 +526,7 @@ impl Runner<'_, '_> {
                                 };
                                 if proto.arity as usize != argc {
                                     return Err(Error::runtime(
+                                        "expr.call",
                                         span,
                                         format!("expected {} arguments, got {}", proto.arity, argc),
                                     ));
@@ -542,6 +558,7 @@ impl Runner<'_, '_> {
                             _ => {
                                 // クロージャ以外の呼び出し対象に対するエラー経路。
                                 return Err(Error::runtime(
+                                    "expr.call",
                                     span,
                                     format!(
                                         "cannot call value of type {}",
@@ -553,11 +570,19 @@ impl Runner<'_, '_> {
                     }
                     Op::And => {
                         let span = chunk.spans[ip - 1];
-                        return Err(Error::runtime(span, "'and' requires at least 1 argument"));
+                        return Err(Error::runtime(
+                            "op.logic",
+                            span,
+                            "'and' requires at least 1 argument",
+                        ));
                     }
                     Op::Or => {
                         let span = chunk.spans[ip - 1];
-                        return Err(Error::runtime(span, "'or' requires at least 1 argument"));
+                        return Err(Error::runtime(
+                            "op.logic",
+                            span,
+                            "'or' requires at least 1 argument",
+                        ));
                     }
                     Op::Jump(target) => {
                         ip = target;
@@ -572,6 +597,7 @@ impl Runner<'_, '_> {
                                 let tname = other.type_name(self.pool);
                                 self.pool.release_val(cond);
                                 return Err(Error::runtime(
+                                    "expr.condition",
                                     span,
                                     format!("expected bool, got {tname}"),
                                 ));
@@ -592,6 +618,7 @@ impl Runner<'_, '_> {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
                                 return Err(Error::runtime(
+                                    "op.logic",
                                     span,
                                     format!("expected bool, got {tname}"),
                                 ));
@@ -612,6 +639,7 @@ impl Runner<'_, '_> {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
                                 return Err(Error::runtime(
+                                    "op.logic",
                                     span,
                                     format!("expected bool, got {tname}"),
                                 ));
@@ -635,13 +663,17 @@ impl Runner<'_, '_> {
                     }
                     Op::MatchFail => {
                         let span = chunk.spans[ip - 1];
-                        return Err(Error::runtime(span, "non-exhaustive match"));
+                        return Err(Error::runtime("expr.match", span, "non-exhaustive match"));
                     }
                     Op::Import(id) => {
                         let span = chunk.spans[ip - 1];
                         let name = &self.syms.names[id as usize];
                         let Some(&mod_val) = self.modules.get(name.as_ref()) else {
-                            return Err(Error::runtime(span, format!("unknown module '{name}'")));
+                            return Err(Error::runtime(
+                                "expr.module",
+                                span,
+                                format!("unknown module '{name}'"),
+                            ));
                         };
                         self.pool.retain_val(mod_val);
                         self.define_top(id, mod_val);
@@ -651,6 +683,7 @@ impl Runner<'_, '_> {
                         let span = chunk.spans[ip - 1];
                         if self.active_module.is_none() {
                             return Err(Error::runtime(
+                                "expr.module",
                                 span,
                                 "'export' can only be used inside a module",
                             ));
@@ -686,19 +719,19 @@ impl Runner<'_, '_> {
                         return x
                             .checked_add(y)
                             .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime(span, "i64 overflow"));
+                            .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"));
                     }
                     BuiltinId::Sub => {
                         return x
                             .checked_sub(y)
                             .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime(span, "i64 overflow"));
+                            .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"));
                     }
                     BuiltinId::Mul => {
                         return x
                             .checked_mul(y)
                             .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime(span, "i64 overflow"));
+                            .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"));
                     }
                     BuiltinId::Lt => return Ok(RVal::Bool(x < y)),
                     BuiltinId::Le => return Ok(RVal::Bool(x <= y)),

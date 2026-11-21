@@ -75,10 +75,11 @@ int main(void) {
     const RinError *error = rin_last_error(m);
     assert(error != NULL && error->kind == RIN_ERR_RUNTIME);
     assert(strcmp(error->module, "broken") == 0);
-    assert(error->rule == NULL && error->line == 1 && error->col > 0);
+    assert(strcmp(error->rule, "op.arith") == 0 && error->line == 1 && error->col > 0);
     assert(strstr(error->message, "division by zero") != NULL);
     assert(error->backtrace != NULL && strstr(error->backtrace, "fail") != NULL);
     assert(strstr(error->text, "broken") != NULL);
+    assert(strstr(error->text, "[op.arith]\n") != NULL);
     rin_res_free(&failed);
     assert(rin_last_error(m) == error);
     assert(strstr(error->text, "division by zero") != NULL);
@@ -87,7 +88,7 @@ int main(void) {
     assert(!failed.ok);
     error = rin_last_error(m);
     assert(error->kind == RIN_ERR_HOST);
-    assert(error->module == NULL && error->rule == NULL && error->backtrace == NULL);
+    assert(error->module == NULL && strcmp(error->rule, "host.argument") == 0 && error->backtrace == NULL);
     assert(error->line == 0 && error->col == 0);
     assert(error->message != NULL && error->text != NULL);
     rin_res_free(&failed);
