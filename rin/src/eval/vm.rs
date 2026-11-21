@@ -43,15 +43,11 @@ impl Runner<'_, '_> {
         tail_calls: usize,
         origin: Option<CallOrigin<'_>>,
     ) {
-        if err.module().is_none() {
-            let active_mod = match tail_source.unwrap_or(entry) {
-                FrameSource::Proto(tp) => tp.module,
-                FrameSource::Top(_) => self.active_module,
-            };
-            if let Some(mid) = active_mod {
-                err.set_module_if_none(self.module_names[mid as usize].clone());
-            }
-        }
+        let active_mod = match tail_source.unwrap_or(entry) {
+            FrameSource::Proto(tp) => tp.module,
+            FrameSource::Top(_) => self.active_module,
+        };
+        err.resolve_module(active_mod.map(|id| self.module_names[id as usize].clone()));
         let (Some(orig), FrameSource::Proto(proto)) = (origin, entry) else {
             return;
         };

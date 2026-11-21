@@ -871,6 +871,31 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     );
     assert!(tail_mod_rendered.contains("in mc.g (called from host)"));
 
+    // Innermost top-level lambda inside module call must NOT inherit outer module in header
+    m.load_module("hof", "(defn apply_it (f) (+ 1 (f 1)))")
+        .unwrap();
+    let lambda_err = m
+        .eval("(import hof)\n(hof.apply_it (fn (x) (/ x 0)))")
+        .unwrap_err();
+    assert_eq!(lambda_err.module(), None);
+    assert!(lambda_err.to_string().starts_with("2:23: division by zero"));
+    assert!(lambda_err.to_string().contains("in hof.apply_it (at 2:1)"));
+
+    // load_module lex/parse errors carry the module name
+    let lex_err = m
+        .load_module("bad_lex", "(defn f () \"unterminated")
+        .unwrap_err();
+    assert_eq!(lex_err.kind, ErrorKind::Lex);
+    assert_eq!(lex_err.module(), Some("bad_lex"));
+    assert!(lex_err.to_string().starts_with("bad_lex 1:"));
+
+    let parse_err = m
+        .load_module("bad_parse", "(defn f (x)\n  (+ x")
+        .unwrap_err();
+    assert_eq!(parse_err.kind, ErrorKind::Parse);
+    assert_eq!(parse_err.module(), Some("bad_parse"));
+    assert!(parse_err.to_string().starts_with("bad_parse 2:3:"));
+
     // 4. Consecutive frame collapsing on TooDeep & middle omission on deep mutual recursion
     let deep_limits = Limits {
         steps: 100_000,

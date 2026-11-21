@@ -131,6 +131,7 @@ pub struct Error {
     pub at: Span,
     pub message: String,
     module: Option<String>,
+    module_resolved: bool,
     backtrace: Vec<StackFrame>,
     omitted_frames: usize,
 }
@@ -142,6 +143,7 @@ impl Error {
             at,
             message: message.into(),
             module: None,
+            module_resolved: false,
             backtrace: Vec::new(),
             omitted_frames: 0,
         }
@@ -164,9 +166,10 @@ impl Error {
         self.module.as_deref()
     }
 
-    pub(crate) fn set_module_if_none(&mut self, module: String) {
-        if self.module.is_none() {
-            self.module = Some(module);
+    pub(crate) fn resolve_module(&mut self, module: Option<String>) {
+        if !self.module_resolved {
+            self.module_resolved = true;
+            self.module = module;
         }
     }
 

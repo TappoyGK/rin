@@ -94,6 +94,10 @@ impl<'a> Machine<'a> {
 
     /// Loads and evaluates a named module from host-provided source.
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
+        let with_mod = |mut err: Error| {
+            err.resolve_module(Some(name.to_string()));
+            err
+        };
         let mod_id = match self.module_ids.get(name).copied() {
             Some(id) => id,
             None => {
@@ -104,8 +108,8 @@ impl<'a> Machine<'a> {
                 id
             }
         };
-        let exprs = parse_program(source)?;
-        let chunk = compile_program(&exprs, Some(mod_id), &mut self.syms)?;
+        let exprs = parse_program(source).map_err(with_mod)?;
+        let chunk = compile_program(&exprs, Some(mod_id), &mut self.syms).map_err(with_mod)?;
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
             .into_iter()
             .flatten()
@@ -113,7 +117,7 @@ impl<'a> Machine<'a> {
             self.pool.release_val(v);
         }
         let mut runner = self.runner(Some(mod_id));
-        let v = runner.run_top_chunk(&chunk)?;
+        let v = runner.run_top_chunk(&chunk).map_err(with_mod)?;
         runner.pool.release_val(v);
         let export_filter = runner.export_list.take();
         let mod_env = &self.module_envs[mod_id as usize];
