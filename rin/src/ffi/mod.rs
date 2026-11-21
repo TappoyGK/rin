@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr::NonNull;
 
 use crate::alloc::{Allocator, HeapAllocator};
-use crate::error::Limits;
+use crate::error::{Error, Limits};
 use crate::eval::Machine;
 use crate::value::Value;
 
@@ -89,7 +89,25 @@ impl Allocator for CAllocator {
 pub struct RinMachine {
     // Drop `machine` before `_alloc` because `Pool::drop` calls `_alloc`.
     machine: Machine<'static>,
+    last_backtrace: Option<CString>,
     _alloc: Box<CAllocator>,
+}
+
+fn make_err_res(m: &mut RinMachine, err: Error) -> RinEvalResult {
+    let bt = err.format_backtrace();
+    m.last_backtrace = if bt.is_empty() {
+        None
+    } else {
+        CString::new(bt).ok()
+    };
+    let msg = CString::new(err.message).unwrap_or_else(|_| CString::new("error").unwrap());
+    RinEvalResult {
+        ok: false,
+        value: std::ptr::null_mut(),
+        error_message: msg.into_raw(),
+        error_line: err.at.line,
+        error_col: err.at.col,
+    }
 }
 
 pub struct RinValue(pub Value);
@@ -122,6 +140,7 @@ pub extern "C" fn rin_new(limits: RinLimits, alloc: RinAllocator) -> *mut RinMac
     let machine = Machine::new(limits.into(), alloc_ref);
     Box::into_raw(Box::new(RinMachine {
         machine,
+        last_backtrace: None,
         _alloc: boxed_alloc,
     }))
 }
@@ -188,23 +207,17 @@ pub unsafe extern "C" fn rin_eval(
     };
 
     match m.machine.eval(src) {
-        Ok(val) => RinEvalResult {
-            ok: true,
-            value: Box::into_raw(Box::new(RinValue(val))),
-            error_message: std::ptr::null_mut(),
-            error_line: 0,
-            error_col: 0,
-        },
-        Err(err) => {
-            let msg = CString::new(err.message).unwrap_or_else(|_| CString::new("error").unwrap());
+        Ok(val) => {
+            m.last_backtrace = None;
             RinEvalResult {
-                ok: false,
-                value: std::ptr::null_mut(),
-                error_message: msg.into_raw(),
-                error_line: err.at.line,
-                error_col: err.at.col,
+                ok: true,
+                value: Box::into_raw(Box::new(RinValue(val))),
+                error_message: std::ptr::null_mut(),
+                error_line: 0,
+                error_col: 0,
             }
         }
+        Err(err) => make_err_res(m, err),
     }
 }
 
@@ -260,23 +273,17 @@ pub unsafe extern "C" fn rin_call(
         }
     }
     match m.machine.call(name, &owned_args) {
-        Ok(val) => RinEvalResult {
-            ok: true,
-            value: Box::into_raw(Box::new(RinValue(val))),
-            error_message: std::ptr::null_mut(),
-            error_line: 0,
-            error_col: 0,
-        },
-        Err(err) => {
-            let msg = CString::new(err.message).unwrap_or_else(|_| CString::new("error").unwrap());
+        Ok(val) => {
+            m.last_backtrace = None;
             RinEvalResult {
-                ok: false,
-                value: std::ptr::null_mut(),
-                error_message: msg.into_raw(),
-                error_line: err.at.line,
-                error_col: err.at.col,
+                ok: true,
+                value: Box::into_raw(Box::new(RinValue(val))),
+                error_message: std::ptr::null_mut(),
+                error_line: 0,
+                error_col: 0,
             }
         }
+        Err(err) => make_err_res(m, err),
     }
 }
 
@@ -314,23 +321,17 @@ pub unsafe extern "C" fn rin_load(
         };
     };
     match m.machine.load_module(name, src) {
-        Ok(()) => RinEvalResult {
-            ok: true,
-            value: std::ptr::null_mut(),
-            error_message: std::ptr::null_mut(),
-            error_line: 0,
-            error_col: 0,
-        },
-        Err(err) => {
-            let msg = CString::new(err.message).unwrap_or_else(|_| CString::new("error").unwrap());
+        Ok(()) => {
+            m.last_backtrace = None;
             RinEvalResult {
-                ok: false,
+                ok: true,
                 value: std::ptr::null_mut(),
-                error_message: msg.into_raw(),
-                error_line: err.at.line,
-                error_col: err.at.col,
+                error_message: std::ptr::null_mut(),
+                error_line: 0,
+                error_col: 0,
             }
         }
+        Err(err) => make_err_res(m, err),
     }
 }
 
@@ -389,23 +390,35 @@ pub unsafe extern "C" fn rin_call_in(
         }
     }
     match m.machine.call_in(mname, fname, &owned_args) {
-        Ok(val) => RinEvalResult {
-            ok: true,
-            value: Box::into_raw(Box::new(RinValue(val))),
-            error_message: std::ptr::null_mut(),
-            error_line: 0,
-            error_col: 0,
-        },
-        Err(err) => {
-            let msg = CString::new(err.message).unwrap_or_else(|_| CString::new("error").unwrap());
+        Ok(val) => {
+            m.last_backtrace = None;
             RinEvalResult {
-                ok: false,
-                value: std::ptr::null_mut(),
-                error_message: msg.into_raw(),
-                error_line: err.at.line,
-                error_col: err.at.col,
+                ok: true,
+                value: Box::into_raw(Box::new(RinValue(val))),
+                error_message: std::ptr::null_mut(),
+                error_line: 0,
+                error_col: 0,
             }
         }
+        Err(err) => make_err_res(m, err),
+    }
+}
+
+/// Returns the formatted call backtrace for the most recent error on `machine`,
+/// or NULL if there is no backtrace. Valid until the next evaluation/call or `rin_free`.
+///
+/// # Safety
+/// `machine` must be null or a valid pointer returned by `rin_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_last_backtrace(machine: *const RinMachine) -> *const c_char {
+    if machine.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let m = unsafe { &*machine };
+    match &m.last_backtrace {
+        Some(cs) => cs.as_ptr(),
+        None => std::ptr::null(),
     }
 }
 

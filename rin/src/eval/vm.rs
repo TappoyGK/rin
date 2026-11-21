@@ -3,34 +3,73 @@ use std::rc::Rc;
 
 use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
-use crate::error::{Error, Span};
+use crate::error::{Error, Span, StackFrame};
 use crate::pool::{Obj, RVal};
 
-use super::{FrameSource, Runner};
+use super::{CallOrigin, FrameSource, Runner};
 
 impl Runner<'_, '_> {
     pub(super) fn exec_frame(
         &mut self,
-        mut source: FrameSource<'_>,
+        entry: FrameSource<'_>,
         captures: Rc<[RVal]>,
         base: usize,
         local_count: usize,
-        call_span: Option<Span>,
+        origin: CallOrigin<'_>,
     ) -> Result<RVal, Error> {
-        let res = self.exec_frame_inner(&mut source, captures, base, local_count);
-        if let Err(mut err) = res {
-            if let (Some(cs), FrameSource::Proto(p)) = (call_span, &source) {
-                err.push_frame(p.name.clone(), cs);
-            }
-            return Err(err);
+        let mut tail_source: Option<FrameSource<'_>> = None;
+        let mut tail_calls = 0usize;
+        let mut res = self.exec_frame_inner(
+            &entry,
+            &mut tail_source,
+            &mut tail_calls,
+            captures,
+            base,
+            local_count,
+        );
+        if let Err(ref mut err) = res
+            && let FrameSource::Proto(p) = &entry
+        {
+            self.record_unwind_frame(err, p, tail_calls, origin);
         }
         res
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_unwind_frame(
+        &self,
+        err: &mut Error,
+        proto: &crate::bytecode::FnProto,
+        tail_calls: usize,
+        origin: CallOrigin<'_>,
+    ) {
+        let module = proto
+            .module
+            .map(|id| self.module_names[id as usize].clone());
+        let (at, from_host, via_builtin) = match origin {
+            CallOrigin::TopLevel => (Span::default(), false, None),
+            CallOrigin::Rin(s) => (s, false, None),
+            CallOrigin::Host => (Span::default(), true, None),
+            CallOrigin::Builtin { name, at } => (at, false, Some(name.to_string())),
+        };
+        err.push_frame(StackFrame {
+            module,
+            name: proto.name.clone(),
+            at,
+            tail_calls,
+            repeat_count: 1,
+            from_host,
+            via_builtin,
+        });
     }
 
     #[inline(always)]
     fn exec_frame_inner(
         &mut self,
-        source: &mut FrameSource<'_>,
+        entry: &FrameSource<'_>,
+        tail_source: &mut Option<FrameSource<'_>>,
+        tail_calls: &mut usize,
         mut captures: Rc<[RVal]>,
         base: usize,
         local_count: usize,
@@ -38,7 +77,7 @@ impl Runner<'_, '_> {
         let mut ip = 0usize;
         let mut frame_stack_start = base + local_count;
         'frame: loop {
-            let chunk = source.chunk();
+            let chunk = tail_source.as_ref().unwrap_or(entry).chunk();
             while ip < chunk.code.len() {
                 let op = chunk.code[ip];
                 ip += 1;
@@ -394,7 +433,7 @@ impl Runner<'_, '_> {
                                     cap,
                                     child_base,
                                     child_locals,
-                                    Some(span),
+                                    CallOrigin::Rin(span),
                                 );
                                 self.active_module = prev_mod;
                                 self.leave_depth();
@@ -418,7 +457,12 @@ impl Runner<'_, '_> {
                         let arg_start = self.stack.len() - argc;
                         let callee = self.stack[arg_start - 1];
                         match callee {
-                            RVal::Obj(id) if matches!(source, FrameSource::Proto(_)) => {
+                            RVal::Obj(id)
+                                if matches!(
+                                    tail_source.as_ref().unwrap_or(entry),
+                                    FrameSource::Proto(_)
+                                ) =>
+                            {
                                 let (proto, cap) = match self.pool.get(id) {
                                     Obj::Closure { proto, captures } => {
                                         (Rc::clone(proto), Rc::clone(captures))
@@ -452,7 +496,8 @@ impl Runner<'_, '_> {
                                 self.stack.resize(base + new_locals, RVal::Void);
                                 self.pool.release_val(callee);
                                 self.active_module = proto.module;
-                                *source = FrameSource::Proto(proto);
+                                *tail_source = Some(FrameSource::Proto(proto));
+                                *tail_calls += 1;
                                 captures = cap;
                                 frame_stack_start = base + new_locals;
                                 ip = 0;

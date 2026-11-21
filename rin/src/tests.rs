@@ -793,12 +793,22 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         err.backtrace(),
         &[
             StackFrame {
+                module: None,
                 name: Some("inner".to_string()),
                 at: Span::new(2, 22),
+                tail_calls: 0,
+                repeat_count: 1,
+                from_host: false,
+                via_builtin: None,
             },
             StackFrame {
+                module: None,
                 name: Some("outer".to_string()),
                 at: Span::new(3, 1),
+                tail_calls: 0,
+                repeat_count: 1,
+                from_host: false,
+                via_builtin: None,
             },
         ]
     );
@@ -807,31 +817,89 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(rendered.contains("in inner (at 2:22)"));
     assert!(rendered.contains("in outer (at 3:1)"));
 
-    // Higher-order call & lambda frame
-    let hof = "\
-(defn run (xs) (map (fn (x) (/ 1 x)) xs))
-(run [1, 0])";
-    let hof_err = eval(hof).unwrap_err();
-    assert_eq!(hof_err.backtrace().len(), 2);
-    assert_eq!(hof_err.backtrace()[0].name, None);
-    assert_eq!(hof_err.backtrace()[1].name.as_deref(), Some("run"));
-    assert!(hof_err.to_string().contains("in <lambda>"));
+    // 1. Tail-call preserves entry function name & span and records elided count
+    let tail_src = "\
+(defn g (x) (/ x 0))
+(defn f (x) (g x))
+(f 1)";
+    let tail_err = eval(tail_src).unwrap_err();
+    assert_eq!(tail_err.backtrace().len(), 1);
+    assert_eq!(tail_err.backtrace()[0].name.as_deref(), Some("f"));
+    assert_eq!(tail_err.backtrace()[0].at, Span::new(3, 1));
+    assert_eq!(tail_err.backtrace()[0].tail_calls, 1);
+    assert!(
+        tail_err
+            .to_string()
+            .contains("in f (at 3:1) [tail calls elided: 1]")
+    );
 
-    // TooManySteps also unwinds frames
-    let step_src = "\
-(defn rec (n) (+ 1 (rec n)))
-(rec 1)";
-    let step_err = eval_with(
-        step_src,
-        &[],
-        Limits {
-            steps: 20,
-            depth: 200,
-            memory_bytes: 1024 * 1024,
-        },
+    // 2 & 3. Module names and host entry frames
+    let mut alloc = HeapAllocator;
+    let mut m = Machine::new(Limits::default(), &mut alloc);
+    m.load_module("ma", "(defn f (x) (/ x 0))").unwrap();
+    m.load_module(
+        "mb",
+        "(import ma)\n(defn f (x) (+ 1 (ma.f x)))\n(defn g (x) (+ 1 (f x)))",
     )
-    .unwrap_err();
-    assert_eq!(step_err.kind, ErrorKind::TooManySteps);
-    assert!(!step_err.backtrace().is_empty());
-    assert_eq!(step_err.backtrace().last().unwrap().at, Span::new(2, 1));
+    .unwrap();
+    let mod_err = m.call_in("mb", "g", &[Value::Int(1)]).unwrap_err();
+    let mod_bt = mod_err.format_backtrace();
+    assert!(mod_bt.contains("in ma.f (at 2:18)"));
+    assert!(mod_bt.contains("in mb.f (at 3:18)"));
+    assert!(mod_bt.contains("in mb.g (called from host)"));
+    assert!(!mod_bt.contains("0:0"));
+
+    // 4. Consecutive frame collapsing on TooDeep & middle omission on deep mutual recursion
+    let deep_limits = Limits {
+        steps: 100_000,
+        depth: 80,
+        memory_bytes: 16 * 1024 * 1024,
+    };
+    let deep_err = eval_with("(defn d (n) (+ 1 (d n)))\n(d 0)", &[], deep_limits).unwrap_err();
+    assert_eq!(deep_err.kind, ErrorKind::TooDeep);
+    assert_eq!(deep_err.backtrace().len(), 2);
+    assert_eq!(deep_err.backtrace()[0].repeat_count, 79);
+    assert!(deep_err.to_string().contains("in d (at 1:18) ×79"));
+
+    let mutual_src = "\
+(defn a (n) (+ 1 (b n)))
+(defn b (n) (+ 1 (a n)))
+(a 0)";
+    let mutual_err = eval_with(mutual_src, &[], deep_limits).unwrap_err();
+    assert_eq!(mutual_err.kind, ErrorKind::TooDeep);
+    assert_eq!(mutual_err.backtrace().len(), 64);
+    assert!(mutual_err.omitted_frames() > 0);
+    assert!(mutual_err.to_string().contains("frames omitted"));
+
+    // 5. Higher-order builtin attribution (e.g. fold / map)
+    let fold_err = eval("(fold (fn (a x) (/ a x)) 10 [1 0])").unwrap_err();
+    assert_eq!(fold_err.backtrace().len(), 1);
+    assert_eq!(fold_err.backtrace()[0].via_builtin.as_deref(), Some("fold"));
+    assert!(
+        fold_err
+            .to_string()
+            .contains("in <lambda> (called by fold at 1:1)")
+    );
+
+    // 6. C FFI rin_last_backtrace
+    unsafe {
+        let cm = crate::ffi::rin_new(
+            crate::ffi::rin_limits_default(),
+            crate::ffi::RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: None,
+                dealloc: None,
+            },
+        );
+        let c_src = std::ffi::CString::new(src).unwrap();
+        let mut res = crate::ffi::rin_eval(cm, c_src.as_ptr());
+        assert!(!res.ok);
+        let bt_ptr = crate::ffi::rin_last_backtrace(cm);
+        assert!(!bt_ptr.is_null());
+        let bt_str = std::ffi::CStr::from_ptr(bt_ptr).to_str().unwrap();
+        assert!(bt_str.contains("in inner (at 2:22)"));
+        assert!(bt_str.contains("in outer (at 3:1)"));
+        crate::ffi::rin_res_free(&mut res);
+        crate::ffi::rin_free(cm);
+    }
 }

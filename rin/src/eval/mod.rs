@@ -45,6 +45,7 @@ pub struct Machine<'a> {
     globals: Vec<Option<RVal>>,
     modules: BTreeMap<String, RVal>,
     module_ids: BTreeMap<String, u32>,
+    module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
 }
 
@@ -73,6 +74,7 @@ impl<'a> Machine<'a> {
             globals,
             modules: BTreeMap::new(),
             module_ids: BTreeMap::new(),
+            module_names: Vec::new(),
             module_envs: Vec::new(),
         }
     }
@@ -97,6 +99,7 @@ impl<'a> Machine<'a> {
             None => {
                 let id = self.module_envs.len() as u32;
                 self.module_ids.insert(name.to_string(), id);
+                self.module_names.push(name.to_string());
                 self.module_envs.push(Vec::new());
                 id
             }
@@ -109,15 +112,7 @@ impl<'a> Machine<'a> {
         {
             self.pool.release_val(v);
         }
-        let mut runner = Runner::new(
-            self.limits,
-            &mut self.pool,
-            &self.syms,
-            &mut self.globals,
-            &self.modules,
-            &mut self.module_envs,
-            Some(mod_id),
-        );
+        let mut runner = self.runner(Some(mod_id));
         let v = runner.run_top_chunk(&chunk)?;
         runner.pool.release_val(v);
         let export_filter = runner.export_list.take();
@@ -170,15 +165,7 @@ impl<'a> Machine<'a> {
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         let exprs = parse_program(source)?;
         let chunk = compile_program(&exprs, None, &mut self.syms)?;
-        let mut runner = Runner::new(
-            self.limits,
-            &mut self.pool,
-            &self.syms,
-            &mut self.globals,
-            &self.modules,
-            &mut self.module_envs,
-            None,
-        );
+        let mut runner = self.runner(None);
         let last = runner.run_top_chunk(&chunk)?;
         let exported = runner.pool.export(last);
         runner.pool.release_val(last);
@@ -239,16 +226,8 @@ impl<'a> Machine<'a> {
             }
         }
         self.pool.retain_val(callee);
-        let mut runner = Runner::new(
-            self.limits,
-            &mut self.pool,
-            &self.syms,
-            &mut self.globals,
-            &self.modules,
-            &mut self.module_envs,
-            None,
-        );
-        let res = runner.apply(callee, &r_args, Span::default());
+        let mut runner = self.runner(None);
+        let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
         runner.pool.release_val(callee);
         runner.release_all(r_args);
         let val = res?;
@@ -277,6 +256,33 @@ impl Drop for Machine<'_> {
     }
 }
 
+impl<'a> Machine<'a> {
+    fn runner(&mut self, active_module: Option<u32>) -> Runner<'_, 'a> {
+        Runner {
+            limits: self.limits,
+            steps: 0,
+            depth: 0,
+            pool: &mut self.pool,
+            syms: &self.syms,
+            globals: &mut self.globals,
+            modules: &self.modules,
+            module_names: &self.module_names,
+            module_envs: &mut self.module_envs,
+            active_module,
+            export_list: None,
+            stack: Vec::with_capacity(64),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CallOrigin<'a> {
+    TopLevel,
+    Rin(Span),
+    Host,
+    Builtin { name: &'a str, at: Span },
+}
+
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
     pub(super) steps: usize,
@@ -285,6 +291,7 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) syms: &'a SymTable,
     pub(super) globals: &'a mut Vec<Option<RVal>>,
     pub(super) modules: &'a BTreeMap<String, RVal>,
+    pub(super) module_names: &'a [String],
     pub(super) module_envs: &'a mut Vec<Vec<Option<RVal>>>,
     pub(super) active_module: Option<u32>,
     pub(super) export_list: Option<Vec<String>>,
@@ -292,30 +299,6 @@ pub(super) struct Runner<'a, 'p> {
 }
 
 impl<'a, 'p> Runner<'a, 'p> {
-    pub(super) fn new(
-        limits: Limits,
-        pool: &'a mut Pool<'p>,
-        syms: &'a SymTable,
-        globals: &'a mut Vec<Option<RVal>>,
-        modules: &'a BTreeMap<String, RVal>,
-        module_envs: &'a mut Vec<Vec<Option<RVal>>>,
-        active_module: Option<u32>,
-    ) -> Self {
-        Self {
-            limits,
-            steps: 0,
-            depth: 0,
-            pool,
-            syms,
-            globals,
-            modules,
-            module_envs,
-            active_module,
-            export_list: None,
-            stack: Vec::with_capacity(64),
-        }
-    }
-
     #[inline(always)]
     pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
         let next = self.steps + count as usize;
@@ -437,7 +420,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             Rc::from([]),
             base,
             chunk.local_count as usize,
-            None,
+            CallOrigin::TopLevel,
         );
         match res {
             Ok(val) => {
@@ -452,7 +435,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
-    pub(super) fn apply(&mut self, callee: RVal, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn apply(
+        &mut self,
+        callee: RVal,
+        args: &[RVal],
+        span: Span,
+        origin: CallOrigin<'_>,
+    ) -> Result<RVal, Error> {
         match callee {
             RVal::Obj(id) => {
                 let (proto, captures) = match self.pool.get(id) {
@@ -485,7 +474,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     captures,
                     base,
                     local_count,
-                    Some(span),
+                    origin,
                 );
                 self.active_module = prev_mod;
                 self.leave_depth();

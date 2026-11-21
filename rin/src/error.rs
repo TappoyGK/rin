@@ -50,9 +50,52 @@ pub enum ErrorKind {
 /// A single call frame recorded when a runtime error unwinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackFrame {
+    pub module: Option<String>,
     pub name: Option<String>,
     pub at: Span,
+    pub tail_calls: usize,
+    pub repeat_count: usize,
+    pub from_host: bool,
+    pub via_builtin: Option<String>,
 }
+
+impl StackFrame {
+    fn same_site(&self, other: &Self) -> bool {
+        self.module == other.module
+            && self.name == other.name
+            && self.at == other.at
+            && self.tail_calls == other.tail_calls
+            && self.from_host == other.from_host
+            && self.via_builtin == other.via_builtin
+    }
+}
+
+impl fmt::Display for StackFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.module, &self.name) {
+            (Some(m), Some(n)) => write!(f, "{m}.{n}")?,
+            (Some(m), None) => write!(f, "{m}.<lambda>")?,
+            (None, Some(n)) => write!(f, "{n}")?,
+            (None, None) => write!(f, "<lambda>")?,
+        }
+        if self.from_host {
+            write!(f, " (called from host)")?;
+        } else if let Some(b) = &self.via_builtin {
+            write!(f, " (called by {b} at {})", self.at)?;
+        } else {
+            write!(f, " (at {})", self.at)?;
+        }
+        if self.tail_calls > 0 {
+            write!(f, " [tail calls elided: {}]", self.tail_calls)?;
+        }
+        if self.repeat_count > 1 {
+            write!(f, " ×{}", self.repeat_count)?;
+        }
+        Ok(())
+    }
+}
+
+const MAX_BACKTRACE_SIDE: usize = 32;
 
 /// Error returned by lexing, parsing, or evaluating Rin code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +104,7 @@ pub struct Error {
     pub at: Span,
     pub message: String,
     backtrace: Vec<StackFrame>,
+    omitted_frames: usize,
 }
 
 impl Error {
@@ -70,6 +114,7 @@ impl Error {
             at,
             message: message.into(),
             backtrace: Vec::new(),
+            omitted_frames: 0,
         }
     }
 
@@ -90,17 +135,52 @@ impl Error {
         &self.backtrace
     }
 
-    pub(crate) fn push_frame(&mut self, name: Option<String>, at: Span) {
-        self.backtrace.push(StackFrame { name, at });
+    /// Returns the number of middle call frames omitted when the stack exceeds the display cap.
+    pub fn omitted_frames(&self) -> usize {
+        self.omitted_frames
+    }
+
+    /// Formats the call backtrace lines without the leading error header.
+    pub fn format_backtrace(&self) -> String {
+        let mut out = String::new();
+        for (i, frame) in self.backtrace.iter().enumerate() {
+            if i == MAX_BACKTRACE_SIDE && self.omitted_frames > 0 {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!("  ... {} frames omitted", self.omitted_frames));
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("  in {frame}"));
+        }
+        out
+    }
+
+    pub(crate) fn push_frame(&mut self, frame: StackFrame) {
+        if let Some(last) = self.backtrace.last_mut()
+            && last.same_site(&frame)
+        {
+            last.repeat_count += frame.repeat_count;
+            return;
+        }
+        if self.backtrace.len() >= MAX_BACKTRACE_SIDE * 2 {
+            let removed = self.backtrace.remove(MAX_BACKTRACE_SIDE);
+            self.omitted_frames += removed.repeat_count;
+        }
+        self.backtrace.push(frame);
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.at, self.message)?;
-        for frame in &self.backtrace {
-            let name = frame.name.as_deref().unwrap_or("<lambda>");
-            write!(f, "\n  in {name} (at {})", frame.at)?;
+        for (i, frame) in self.backtrace.iter().enumerate() {
+            if i == MAX_BACKTRACE_SIDE && self.omitted_frames > 0 {
+                write!(f, "\n  ... {} frames omitted", self.omitted_frames)?;
+            }
+            write!(f, "\n  in {frame}")?;
         }
         Ok(())
     }
