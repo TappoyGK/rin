@@ -44,7 +44,11 @@ impl Pool<'_> {
                                     .copied()
                                     .find(|b| b.name() == *name)
                                     .ok_or_else(|| {
-                                        Error::runtime(span, format!("cannot import '{name}'"))
+                                        Error::runtime(
+                                            "host.value",
+                                            span,
+                                            format!("cannot import '{name}'"),
+                                        )
                                     })?,
                             )),
                             Value::Str(s) => Some(RVal::Obj(

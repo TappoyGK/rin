@@ -37,14 +37,22 @@ unsafe fn check_error(m: *mut RinMachine, kind: RinErrorKind) {
         assert!(!p.is_null());
         let e = &*p;
         assert_eq!(e.kind, kind);
-        assert!(e.rule.is_null());
+        assert!(!e.rule.is_null());
+        assert!(!CStr::from_ptr(e.rule).to_bytes().is_empty());
         assert!(!e.message.is_null());
         assert!(!e.text.is_null());
         assert!(!CStr::from_ptr(e.text).to_str().unwrap().is_empty());
         if kind == RinErrorKind::Host {
             assert_eq!((e.line, e.col), (0, 0));
             assert!(e.module.is_null() && e.backtrace.is_null());
-            assert_eq!(CStr::from_ptr(e.message), CStr::from_ptr(e.text));
+            assert_eq!(CStr::from_ptr(e.rule), c"host.argument");
+            assert_eq!(
+                CStr::from_ptr(e.text).to_str().unwrap(),
+                format!(
+                    "{} [host.argument]",
+                    CStr::from_ptr(e.message).to_str().unwrap()
+                )
+            );
         }
     }
 }
@@ -78,12 +86,15 @@ fn kinds_modules_and_borrowed_lifetime() {
         let p = rin_last_error(m.0);
         check_error(m.0, RinErrorKind::Runtime);
         let text = CStr::from_ptr((*p).text).to_owned();
+        let rule = CStr::from_ptr((*p).rule).to_owned();
+        assert_eq!(rule.as_c_str(), c"op.arith");
         assert!(!(*p).backtrace.is_null());
         assert_eq!(CStr::from_ptr((*p).module), c"mod");
         assert_eq!(p, rin_last_error(m.0));
         rin_res_free(&mut result);
         assert_eq!(p, rin_last_error(m.0));
         assert_eq!(text.as_c_str(), CStr::from_ptr((*p).text));
+        assert_eq!(rule.as_c_str(), CStr::from_ptr((*p).rule));
         finish(
             rin_call_in(m.0, c"mod".as_ptr(), c"good".as_ptr(), null(), 0),
             true,
@@ -135,6 +146,7 @@ fn resource_errors_and_bind_failures_preserve_kind() {
             let m = Machine::new(limits);
             finish(rin_eval(m.0, source.as_ptr()), false);
             check_error(m.0, kind);
+            assert_eq!(CStr::from_ptr((*rin_last_error(m.0)).rule), c"eval.limits");
         }
         let m = Machine::new(RinLimits {
             memory_bytes: 0,
@@ -148,6 +160,7 @@ fn resource_errors_and_bind_failures_preserve_kind() {
         let v = RinValue(rin::Value::Builtin("unknown\0builtin"));
         assert!(!rin_bind(m.0, c"x".as_ptr(), &v));
         check_error(m.0, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*rin_last_error(m.0)).rule), c"host.value");
         for s in [(*rin_last_error(m.0)).message, (*rin_last_error(m.0)).text] {
             assert!(
                 CStr::from_ptr(s)
@@ -218,6 +231,7 @@ fn ffi_text_matches_rust_display() {
         let m = Machine::new(rin_limits_default());
         finish(rin_eval(m.0, source.as_ptr()), false);
         let e = &*rin_last_error(m.0);
+        assert_eq!(CStr::from_ptr(e.rule).to_str().unwrap(), expected.rule());
         assert_eq!(
             CStr::from_ptr(e.text).to_str().unwrap(),
             expected.to_string()

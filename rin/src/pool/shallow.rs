@@ -120,7 +120,9 @@ impl Pool<'_> {
                 .copied()
                 .find(|b| b.name() == *name)
                 .map(RVal::Builtin)
-                .ok_or_else(|| Error::runtime(span, format!("cannot import '{name}'"))),
+                .ok_or_else(|| {
+                    Error::runtime("host.value", span, format!("cannot import '{name}'"))
+                }),
             Value::Str(s) => self
                 .alloc_obj(Obj::Str(Rc::from(s.as_str())), span)
                 .map(RVal::Obj),

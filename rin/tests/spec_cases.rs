@@ -8,6 +8,7 @@ use rin::{ArenaAllocator, ErrorKind, Limits, eval, eval_with, eval_with_allocato
 struct SpecCase {
     id: String,
     rule_id: String,
+    error_rule: Option<String>,
     source: String,
     limit_spec: String,
     expected_kind: String,
@@ -104,6 +105,7 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
 
 fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     let mut rule_id = None;
+    let mut error_rule = None;
     let mut source = None;
     let mut table_row = None;
 
@@ -113,6 +115,8 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
         if let Some(rest) = trimmed.strip_prefix("主根拠：") {
             let cleaned = rest.trim().trim_end_matches('。').trim_matches('`');
             rule_id = Some(cleaned.to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("期待規則：") {
+            error_rule = Some(rest.trim().trim_matches(['[', ']']).to_string());
         } else if trimmed == "```rin" {
             idx += 1;
             let mut buf = Vec::new();
@@ -149,6 +153,7 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     SpecCase {
         id,
         rule_id: rule_id.unwrap_or_else(|| panic!("{file_label}: missing 主根拠")),
+        error_rule,
         source: source.unwrap_or_else(|| panic!("{file_label}: missing ```rin source block")),
         limit_spec,
         expected_kind,
@@ -180,6 +185,14 @@ fn run_case(case: &SpecCase) {
         eval_with(&case.source, &[], limits)
     };
 
+    if let Err(err) = &result {
+        assert_eq!(
+            Some(err.rule()),
+            case.error_rule.as_deref(),
+            "{}: error rule mismatch: {err}",
+            case.id
+        );
+    }
     match case.expected_kind.as_str() {
         "値" => {
             let actual = result.unwrap_or_else(|e| panic!("{}: unexpected error: {e}", case.id));
@@ -263,6 +276,20 @@ fn verify_all_spec_cases() {
                 case.id,
                 case.rule_id
             );
+            if case.expected_kind == "値" {
+                assert!(
+                    case.error_rule.is_none(),
+                    "{}: value case has error rule",
+                    case.id
+                );
+            } else {
+                let rule = case.error_rule.as_ref().expect("error case needs 期待規則");
+                assert!(
+                    rule_ids.contains(&format!("[{rule}]")),
+                    "{}: unknown error rule {rule}",
+                    case.id
+                );
+            }
             run_case(case);
         }
     }

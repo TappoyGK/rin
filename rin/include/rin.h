@@ -59,7 +59,7 @@ typedef struct RinError {
     RinErrorKind kind;
     const char *message;   /* 常に非 NULL。見出しの本文。 */
     const char *module;    /* モジュール外なら NULL。 */
-    const char *rule;      /* 規則名の対応までは NULL。 */
+    const char *rule;      /* 根拠となる仕様の規則名。非 NULL、角括弧なし。 */
     size_t line;          /* 1 始まり。位置がなければ 0。 */
     size_t col;           /* 1 始まり。位置がなければ 0。 */
     const char *backtrace; /* 履歴がなければ NULL。 */

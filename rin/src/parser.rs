@@ -266,7 +266,11 @@ impl Parser<'_> {
             self.advance();
             Ok(span)
         } else {
-            Err(Error::parse(tok.span, format!("expected {what}")))
+            Err(Error::parse(
+                "src.syntax",
+                tok.span,
+                format!("expected {what}"),
+            ))
         }
     }
 
@@ -274,13 +278,18 @@ impl Parser<'_> {
         let tok = self.bump();
         match tok.kind {
             TokenKind::Ident(name) => Ok((name, tok.span)),
-            _ => Err(Error::parse(tok.span, format!("expected {what}"))),
+            _ => Err(Error::parse(
+                "src.syntax",
+                tok.span,
+                format!("expected {what}"),
+            )),
         }
     }
 
     fn check_nesting(depth: usize, span: Span) -> Result<(), Error> {
         if depth > MAX_SYNTAX_NESTING {
             return Err(Error::parse(
+                "src.nesting-limit",
                 span,
                 format!("syntax nesting limit exceeded ({MAX_SYNTAX_NESTING})"),
             ));
@@ -385,7 +394,11 @@ impl Parser<'_> {
                 let name = name.clone();
                 self.start_ident(name, span)
             }
-            other => Err(Error::parse(span, format!("unexpected token {other:?}"))),
+            other => Err(Error::parse(
+                "src.syntax",
+                span,
+                format!("unexpected token {other:?}"),
+            )),
         }
     }
 
@@ -504,7 +517,11 @@ impl Parser<'_> {
     fn start_paren(&mut self) -> Result<NextStep, Error> {
         let start = self.expect(TokenKind::LParen, "'('")?;
         if self.peek().kind == TokenKind::RParen {
-            return Err(Error::parse(start, "empty '()' is not a valid expression"));
+            return Err(Error::parse(
+                "src.syntax",
+                start,
+                "empty '()' is not a valid expression",
+            ));
         }
 
         // 先頭が '.' や '[' に続かない識別子の場合は特殊形式を確認する。
@@ -551,7 +568,11 @@ impl Parser<'_> {
                     let mut names = Vec::new();
                     while self.peek().kind != TokenKind::RParen {
                         if self.at_eof() {
-                            return Err(Error::parse(start, "unterminated export '('"));
+                            return Err(Error::parse(
+                                "src.syntax",
+                                start,
+                                "unterminated export '('",
+                            ));
                         }
                         let (name, _) = self.expect_ident("exported symbol name")?;
                         names.push(name);
@@ -632,7 +653,7 @@ impl Parser<'_> {
         target: BodyTarget,
     ) -> Result<NextStep, Error> {
         if self.peek().kind == TokenKind::RParen {
-            return Err(Error::parse(start, "body cannot be empty"));
+            return Err(Error::parse("expr.body", start, "body cannot be empty"));
         }
         self.frames.push(ParseFrame::Body(Box::new(BodyFrame {
             start,
@@ -668,12 +689,12 @@ impl Parser<'_> {
             ));
         }
         if self.at_eof() {
-            return Err(Error::parse(start, "unterminated match"));
+            return Err(Error::parse("src.syntax", start, "unterminated match"));
         }
         let arm_start = self.expect(TokenKind::LParen, "match arm '('")?;
         let pattern = self.parse_pattern()?;
         if self.peek().kind == TokenKind::RParen {
-            return Err(Error::parse(arm_start, "body cannot be empty"));
+            return Err(Error::parse("expr.body", arm_start, "body cannot be empty"));
         }
         self.frames
             .push(ParseFrame::MatchArmBody(Box::new(MatchArmFrame {
@@ -732,7 +753,7 @@ impl Parser<'_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(start, "unterminated '['"));
+                    return Err(Error::parse("src.syntax", start, "unterminated '['"));
                 }
                 self.frames.push(ParseFrame::List {
                     start,
@@ -753,7 +774,7 @@ impl Parser<'_> {
                         ));
                     }
                     if self.at_eof() {
-                        return Err(Error::parse(start, "unterminated tuple '('"));
+                        return Err(Error::parse("src.syntax", start, "unterminated tuple '('"));
                     }
                     self.frames.push(ParseFrame::Tuple {
                         start,
@@ -776,7 +797,7 @@ impl Parser<'_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(start, "unterminated '('"));
+                    return Err(Error::parse("src.syntax", start, "unterminated '('"));
                 }
                 self.frames.push(ParseFrame::Call {
                     start,
@@ -803,7 +824,7 @@ impl Parser<'_> {
                         ));
                     }
                     if self.at_eof() {
-                        return Err(Error::parse(start, "unterminated tuple '('"));
+                        return Err(Error::parse("src.syntax", start, "unterminated tuple '('"));
                     }
                     self.frames.push(ParseFrame::Tuple {
                         start,
@@ -834,7 +855,7 @@ impl Parser<'_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(start, "unterminated '('"));
+                    return Err(Error::parse("src.syntax", start, "unterminated '('"));
                 }
                 self.frames.push(ParseFrame::Call {
                     start,
@@ -874,7 +895,11 @@ impl Parser<'_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(sf.brace_start, "unterminated '{'"));
+                    return Err(Error::parse(
+                        "src.syntax",
+                        sf.brace_start,
+                        "unterminated '{'",
+                    ));
                 }
                 let (next_key, _) = self.expect_ident("field name")?;
                 self.expect(TokenKind::Colon, "':'")?;
@@ -925,7 +950,7 @@ impl Parser<'_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(bf.start, "unterminated '('"));
+                    return Err(Error::parse("src.syntax", bf.start, "unterminated '('"));
                 }
                 self.frames.push(ParseFrame::Body(bf));
                 Ok(NextStep::StartExpr)
@@ -944,7 +969,11 @@ impl Parser<'_> {
                     );
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(lf.bind_start, "unterminated let bindings"));
+                    return Err(Error::parse(
+                        "src.syntax",
+                        lf.bind_start,
+                        "unterminated let bindings",
+                    ));
                 }
                 let (next_key, _) = self.expect_ident("binding name")?;
                 lf.key = next_key;
@@ -966,6 +995,7 @@ impl Parser<'_> {
             } => {
                 if self.peek().kind == TokenKind::RParen {
                     return Err(Error::parse(
+                        "expr.if",
                         start,
                         "'if' requires 3 arguments (cond, then, else); use 'when' when no value is needed",
                     ));
@@ -1056,7 +1086,11 @@ impl Parser<'_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(wf.brace_start, "unterminated '{'"));
+                    return Err(Error::parse(
+                        "src.syntax",
+                        wf.brace_start,
+                        "unterminated '{'",
+                    ));
                 }
                 let (next_key, _) = self.expect_ident("field name")?;
                 self.expect(TokenKind::Colon, "':'")?;
@@ -1085,7 +1119,7 @@ impl Parser<'_> {
                     );
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(mf.arm_start, "unterminated '('"));
+                    return Err(Error::parse("src.syntax", mf.arm_start, "unterminated '('"));
                 }
                 self.frames.push(ParseFrame::MatchArmBody(mf));
                 Ok(NextStep::StartExpr)
@@ -1098,7 +1132,11 @@ impl Parser<'_> {
         let mut params = Vec::new();
         while self.peek().kind != TokenKind::RParen {
             if self.at_eof() {
-                return Err(Error::parse(start, "unterminated parameter list"));
+                return Err(Error::parse(
+                    "src.syntax",
+                    start,
+                    "unterminated parameter list",
+                ));
             }
             let (param, _) = self.expect_ident("parameter name")?;
             params.push(param);
@@ -1143,7 +1181,7 @@ impl Parser<'_> {
                 }
                 _ => Ok(Pattern::Var(name)),
             },
-            _ => Err(Error::parse(tok.span, "invalid match pattern")),
+            _ => Err(Error::parse("pat.kinds", tok.span, "invalid match pattern")),
         }
     }
 

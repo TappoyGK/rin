@@ -96,12 +96,15 @@ pub struct Error {
 }
 
 impl Error {
+    pub fn rule(&self) -> &'static str; // 角括弧を含まない規則名
     pub fn module(&self) -> Option<&str>;
     pub fn backtrace(&self) -> &[StackFrame];
     pub fn omitted_frames(&self) -> usize;
     pub fn format_backtrace(&self) -> String;
 }
 ```
+
+`Error::new(rule, kind, at, message)` と `Error::lex/parse/runtime(rule, at, message)` はすべて `&'static str` の規則名を必須とする（空文字は panic）。表示の先頭行は `L:C: message [rule.id]`、モジュール内では `module L:C: message [rule.id]` となり、その後に呼び出し履歴が続く。`message` と `format_backtrace()` の内容には規則名を追加しない。
 
 ### 1.5 深い値の処理
 
@@ -176,12 +179,12 @@ typedef struct RinError {
 ```
 
 - `message` は見出しの本文、`text` は Rust の `Error::to_string()` 相当の見出しと履歴全体であり、必ず非 NULL の UTF-8・NUL 終端文字列である。内部 NUL は可視の `\0` に置き換える。ほかの文字列にも同じ変換を適用する。
-- `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は規則名の対応まで NULL とする。
+- `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
 - 対象操作は `rin_eval` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` の 5 関数である。同じ machine への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ machine の対象操作・解放と並行して参照してはならない。
 - 対象操作は引数検査の前に前回の情報をクリアする。有効な machine への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
-- NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `rule` / `backtrace` は NULL、`line` / `col` は 0、`message` / `text` は引数エラーの文言とする。machine 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
+- NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。machine 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時にはホストが所有する値であり、`rin_res_free` で解放する。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
 
 有効な `m` に対する利用例：

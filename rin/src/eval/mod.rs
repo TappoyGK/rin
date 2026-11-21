@@ -140,6 +140,7 @@ impl<'a> Machine<'a> {
                             self.pool.release_val(v);
                         }
                         return Err(Error::runtime(
+                            "expr.module",
                             Span::default(),
                             format!("module '{name}' cannot export unknown symbol '{sym}'"),
                         ));
@@ -193,6 +194,7 @@ impl<'a> Machine<'a> {
             .and_then(|id| self.globals.get(id as usize).copied().flatten())
         else {
             return Err(Error::runtime(
+                "expr.name",
                 Span::default(),
                 format!("unknown function '{fn_name}'"),
             ));
@@ -209,6 +211,7 @@ impl<'a> Machine<'a> {
     ) -> Result<Value, Error> {
         let Some(&RVal::Obj(mod_id)) = self.modules.get(mod_name) else {
             return Err(Error::runtime(
+                "expr.module",
                 Span::default(),
                 format!("unknown module '{mod_name}'"),
             ));
@@ -218,6 +221,7 @@ impl<'a> Machine<'a> {
         };
         let Some(&callee) = exports.get(fn_name) else {
             return Err(Error::runtime(
+                "expr.module",
                 Span::default(),
                 format!("module '{mod_name}' has no export '{fn_name}'"),
             ));
@@ -327,6 +331,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     #[cold]
     pub(super) fn step_limit_err(&self, span: Span) -> Error {
         Error::new(
+            "eval.limits",
             ErrorKind::TooManySteps,
             span,
             format!("step limit exceeded ({})", self.limits.steps),
@@ -344,6 +349,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     #[cold]
     pub(super) fn depth_limit_err(&self, span: Span) -> Error {
         Error::new(
+            "eval.limits",
             ErrorKind::TooDeep,
             span,
             format!("call depth limit exceeded ({})", self.limits.depth),
@@ -367,7 +373,11 @@ impl<'a, 'p> Runner<'a, 'p> {
             return Ok(v);
         }
         let name = self.syms.names.get(idx).map(|s| s.as_ref()).unwrap_or("?");
-        Err(Error::runtime(span, format!("unknown name '{name}'")))
+        Err(Error::runtime(
+            "expr.name",
+            span,
+            format!("unknown name '{name}'"),
+        ))
     }
 
     pub(super) fn define_top(&mut self, id: u32, val: RVal) {
@@ -461,6 +471,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
                     _ => {
                         return Err(Error::runtime(
+                            "expr.call",
                             span,
                             format!("cannot call value of type {}", callee.type_name(self.pool)),
                         ));
@@ -468,6 +479,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 };
                 if proto.arity as usize != args.len() {
                     return Err(Error::runtime(
+                        "expr.call",
                         span,
                         format!("expected {} arguments, got {}", proto.arity, args.len()),
                     ));
@@ -505,6 +517,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
             RVal::Builtin(b) => self.apply_builtin(b, args, span),
             other => Err(Error::runtime(
+                "expr.call",
                 span,
                 format!("cannot call value of type {}", other.type_name(self.pool)),
             )),

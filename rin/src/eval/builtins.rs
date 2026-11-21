@@ -23,7 +23,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::And => {
                 if args.is_empty() {
-                    return Err(Error::runtime(span, "'and' requires at least 1 argument"));
+                    return Err(Error::runtime(
+                        "op.logic",
+                        span,
+                        "'and' requires at least 1 argument",
+                    ));
                 }
                 for v in args {
                     match v {
@@ -31,6 +35,7 @@ impl Runner<'_, '_> {
                         RVal::Bool(false) => return Ok(RVal::Bool(false)),
                         other => {
                             return Err(Error::runtime(
+                                "op.logic",
                                 span,
                                 format!("expected bool, got {}", other.type_name(self.pool)),
                             ));
@@ -41,7 +46,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Or => {
                 if args.is_empty() {
-                    return Err(Error::runtime(span, "'or' requires at least 1 argument"));
+                    return Err(Error::runtime(
+                        "op.logic",
+                        span,
+                        "'or' requires at least 1 argument",
+                    ));
                 }
                 for v in args {
                     match v {
@@ -49,6 +58,7 @@ impl Runner<'_, '_> {
                         RVal::Bool(false) => {}
                         other => {
                             return Err(Error::runtime(
+                                "op.logic",
                                 span,
                                 format!("expected bool, got {}", other.type_name(self.pool)),
                             ));
@@ -59,11 +69,12 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Not => {
                 let [v] = args else {
-                    return Err(Error::runtime(span, "'not' takes 1 argument"));
+                    return Err(Error::runtime("op.logic", span, "'not' takes 1 argument"));
                 };
                 match v {
                     RVal::Bool(b) => Ok(RVal::Bool(!b)),
                     other => Err(Error::runtime(
+                        "op.logic",
                         span,
                         format!("'not' expects bool, got {}", other.type_name(self.pool)),
                     )),
@@ -71,12 +82,17 @@ impl Runner<'_, '_> {
             }
             BuiltinId::AsF64 => {
                 let [v] = args else {
-                    return Err(Error::runtime(span, "'as_f64' takes 1 argument"));
+                    return Err(Error::runtime(
+                        "fn.convert",
+                        span,
+                        "'as_f64' takes 1 argument",
+                    ));
                 };
                 match v {
                     RVal::Int(n) => Ok(RVal::Float(*n as f64)),
                     RVal::Float(x) => Ok(RVal::Float(*x)),
                     other => Err(Error::runtime(
+                        "fn.convert",
                         span,
                         format!(
                             "'as_f64' expects number, got {}",
@@ -87,17 +103,26 @@ impl Runner<'_, '_> {
             }
             BuiltinId::AsI64 => {
                 let [v] = args else {
-                    return Err(Error::runtime(span, "'as_i64' takes 1 argument"));
+                    return Err(Error::runtime(
+                        "fn.convert",
+                        span,
+                        "'as_i64' takes 1 argument",
+                    ));
                 };
                 match v {
                     RVal::Int(n) => Ok(RVal::Int(*n)),
                     RVal::Float(x) => {
                         if !x.is_finite() || *x < (i64::MIN as f64) || *x > (i64::MAX as f64) {
-                            return Err(Error::runtime(span, "float out of i64 range"));
+                            return Err(Error::runtime(
+                                "fn.convert",
+                                span,
+                                "float out of i64 range",
+                            ));
                         }
                         Ok(RVal::Int(*x as i64))
                     }
                     other => Err(Error::runtime(
+                        "fn.convert",
                         span,
                         format!(
                             "'as_i64' expects number, got {}",
@@ -115,7 +140,7 @@ impl Runner<'_, '_> {
             BuiltinId::List => self.build_list_from_borrowed(args, span),
             BuiltinId::Len => {
                 let [v] = args else {
-                    return Err(Error::runtime(span, "'len' takes 1 argument"));
+                    return Err(Error::runtime("fn.list", span, "'len' takes 1 argument"));
                 };
                 if self.is_list(*v) {
                     return Ok(RVal::Int(self.pool.list_len(*v) as i64));
@@ -128,6 +153,7 @@ impl Runner<'_, '_> {
                     }
                 }
                 Err(Error::runtime(
+                    "fn.list",
                     span,
                     format!(
                         "'len' expects list, array, or string, got {}",
@@ -141,7 +167,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Get => {
                 let [list_v, idx_v] = args else {
-                    return Err(Error::runtime(span, "'get' takes 2 arguments (seq, index)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'get' takes 2 arguments (seq, index)",
+                    ));
                 };
                 let idx = self.expect_int("get", *idx_v, span)?;
                 if let RVal::Obj(id) = *list_v
@@ -196,6 +226,7 @@ impl Runner<'_, '_> {
             BuiltinId::Cons => {
                 let [item, list_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'cons' takes 2 arguments (item, list)",
                     ));
@@ -206,6 +237,7 @@ impl Runner<'_, '_> {
             BuiltinId::Push => {
                 let [list_v, item] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'push' takes 2 arguments (list, item)",
                     ));
@@ -236,6 +268,7 @@ impl Runner<'_, '_> {
             BuiltinId::Slice => {
                 let [list_v, start_v, end_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'slice' takes 3 arguments (list, start, end)",
                     ));
@@ -246,6 +279,7 @@ impl Runner<'_, '_> {
                 let len = self.pool.list_len(*list_v) as i64;
                 if start < 0 || end < start || end > len {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         format!("slice range {start}..{end} out of range (length {len})"),
                     ));
@@ -255,12 +289,20 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Take => {
                 let [list_v, n_v] = args else {
-                    return Err(Error::runtime(span, "'take' takes 2 arguments (list, n)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'take' takes 2 arguments (list, n)",
+                    ));
                 };
                 self.expect_list("take", *list_v, span)?;
                 let n = self.expect_int("take", *n_v, span)?;
                 if n < 0 {
-                    return Err(Error::runtime(span, "'take' count cannot be negative"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'take' count cannot be negative",
+                    ));
                 }
                 let items = self.list_to_vec(*list_v);
                 let end = (n as usize).min(items.len());
@@ -268,12 +310,20 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Drop => {
                 let [list_v, n_v] = args else {
-                    return Err(Error::runtime(span, "'drop' takes 2 arguments (list, n)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'drop' takes 2 arguments (list, n)",
+                    ));
                 };
                 self.expect_list("drop", *list_v, span)?;
                 let mut n = self.expect_int("drop", *n_v, span)?;
                 if n < 0 {
-                    return Err(Error::runtime(span, "'drop' count cannot be negative"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'drop' count cannot be negative",
+                    ));
                 }
                 let mut cur = *list_v;
                 while n > 0 && self.pool.list_len(cur) > 0 {
@@ -305,6 +355,7 @@ impl Runner<'_, '_> {
             BuiltinId::Range => {
                 let [start_v, end_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'range' takes 2 arguments (start, end)",
                     ));
@@ -337,6 +388,7 @@ impl Runner<'_, '_> {
             BuiltinId::Contains => {
                 let [list_v, target] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'contains' takes 2 arguments (list, value)",
                     ));
@@ -346,6 +398,7 @@ impl Runner<'_, '_> {
                 for x in items {
                     if x.type_name(self.pool) != target.type_name(self.pool) {
                         return Err(Error::runtime(
+                            "fn.list",
                             span,
                             format!(
                                 "cannot compare {} and {}",
@@ -362,7 +415,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Find => {
                 let [f, list_v] = args else {
-                    return Err(Error::runtime(span, "'find' takes 2 arguments (fn, list)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'find' takes 2 arguments (fn, list)",
+                    ));
                 };
                 self.expect_list("find", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
@@ -386,6 +443,7 @@ impl Runner<'_, '_> {
                             let tname = other.type_name(self.pool);
                             self.pool.release_val(res);
                             return Err(Error::runtime(
+                                "fn.list",
                                 span,
                                 format!("'find' predicate must return bool, got {tname}"),
                             ));
@@ -396,7 +454,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Any => {
                 let [f, list_v] = args else {
-                    return Err(Error::runtime(span, "'any' takes 2 arguments (fn, list)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'any' takes 2 arguments (fn, list)",
+                    ));
                 };
                 self.expect_list("any", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
@@ -417,6 +479,7 @@ impl Runner<'_, '_> {
                             let tname = other.type_name(self.pool);
                             self.pool.release_val(res);
                             return Err(Error::runtime(
+                                "fn.list",
                                 span,
                                 format!("'any' predicate must return bool, got {tname}"),
                             ));
@@ -427,7 +490,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::All => {
                 let [f, list_v] = args else {
-                    return Err(Error::runtime(span, "'all' takes 2 arguments (fn, list)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'all' takes 2 arguments (fn, list)",
+                    ));
                 };
                 self.expect_list("all", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
@@ -448,6 +515,7 @@ impl Runner<'_, '_> {
                             let tname = other.type_name(self.pool);
                             self.pool.release_val(res);
                             return Err(Error::runtime(
+                                "fn.list",
                                 span,
                                 format!("'all' predicate must return bool, got {tname}"),
                             ));
@@ -458,7 +526,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Map => {
                 let [f, list_v] = args else {
-                    return Err(Error::runtime(span, "'map' takes 2 arguments (fn, list)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'map' takes 2 arguments (fn, list)",
+                    ));
                 };
                 self.expect_list("map", *list_v, span)?;
                 let items = self.list_to_vec(*list_v);
@@ -485,6 +557,7 @@ impl Runner<'_, '_> {
             BuiltinId::Filter => {
                 let [f, list_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'filter' takes 2 arguments (fn, list)",
                     ));
@@ -519,6 +592,7 @@ impl Runner<'_, '_> {
                             self.pool.release_val(res);
                             self.release_all(out);
                             return Err(Error::runtime(
+                                "fn.list",
                                 span,
                                 format!("'filter' predicate must return bool, got {tname}"),
                             ));
@@ -530,6 +604,7 @@ impl Runner<'_, '_> {
             BuiltinId::FlatMap => {
                 let [f, list_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'flat_map' takes 2 arguments (fn, list)",
                     ));
@@ -569,6 +644,7 @@ impl Runner<'_, '_> {
             BuiltinId::Fold => {
                 let [f, init, list_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'fold' takes 3 arguments (fn, init, list)",
                     ));
@@ -601,7 +677,11 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Zip => {
                 let [a_v, b_v] = args else {
-                    return Err(Error::runtime(span, "'zip' takes 2 arguments (list, list)"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'zip' takes 2 arguments (list, list)",
+                    ));
                 };
                 self.expect_list("zip", *a_v, span)?;
                 self.expect_list("zip", *b_v, span)?;
@@ -661,6 +741,7 @@ impl Runner<'_, '_> {
             BuiltinId::SortBy => {
                 let [key_fn, list_v] = args else {
                     return Err(Error::runtime(
+                        "fn.list",
                         span,
                         "'sort_by' takes 2 arguments (key_fn, list)",
                     ));
@@ -727,13 +808,18 @@ impl Runner<'_, '_> {
             }
             BuiltinId::ArrayToList => {
                 let [v] = args else {
-                    return Err(Error::runtime(span, "'array->list' takes 1 argument"));
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        "'array->list' takes 1 argument",
+                    ));
                 };
                 let items = match v {
                     RVal::Obj(id) => match self.pool.get(*id) {
                         Obj::Array(arr) => arr.clone(),
                         _ => {
                             return Err(Error::runtime(
+                                "fn.list",
                                 span,
                                 format!(
                                     "'array->list' expects array, got {}",
@@ -744,6 +830,7 @@ impl Runner<'_, '_> {
                     },
                     other => {
                         return Err(Error::runtime(
+                            "fn.list",
                             span,
                             format!(
                                 "'array->list' expects array, got {}",

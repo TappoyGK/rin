@@ -60,7 +60,7 @@ impl Scope {
         self.next_slot = self
             .next_slot
             .checked_add(1)
-            .ok_or_else(|| Error::parse(span, "too many local variables"))?;
+            .ok_or_else(|| Error::parse("compile.capacity", span, "too many local variables"))?;
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
@@ -81,7 +81,7 @@ impl Scope {
             return Ok(pos as u32);
         }
         let idx = u32::try_from(self.captures.len())
-            .map_err(|_| Error::parse(span, "too many captured variables"))?;
+            .map_err(|_| Error::parse("compile.capacity", span, "too many captured variables"))?;
         self.captures.push((name.to_string(), cap));
         Ok(idx)
     }
@@ -376,8 +376,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::List(items) => {
-                let count = u32::try_from(items.len())
-                    .map_err(|_| Error::parse(span, "list literal too large"))?;
+                let count = u32::try_from(items.len()).map_err(|_| {
+                    Error::parse("compile.capacity", span, "list literal too large")
+                })?;
                 if count == 0 {
                     self.emit(Op::EmptyList, span);
                 } else {
@@ -388,8 +389,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::Tuple(items) => {
-                let count = u32::try_from(items.len())
-                    .map_err(|_| Error::parse(span, "tuple literal too large"))?;
+                let count = u32::try_from(items.len()).map_err(|_| {
+                    Error::parse("compile.capacity", span, "tuple literal too large")
+                })?;
                 for item in items {
                     self.compile_expr_shallow(item, false, depth + 1)?;
                 }
@@ -469,7 +471,7 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse(span, "too many parameters"))?;
+                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
                 let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p.clone(), span)?;
@@ -493,7 +495,7 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse(span, "too many parameters"))?;
+                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
                 let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p.clone(), span)?;
@@ -621,7 +623,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
                 let argc = u32::try_from(args.len())
-                    .map_err(|_| Error::parse(span, "too many arguments"))?;
+                    .map_err(|_| Error::parse("compile.capacity", span, "too many arguments"))?;
                 self.compile_expr_shallow(callee, false, depth + 1)?;
                 for arg in args {
                     self.compile_expr_shallow(arg, false, depth + 1)?;
@@ -880,8 +882,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::List(items) => {
-                let count = u32::try_from(items.len())
-                    .map_err(|_| Error::parse(span, "list literal too large"))?;
+                let count = u32::try_from(items.len()).map_err(|_| {
+                    Error::parse("compile.capacity", span, "list literal too large")
+                })?;
                 if count == 0 {
                     self.emit(Op::EmptyList, span);
                 } else {
@@ -898,8 +901,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::Tuple(items) => {
-                let count = u32::try_from(items.len())
-                    .map_err(|_| Error::parse(span, "tuple literal too large"))?;
+                let count = u32::try_from(items.len()).map_err(|_| {
+                    Error::parse("compile.capacity", span, "tuple literal too large")
+                })?;
                 steps.push(Step::EmitFlushed {
                     op: Op::MakeTuple(count),
                     span,
@@ -1040,7 +1044,7 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse(span, "too many parameters"))?;
+                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
                 let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p.clone(), span)?;
@@ -1056,7 +1060,7 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse(span, "too many parameters"))?;
+                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
                 let mut inner = Scope::new(self.module);
                 for p in params {
                     inner.alloc_slot(p.clone(), span)?;
@@ -1153,7 +1157,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
                 let argc = u32::try_from(args.len())
-                    .map_err(|_| Error::parse(span, "too many arguments"))?;
+                    .map_err(|_| Error::parse("compile.capacity", span, "too many arguments"))?;
                 let call_op = if is_tail {
                     Op::TailCall(argc)
                 } else {
@@ -1195,5 +1199,24 @@ fn pattern_binding(pat: &Pattern) -> Option<String> {
             ..
         } => Some(name.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ErrorKind;
+
+    #[test]
+    fn local_slot_overflow_reports_capacity_rule() {
+        // 巨大なソースを確保せず、個数上限の直前の状態から検査する。
+        let mut scope = Scope::new(None);
+        scope.next_slot = u32::MAX - 1;
+        let at = Span::new(3, 5);
+        assert_eq!(scope.alloc_slot("last".into(), at).unwrap(), u32::MAX - 1);
+        let err = scope.alloc_slot("overflow".into(), at).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.rule(), "compile.capacity");
+        assert_eq!(err.at, at);
     }
 }

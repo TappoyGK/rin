@@ -4,6 +4,8 @@
 
 主根拠：`[type.numeric]`
 
+期待規則： [op.arith]
+
 **入力：**
 
 ```rin
@@ -20,6 +22,8 @@
 
 主根拠：`[op.arith]`
 
+期待規則： [op.arith]
+
 **入力：**
 
 ```rin
@@ -35,6 +39,8 @@
 ### eval-003 配列範囲外アクセスは実行時エラー
 
 主根拠：`[expr.index]`
+
+期待規則： [expr.index]
 
 **入力：**
 
@@ -53,6 +59,8 @@
 
 主根拠：`[eval.limits]`
 
+期待規則： [eval.limits]
+
 **入力：**
 
 ```rin
@@ -70,6 +78,8 @@
 
 主根拠：`[eval.limits]`
 
+期待規則： [eval.limits]
+
 **入力：**
 
 ```rin
@@ -86,6 +96,8 @@
 ### eval-006 アリーナメモリ上限超過の停止
 
 主根拠：`[eval.limits]`
+
+期待規則： [eval.limits]
 
 **入力：**
 

@@ -66,6 +66,7 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
                 path.truncate(base);
                 let Some(v) = fields.get(field) else {
                     return Err(Error::runtime(
+                        "schema.struct",
                         Span::default(),
                         format!("{path}: struct {name} is missing field '{field}'"),
                     ));
@@ -79,6 +80,7 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
                 for key in actual.keys() {
                     if !expected.iter().any(|(k, _)| k == key) {
                         return Err(Error::runtime(
+                            "schema.struct",
                             Span::default(),
                             format!("{path}: unexpected field '{key}' on struct {name}"),
                         ));
@@ -93,12 +95,17 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
             refs += 1;
             if refs > schema.defs.len() {
                 return Err(Error::runtime(
+                    "schema.productive",
                     Span::default(),
                     format!("{path}: cyclic schema reference '{name}'"),
                 ));
             }
             ty = schema.defs.get(name).ok_or_else(|| {
-                Error::runtime(Span::default(), format!("unknown schema '{name}'"))
+                Error::runtime(
+                    "schema.reference",
+                    Span::default(),
+                    format!("unknown schema '{name}'"),
+                )
             })?;
         }
         let base = path.len();
@@ -132,6 +139,7 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
                 };
                 if xs.len() != types.len() {
                     return Err(Error::runtime(
+                        "schema.tuple",
                         Span::default(),
                         format!(
                             "{path}: expected tuple of {} elements, got {}",
@@ -186,6 +194,7 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
                 }
                 let Some((_, payload)) = cases.iter().find(|(v, _)| v == variant.as_str()) else {
                     return Err(Error::runtime(
+                        "schema.variant",
                         Span::default(),
                         format!("{path}: {name} has no variant '{variant}'"),
                     ));
@@ -197,12 +206,14 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
                     }
                     (None, Some(_)) => {
                         return Err(Error::runtime(
+                            "schema.variant",
                             Span::default(),
                             format!("{path}: {name}.{variant} takes no payload"),
                         ));
                     }
                     (Some(_), None) => {
                         return Err(Error::runtime(
+                            "schema.variant",
                             Span::default(),
                             format!("{path}: {name}.{variant} requires a payload"),
                         ));
