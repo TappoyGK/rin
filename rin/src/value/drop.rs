@@ -1,5 +1,7 @@
 //! 最後の所有者だけが子を取り出し、固定深度以降は明示的スタックで解放する。
 use super::*;
+use std::cell::LazyCell;
+type Empty = LazyCell<Rc<ListNode>>;
 
 // Weak が残っていても、最後の強参照なら切り離して子を取り出す。
 fn unique<T: Clone>(value: &mut Rc<T>) -> Option<&mut T> {
@@ -25,23 +27,23 @@ fn branch(value: &Value) -> bool {
     )
 }
 
-fn list_children(node: &mut ListNode, pending: &mut crate::work::Work<Value>) {
+fn list_children(node: &mut ListNode, pending: &mut crate::work::Work<Value>, empty: &Empty) {
     if let ListNode::Cons { head, tail, .. } = node {
         if branch(head) {
             pending.push(std::mem::replace(head, Value::Void));
         }
         // 空リストは再投入しない。通常の Drop が再入しても仕事は残っていない。
         if !matches!(**tail, ListNode::Nil) {
-            pending.push(Value::List(std::mem::replace(tail, ListNode::empty())));
+            pending.push(Value::List(std::mem::replace(tail, Rc::clone(empty))));
         }
     }
 }
 
-fn children(value: &mut Value, pending: &mut crate::work::Work<Value>) {
+fn children(value: &mut Value, pending: &mut crate::work::Work<Value>, empty: &Empty) {
     match value {
         Value::List(xs) => {
             if let Some(node) = unique(xs) {
-                list_children(node, pending);
+                list_children(node, pending, empty);
             }
         }
         Value::Array(xs) | Value::Tuple(xs) => {
@@ -73,9 +75,9 @@ fn children(value: &mut Value, pending: &mut crate::work::Work<Value>) {
     }
 }
 
-fn drain(pending: &mut crate::work::Work<Value>) {
+fn drain(pending: &mut crate::work::Work<Value>, empty: &Empty) {
     while let Some(mut value) = pending.pop() {
-        children(&mut value, pending);
+        children(&mut value, pending, empty);
         // 子を取り出した後なので、自動 Drop が深い値へ再進入することはない。
     }
 }
@@ -85,9 +87,7 @@ fn has_children(value: &Value) -> bool {
     match value {
         Value::List(v) => Rc::strong_count(v) == 1 && !v.is_empty(),
         Value::Array(v) | Value::Tuple(v) => Rc::strong_count(v) == 1 && v.iter().any(branch),
-        Value::Struct { fields, .. } => {
-            Rc::strong_count(fields) == 1 && fields.values().any(branch)
-        }
+        Value::Struct { fields, .. } => Rc::strong_count(fields) == 1 && !fields.is_empty(),
         Value::Some(v) | Value::Ok(v) | Value::Err(v) | Value::Variant { data: Some(v), .. } => {
             Rc::strong_count(v) == 1 && branch(v)
         }
@@ -114,8 +114,9 @@ impl Drop for ListNode {
             return;
         }
         let mut pending = crate::work::Work::new();
-        list_children(self, &mut pending);
-        drain(&mut pending);
+        let empty = LazyCell::new(ListNode::empty as fn() -> Rc<ListNode>);
+        list_children(self, &mut pending, &empty);
+        drain(&mut pending, &empty);
     }
 }
 
@@ -123,22 +124,22 @@ impl Drop for ListNode {
 #[inline(never)]
 fn drop_deep(value: &mut Value) {
     let mut pending = crate::work::Work::new();
-    children(value, &mut pending);
-    drain(&mut pending);
+    let empty = LazyCell::new(ListNode::empty as fn() -> Rc<ListNode>);
+    children(value, &mut pending, &empty);
+    drain(&mut pending, &empty);
 }
 
 // 子を空にしてから通常の Drop に戻す。子の Drop から深さ 0 の探索を再開させない。
 #[inline(never)]
 fn drop_shallow(value: &mut Value, depth: usize) {
-    if depth == 8 {
+    if depth == 32 {
         drop_deep(value);
         return;
     }
     match value {
         Value::Array(xs) | Value::Tuple(xs) => {
             if let Some(xs) = unique(xs) {
-                // 兄弟をその場で落とす。共有子が最後の参照に変わった後も、
-                // 次の兄弟の処理へ深さを引き継ぎ、Drop の深さ 0 に戻さない。
+                // 兄弟をその場で落とし、最後の強参照になった子へ深さを引き継ぐ。
                 xs.retain_mut(|v| {
                     if has_children(v) {
                         drop_shallow(v, depth + 1);
@@ -149,12 +150,11 @@ fn drop_shallow(value: &mut Value, depth: usize) {
         }
         Value::Struct { fields, .. } => {
             if let Some(fields) = unique(fields) {
-                fields.retain(|_, v| {
-                    if has_children(v) {
-                        drop_shallow(v, depth + 1);
+                for mut v in std::mem::take(fields).into_values() {
+                    if has_children(&v) {
+                        drop_shallow(&mut v, depth + 1);
                     }
-                    false
-                });
+                }
             }
         }
         Value::Some(v) | Value::Ok(v) | Value::Err(v) | Value::Variant { data: Some(v), .. } => {
@@ -166,6 +166,7 @@ fn drop_shallow(value: &mut Value, depth: usize) {
             }
         }
         Value::List(xs) => {
+            let empty = ListNode::empty();
             while let Some(node) = unique(xs) {
                 let ListNode::Cons { head, tail, .. } = node else {
                     break;
@@ -174,7 +175,7 @@ fn drop_shallow(value: &mut Value, depth: usize) {
                     drop_shallow(head, depth + 1);
                 }
                 *head = Value::Void;
-                let next = std::mem::replace(tail, ListNode::empty());
+                let next = std::mem::replace(tail, Rc::clone(&empty));
                 *xs = next;
             }
         }

@@ -288,11 +288,18 @@ fn equal_nested(a: &Value, b: &Value, depth: usize) -> bool {
                 fields: b,
             },
         ) => {
-            an == bn
-                && a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|((ak, av), (bk, bv))| ak == bk && equal(av, bv, depth + 1))
+            if an != bn || a.len() != b.len() {
+                return false;
+            }
+            // 1 フィールドのノードでは二つの木イテレータを作らない。
+            if a.len() == 1 {
+                let (ak, av) = a.first_key_value().unwrap();
+                let (bk, bv) = b.first_key_value().unwrap();
+                return ak == bk && equal(av, bv, depth + 1);
+            }
+            a.iter()
+                .zip(b.iter())
+                .all(|((ak, av), (bk, bv))| ak == bk && equal(av, bv, depth + 1))
         }
         (Value::Some(a), Value::Some(b))
         | (Value::Ok(a), Value::Ok(b))

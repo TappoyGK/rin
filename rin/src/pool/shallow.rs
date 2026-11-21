@@ -2,7 +2,7 @@
 use super::*;
 impl Pool<'_> {
     pub(super) fn export_shallow(&self, val: RVal, depth: usize) -> Value {
-        if depth == 8
+        if depth == 32
             && matches!(val, RVal::Obj(id) if !matches!(self.get(id), Obj::Str(_) | Obj::Closure { .. } | Obj::Module { .. }))
         {
             return self.export_deep(val);
@@ -41,10 +41,20 @@ impl Pool<'_> {
                         .collect(),
                 ),
                 Obj::Struct { name, fields } => {
-                    let map = fields
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), self.export_shallow(*v, depth + 1)))
-                        .collect();
+                    // 少数フィールドでは中間 Vec とソートを省く。
+                    // 大きな map は標準の一括構築で木の逐次更新を避ける。
+                    let map = if fields.len() <= 4 {
+                        let mut map = BTreeMap::new();
+                        for (k, v) in fields {
+                            map.insert(k.to_string(), self.export_shallow(*v, depth + 1));
+                        }
+                        map
+                    } else {
+                        fields
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), self.export_shallow(*v, depth + 1)))
+                            .collect()
+                    };
                     Value::structure(name.as_ref(), map)
                 }
                 Obj::Variant {
@@ -74,7 +84,7 @@ impl Pool<'_> {
         span: Span,
         depth: usize,
     ) -> Result<RVal, Error> {
-        if depth == 8
+        if depth == 32
             && matches!(
                 val,
                 Value::List(_)

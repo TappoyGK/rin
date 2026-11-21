@@ -282,6 +282,19 @@ fn deep_values_on_small_stacks() {
 
 #[test]
 fn formatting_and_schema_error_order() {
+    let flat = Value::list((0..20).map(Value::Int).collect());
+    let pretty = format!("{flat:#?}");
+    // Debug は Cons の tail も深さに数え、境界以降を省略せず一行で書く。
+    assert!(pretty.contains("tail: Cons { head: Int(15)"));
+    let compact_whitespace =
+        |s: String| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    // pretty の末尾のカンマは Debug builder が付けるため取り除いて比べる。
+    assert_eq!(
+        compact_whitespace(pretty)
+            .replace(",)", ")")
+            .replace(",}", "}"),
+        compact_whitespace(format!("{flat:?}"))
+    );
     assert_eq!(
         format!("{:#?}", Value::Some(Rc::new(Value::Int(7)))),
         "Some(\n    Int(\n        7,\n    ),\n)"
@@ -322,7 +335,7 @@ fn formatting_and_schema_error_order() {
 fn shallow_and_iterative_paths_agree() {
     let mut alloc = HeapAllocator;
     let mut m = Machine::new(Limits::default(), &mut alloc);
-    for depth in [7, 8, 9, 15, 16, 17, 32] {
+    for depth in [7, 8, 9, 15, 16, 17, 31, 32, 33, 64] {
         for shape in 0..8 {
             let value = nested(shape, depth, Value::Int(7));
             let other = nested(shape, depth, Value::Int(7));

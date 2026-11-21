@@ -80,18 +80,15 @@ fn make_case(case: &str) -> Value {
     use std::rc::Rc;
     fn tree(depth: usize, width: usize) -> Value {
         if depth == 0 {
-            return Value::Int(1);
+            return Value::structure("Leaf", BTreeMap::from([("value".into(), Value::Int(1))]));
         }
-        if depth.is_multiple_of(2) {
-            Value::structure(
-                "Node",
-                (0..width)
-                    .map(|i| (format!("f{i}"), tree(depth - 1, width)))
-                    .collect(),
-            )
-        } else {
-            Value::list((0..width).map(|_| tree(depth - 1, width)).collect())
-        }
+        Value::structure(
+            "Node",
+            BTreeMap::from([(
+                "children".into(),
+                Value::list((0..width).map(|_| tree(depth - 1, width)).collect()),
+            )]),
+        )
     }
     match case {
         "list8" => Value::list((0..8).map(Value::Int).collect()),
