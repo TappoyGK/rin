@@ -10,7 +10,7 @@ use crate::value::Value;
 
 /// スキーマの型式 AST。
 ///
-/// 深い入れ子でもスタックを枯渇させないよう `Drop`・`Clone`・`Debug` は深さ 32 以上で反復処理へ切り替える。
+/// 深い入れ子でもスタックを枯渇させないよう `Clone`・`Debug` は深さ 32 以上で反復処理へ切り替える。
 /// そのため、深さ 32 以上の部分木の `{:#?}` 出力は 1 行形式となる。
 pub enum TypeExpr {
     Any,
@@ -72,89 +72,24 @@ fn push_type_if_non_leaf(ty: TypeExpr, next: &mut Option<TypeExpr>, work: &mut V
     }
 }
 
-impl Drop for TypeExpr {
-    #[inline]
-    fn drop(&mut self) {
-        self.drop_shallow(0);
+#[cold]
+#[inline(never)]
+fn drop_deep_type(ty: &mut TypeExpr) {
+    if !has_type_children(ty) {
+        return;
     }
-}
-
-impl TypeExpr {
-    fn drop_shallow(&mut self, depth: usize) {
-        if !has_type_children(self) {
-            return;
-        }
-        if depth >= SHALLOW_TYPE_DEPTH {
-            self.drop_iter();
-            return;
-        }
-        match self {
-            TypeExpr::Any
-            | TypeExpr::Void
-            | TypeExpr::I64
-            | TypeExpr::F64
-            | TypeExpr::Bool
-            | TypeExpr::Char
-            | TypeExpr::String
-            | TypeExpr::Ref(_) => {}
-            TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
-                if has_type_children(t) {
-                    let mut child = std::mem::replace(&mut **t, TypeExpr::Any);
-                    child.drop_shallow(depth + 1);
-                }
-            }
-            TypeExpr::Result(a, b) => {
-                if has_type_children(a) {
-                    let mut ca = std::mem::replace(&mut **a, TypeExpr::Any);
-                    ca.drop_shallow(depth + 1);
-                }
-                if has_type_children(b) {
-                    let mut cb = std::mem::replace(&mut **b, TypeExpr::Any);
-                    cb.drop_shallow(depth + 1);
-                }
-            }
-            TypeExpr::Tuple(elems) => {
-                for mut t in std::mem::take(elems) {
-                    if has_type_children(&t) {
-                        t.drop_shallow(depth + 1);
-                    }
-                }
-            }
-            TypeExpr::Struct { fields, .. } => {
-                for (_, mut t) in std::mem::take(fields) {
-                    if has_type_children(&t) {
-                        t.drop_shallow(depth + 1);
-                    }
-                }
-            }
-            TypeExpr::Variant { cases, .. } => {
-                for (_, opt) in std::mem::take(cases) {
-                    if let Some(mut t) = opt
-                        && has_type_children(&t)
-                    {
-                        t.drop_shallow(depth + 1);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn drop_iter(&mut self) {
-        let mut next = None;
-        let mut work = Vec::new();
-        take_type_children(self, &mut next, &mut work);
-        loop {
-            let mut cur = match next.take() {
+    let mut next = None;
+    let mut work = Vec::new();
+    take_type_children(ty, &mut next, &mut work);
+    loop {
+        let mut cur = match next.take() {
+            Some(c) => c,
+            None => match work.pop() {
                 Some(c) => c,
-                None => match work.pop() {
-                    Some(c) => c,
-                    None => break,
-                },
-            };
-            take_type_children(&mut cur, &mut next, &mut work);
-        }
+                None => break,
+            },
+        };
+        take_type_children(&mut cur, &mut next, &mut work);
     }
 }
 
@@ -645,13 +580,40 @@ impl fmt::Debug for TypeExpr {
 }
 
 /// `Value` の構造を検証するコンパイル済み Rin スキーマ。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Schema {
     defs: BTreeMap<String, TypeExpr>,
     root: TypeExpr,
+    has_deep: bool,
+}
+
+impl fmt::Debug for Schema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Schema")
+            .field("defs", &self.defs)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
+impl Drop for Schema {
+    fn drop(&mut self) {
+        if self.has_deep {
+            self.drop_deep();
+        }
+    }
 }
 
 impl Schema {
+    #[cold]
+    #[inline(never)]
+    fn drop_deep(&mut self) {
+        drop_deep_type(&mut self.root);
+        for (_, mut ty) in std::mem::take(&mut self.defs) {
+            drop_deep_type(&mut ty);
+        }
+    }
+
     /// 0 個以上の `(defschema Name TypeExpr)` 宣言と末尾のルート `TypeExpr` を解析する。
     pub fn parse(source: &str) -> Result<Self, Error> {
         let tokens = tokenize(source)?;
@@ -659,17 +621,22 @@ impl Schema {
             tokens,
             pos: 0,
             frames: Vec::new(),
+            defs: BTreeMap::new(),
+            max_depth: 0,
         };
-        let mut defs = BTreeMap::new();
         let mut root = None;
 
         while !p.at_eof() {
             if p.peek_is_defschema() {
                 let (name, ty) = p.parse_defschema()?;
-                defs.insert(name, ty);
+                p.defs.insert(name, ty);
             } else {
                 let ty = p.parse_type()?;
                 if !p.at_eof() {
+                    if p.max_depth >= SHALLOW_TYPE_DEPTH {
+                        let mut ty = ty;
+                        drop_deep_type(&mut ty);
+                    }
                     return Err(Error::parse(
                         p.peek().span,
                         "expected end of schema after root type expression",
@@ -686,7 +653,13 @@ impl Schema {
                 "schema must end with a root type expression",
             )
         })?;
-        let schema = Self { defs, root };
+        let defs = std::mem::take(&mut p.defs);
+        let has_deep = p.max_depth >= SHALLOW_TYPE_DEPTH;
+        let schema = Self {
+            defs,
+            root,
+            has_deep,
+        };
         let mut ref_stack = Vec::new();
         schema.validate_refs(&schema.root, &mut ref_stack)?;
         for ty in schema.defs.values() {
@@ -934,6 +907,42 @@ struct SchemaParser {
     tokens: Vec<Token>,
     pos: usize,
     frames: Vec<SchemaFrame>,
+    defs: BTreeMap<String, TypeExpr>,
+    max_depth: usize,
+}
+
+impl Drop for SchemaParser {
+    fn drop(&mut self) {
+        if self.max_depth < SHALLOW_TYPE_DEPTH {
+            return;
+        }
+        for frame in std::mem::take(&mut self.frames) {
+            match frame {
+                SchemaFrame::Unary(_) | SchemaFrame::ResultOk => {}
+                SchemaFrame::ResultErr(mut ty) => drop_deep_type(&mut ty),
+                SchemaFrame::Tuple { elems, .. } => {
+                    for mut t in elems {
+                        drop_deep_type(&mut t);
+                    }
+                }
+                SchemaFrame::StructField { fields, .. } => {
+                    for (_, mut t) in fields {
+                        drop_deep_type(&mut t);
+                    }
+                }
+                SchemaFrame::VariantCase { cases, .. } => {
+                    for (_, opt) in cases {
+                        if let Some(mut t) = opt {
+                            drop_deep_type(&mut t);
+                        }
+                    }
+                }
+            }
+        }
+        for (_, mut ty) in std::mem::take(&mut self.defs) {
+            drop_deep_type(&mut ty);
+        }
+    }
 }
 
 impl SchemaParser {
@@ -1023,6 +1032,10 @@ impl SchemaParser {
             match next {
                 Next::Start => {
                     let (kind, span) = self.take_kind();
+                    let depth = self.frames.len() + 1;
+                    if depth > self.max_depth {
+                        self.max_depth = depth;
+                    }
                     if self.frames.len() >= MAX_SYNTAX_NESTING {
                         return Err(Error::parse(
                             span,
