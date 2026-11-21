@@ -8,6 +8,10 @@ use crate::lexer::{Token, TokenKind, tokenize};
 use crate::parser::MAX_SYNTAX_NESTING;
 use crate::value::Value;
 
+/// スキーマの型式 AST。
+///
+/// 深い入れ子でもスタックを枯渇させないよう `Drop`・`Clone`・`Debug` は深さ 32 以上で反復処理へ切り替える。
+/// そのため、深さ 32 以上の部分木の `{:#?}` 出力は 1 行形式となる。
 pub enum TypeExpr {
     Any,
     Void,
@@ -69,10 +73,75 @@ fn push_type_if_non_leaf(ty: TypeExpr, next: &mut Option<TypeExpr>, work: &mut V
 }
 
 impl Drop for TypeExpr {
+    #[inline]
     fn drop(&mut self) {
+        self.drop_shallow(0);
+    }
+}
+
+impl TypeExpr {
+    fn drop_shallow(&mut self, depth: usize) {
         if !has_type_children(self) {
             return;
         }
+        if depth >= SHALLOW_TYPE_DEPTH {
+            self.drop_iter();
+            return;
+        }
+        match self {
+            TypeExpr::Any
+            | TypeExpr::Void
+            | TypeExpr::I64
+            | TypeExpr::F64
+            | TypeExpr::Bool
+            | TypeExpr::Char
+            | TypeExpr::String
+            | TypeExpr::Ref(_) => {}
+            TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
+                if has_type_children(t) {
+                    let mut child = std::mem::replace(&mut **t, TypeExpr::Any);
+                    child.drop_shallow(depth + 1);
+                }
+            }
+            TypeExpr::Result(a, b) => {
+                if has_type_children(a) {
+                    let mut ca = std::mem::replace(&mut **a, TypeExpr::Any);
+                    ca.drop_shallow(depth + 1);
+                }
+                if has_type_children(b) {
+                    let mut cb = std::mem::replace(&mut **b, TypeExpr::Any);
+                    cb.drop_shallow(depth + 1);
+                }
+            }
+            TypeExpr::Tuple(elems) => {
+                for mut t in std::mem::take(elems) {
+                    if has_type_children(&t) {
+                        t.drop_shallow(depth + 1);
+                    }
+                }
+            }
+            TypeExpr::Struct { fields, .. } => {
+                for (_, mut t) in std::mem::take(fields) {
+                    if has_type_children(&t) {
+                        t.drop_shallow(depth + 1);
+                    }
+                }
+            }
+            TypeExpr::Variant { cases, .. } => {
+                for (_, opt) in std::mem::take(cases) {
+                    if let Some(mut t) = opt
+                        && has_type_children(&t)
+                    {
+                        t.drop_shallow(depth + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn drop_iter(&mut self) {
         let mut next = None;
         let mut work = Vec::new();
         take_type_children(self, &mut next, &mut work);

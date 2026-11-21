@@ -1005,3 +1005,24 @@ fn empty_bodies_and_def_errors_and_frame_sizes() {
         crate::compiler::step_size()
     );
 }
+
+#[test]
+fn parse_scratch_releases_large_buffers_after_eval_and_error() {
+    let mut scratch = crate::parser::ParseScratch::new();
+    let big_src = "(+ 1 2) ".repeat(200);
+    {
+        let mut guard = crate::parser::ParseScratchGuard::new(&mut scratch);
+        let exprs = guard.parse(&big_src).unwrap();
+        assert_eq!(exprs.len(), 200);
+    }
+    let caps1 = scratch.capacities();
+    assert_eq!((caps1.0, caps1.2), (0, 0));
+    assert!(caps1.1 <= 32);
+
+    let bad_deep = "(+ 1 ".repeat(100);
+    {
+        let mut guard = crate::parser::ParseScratchGuard::new(&mut scratch);
+        assert!(guard.parse(&bad_deep).is_err());
+    }
+    assert_eq!(scratch.capacities(), (0, 0, 0));
+}

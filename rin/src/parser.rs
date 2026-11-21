@@ -10,6 +10,8 @@ use crate::lexer::{Token, TokenKind, tokenize_into};
 pub(crate) const MAX_SYNTAX_NESTING: usize = 256;
 
 /// 構文解析器が再利用する作業バッファ。
+///
+/// 小さな入力ではバッファを再利用し、評価終了時（エラー時を含む）に即座に中身と過大領域を解放する。
 pub(crate) struct ParseScratch {
     tokens: Vec<Token>,
     frames: Vec<ParseFrame>,
@@ -23,6 +25,50 @@ impl ParseScratch {
             frames: Vec::new(),
             exprs: Vec::new(),
         }
+    }
+
+    /// 評価の終了時（エラー時を含む）に AST・トークン列を即座に解放し、過大なバッファを縮退させる。
+    pub(crate) fn reset_after_eval(&mut self) {
+        self.exprs.clear();
+        if self.exprs.capacity() > 16 {
+            self.exprs = Vec::new();
+        }
+        self.tokens.clear();
+        if self.tokens.capacity() > 64 {
+            self.tokens = Vec::new();
+        }
+        self.frames.clear();
+        if self.frames.capacity() > 32 {
+            self.frames = Vec::new();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> (usize, usize, usize) {
+        (
+            self.tokens.capacity(),
+            self.frames.capacity(),
+            self.exprs.capacity(),
+        )
+    }
+}
+
+/// 評価スコープ終了時に `ParseScratch` を確実に解放する RAII ガード。
+pub(crate) struct ParseScratchGuard<'a>(&'a mut ParseScratch);
+
+impl<'a> ParseScratchGuard<'a> {
+    pub(crate) fn new(scratch: &'a mut ParseScratch) -> Self {
+        Self(scratch)
+    }
+
+    pub(crate) fn parse<'s>(&'s mut self, input: &str) -> Result<&'s [Expr], Error> {
+        parse_program_with_scratch(input, self.0)
+    }
+}
+
+impl Drop for ParseScratchGuard<'_> {
+    fn drop(&mut self) {
+        self.0.reset_after_eval();
     }
 }
 

@@ -11,7 +11,7 @@ use crate::alloc::{Allocator, HeapAllocator};
 use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
 use crate::compiler::compile_program;
 use crate::error::{Error, ErrorKind, Limits, Span};
-use crate::parser::{ParseScratch, parse_program_with_scratch};
+use crate::parser::{ParseScratch, ParseScratchGuard};
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
@@ -112,8 +112,8 @@ impl<'a> Machine<'a> {
             }
         };
         let chunk = {
-            let exprs =
-                parse_program_with_scratch(source, &mut self.parse_scratch).map_err(with_mod)?;
+            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
+            let exprs = scratch.parse(source).map_err(with_mod)?;
             compile_program(exprs, Some(mod_id), &mut self.syms).map_err(with_mod)?
         };
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
@@ -174,7 +174,8 @@ impl<'a> Machine<'a> {
 
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         let chunk = {
-            let exprs = parse_program_with_scratch(source, &mut self.parse_scratch)?;
+            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
+            let exprs = scratch.parse(source)?;
             compile_program(exprs, None, &mut self.syms)?
         };
         let mut runner = self.runner(None);

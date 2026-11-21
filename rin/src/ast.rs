@@ -14,11 +14,126 @@ impl Expr {
     }
 }
 
+const SHALLOW_EXPR_DEPTH: usize = 32;
+
 impl Drop for Expr {
+    #[inline]
     fn drop(&mut self) {
+        self.drop_shallow(0);
+    }
+}
+
+impl Expr {
+    fn drop_shallow(&mut self, depth: usize) {
         if !has_expr_children(&self.kind) {
             return;
         }
+        if depth >= SHALLOW_EXPR_DEPTH {
+            self.drop_iter();
+            return;
+        }
+        match std::mem::replace(&mut self.kind, ExprKind::None) {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Char(_)
+            | ExprKind::Str(_)
+            | ExprKind::None
+            | ExprKind::Ident(_)
+            | ExprKind::Import { .. }
+            | ExprKind::Export { .. }
+            | ExprKind::Variant { data: None, .. } => {}
+            ExprKind::List(mut items) | ExprKind::Tuple(mut items) => {
+                for item in &mut items {
+                    item.drop_shallow(depth + 1);
+                }
+            }
+            ExprKind::Struct { mut fields, .. } => {
+                for (_, v) in &mut fields {
+                    v.drop_shallow(depth + 1);
+                }
+            }
+            ExprKind::Variant {
+                data: Some(mut d), ..
+            }
+            | ExprKind::Some(mut d)
+            | ExprKind::Ok(mut d)
+            | ExprKind::Err(mut d)
+            | ExprKind::Field { target: mut d, .. }
+            | ExprKind::Def { value: mut d, .. } => d.drop_shallow(depth + 1),
+            ExprKind::Index {
+                mut target,
+                mut index,
+            } => {
+                target.drop_shallow(depth + 1);
+                index.drop_shallow(depth + 1);
+            }
+            ExprKind::With {
+                mut target,
+                mut fields,
+            } => {
+                target.drop_shallow(depth + 1);
+                for (_, v) in &mut fields {
+                    v.drop_shallow(depth + 1);
+                }
+            }
+            ExprKind::Defn { mut body, .. } | ExprKind::Fn { mut body, .. } => {
+                for item in &mut body {
+                    item.drop_shallow(depth + 1);
+                }
+            }
+            ExprKind::Let {
+                mut bindings,
+                mut body,
+            } => {
+                for (_, v) in &mut bindings {
+                    v.drop_shallow(depth + 1);
+                }
+                for item in &mut body {
+                    item.drop_shallow(depth + 1);
+                }
+            }
+            ExprKind::If {
+                mut cond,
+                mut then_branch,
+                mut else_branch,
+            } => {
+                cond.drop_shallow(depth + 1);
+                then_branch.drop_shallow(depth + 1);
+                else_branch.drop_shallow(depth + 1);
+            }
+            ExprKind::When { mut cond, mut body } => {
+                cond.drop_shallow(depth + 1);
+                for item in &mut body {
+                    item.drop_shallow(depth + 1);
+                }
+            }
+            ExprKind::Match {
+                mut scrutinee,
+                mut arms,
+            } => {
+                scrutinee.drop_shallow(depth + 1);
+                for arm in &mut arms {
+                    for item in &mut arm.body {
+                        item.drop_shallow(depth + 1);
+                    }
+                }
+            }
+            ExprKind::Call {
+                mut callee,
+                mut args,
+            } => {
+                callee.drop_shallow(depth + 1);
+                for arg in &mut args {
+                    arg.drop_shallow(depth + 1);
+                }
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn drop_iter(&mut self) {
         let mut next = None;
         let mut work = Vec::new();
         take_expr_children(&mut self.kind, &mut next, &mut work);
