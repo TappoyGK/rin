@@ -1078,19 +1078,19 @@ impl<'a, 'p> Runner<'a, 'p> {
                         return x
                             .checked_add(y)
                             .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime(span, "integer overflow"));
+                            .ok_or_else(|| Error::runtime(span, "i64 overflow"));
                     }
                     BuiltinId::Sub => {
                         return x
                             .checked_sub(y)
                             .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime(span, "integer overflow"));
+                            .ok_or_else(|| Error::runtime(span, "i64 overflow"));
                     }
                     BuiltinId::Mul => {
                         return x
                             .checked_mul(y)
                             .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime(span, "integer overflow"));
+                            .ok_or_else(|| Error::runtime(span, "i64 overflow"));
                     }
                     BuiltinId::Lt => return Ok(RVal::Bool(x < y)),
                     BuiltinId::Le => return Ok(RVal::Bool(x <= y)),

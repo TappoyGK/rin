@@ -677,9 +677,27 @@ mod tests {
 
         let overflow = eval("(+ 9223372036854775807 1)").unwrap_err();
         assert_eq!(overflow.kind, ErrorKind::Runtime);
+        assert_eq!(overflow.message, "i64 overflow");
+
+        let sub_overflow = eval("(- -9223372036854775808 1)").unwrap_err();
+        assert_eq!(sub_overflow.kind, ErrorKind::Runtime);
+        assert_eq!(sub_overflow.message, "i64 overflow");
+
+        let mul_overflow = eval("(* -9223372036854775808 -1)").unwrap_err();
+        assert_eq!(mul_overflow.kind, ErrorKind::Runtime);
+        assert_eq!(mul_overflow.message, "i64 overflow");
+
+        let regular_overflow = eval("(+ 9223372036854775807 1 0)").unwrap_err();
+        assert_eq!(regular_overflow.kind, ErrorKind::Runtime);
+        assert_eq!(regular_overflow.message, overflow.message);
+
+        let fold_overflow = eval("(fold + 0 [9223372036854775807 1])").unwrap_err();
+        assert_eq!(fold_overflow.kind, ErrorKind::Runtime);
+        assert_eq!(fold_overflow.message, overflow.message);
 
         let div_overflow = eval("(/ -9223372036854775808 -1)").unwrap_err();
         assert_eq!(div_overflow.kind, ErrorKind::Runtime);
+        assert_eq!(div_overflow.message, "i64 overflow");
 
         let non_exhaustive = eval("(match 3 (1 10) (2 20))").unwrap_err();
         assert_eq!(non_exhaustive.kind, ErrorKind::Runtime);
