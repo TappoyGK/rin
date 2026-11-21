@@ -4,7 +4,7 @@
 
 主根拠：`[type.numeric]`
 
-期待規則： [op.arith]
+期待規則：`[op.arith]`
 
 **入力：**
 
@@ -22,7 +22,7 @@
 
 主根拠：`[op.arith]`
 
-期待規則： [op.arith]
+期待規則：`[op.arith]`
 
 **入力：**
 
@@ -40,7 +40,7 @@
 
 主根拠：`[expr.index]`
 
-期待規則： [expr.index]
+期待規則：`[expr.index]`
 
 **入力：**
 
@@ -59,7 +59,7 @@
 
 主根拠：`[eval.limits]`
 
-期待規則： [eval.limits]
+期待規則：`[eval.limits]`
 
 **入力：**
 
@@ -78,7 +78,7 @@
 
 主根拠：`[eval.limits]`
 
-期待規則： [eval.limits]
+期待規則：`[eval.limits]`
 
 **入力：**
 
@@ -97,7 +97,7 @@
 
 主根拠：`[eval.limits]`
 
-期待規則： [eval.limits]
+期待規則：`[eval.limits]`
 
 **入力：**
 

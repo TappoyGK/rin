@@ -103,6 +103,34 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
     cases
 }
 
+// 主根拠・期待規則はともにバッククォート付きの `[rule.id]` とする。
+fn parse_rule_reference(text: &str) -> Option<&str> {
+    let id = text.trim().strip_prefix("`[")?.strip_suffix("]`")?;
+    (!id.is_empty() && !id.chars().any(|c| c.is_whitespace() || "[]`".contains(c))).then_some(id)
+}
+
+#[test]
+fn rule_references_require_code_and_brackets() {
+    assert_eq!(parse_rule_reference("`[op.arith]`"), Some("op.arith"));
+    assert_eq!(
+        parse_rule_reference(" `[src.nesting-limit]` "),
+        Some("src.nesting-limit")
+    );
+    for malformed in [
+        "op.arith",
+        "[op.arith]",
+        "`op.arith`",
+        "`[op.arith`",
+        "`op.arith]`",
+        "`[]`",
+        "`[[op.arith]]`",
+        "`[op. arith]`",
+        "`[op.arith]` trailing",
+    ] {
+        assert_eq!(parse_rule_reference(malformed), None, "{malformed}");
+    }
+}
+
 fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     let mut rule_id = None;
     let mut error_rule = None;
@@ -113,10 +141,13 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     while idx < lines.len() {
         let trimmed = lines[idx].trim();
         if let Some(rest) = trimmed.strip_prefix("主根拠：") {
-            let cleaned = rest.trim().trim_end_matches('。').trim_matches('`');
-            rule_id = Some(cleaned.to_string());
+            let rule = parse_rule_reference(rest)
+                .unwrap_or_else(|| panic!("{file_label} ({id}): 主根拠 must use `[rule.id]`"));
+            rule_id = Some(format!("[{rule}]"));
         } else if let Some(rest) = trimmed.strip_prefix("期待規則：") {
-            error_rule = Some(rest.trim().trim_matches(['[', ']']).to_string());
+            let rule = parse_rule_reference(rest)
+                .unwrap_or_else(|| panic!("{file_label} ({id}): 期待規則 must use `[rule.id]`"));
+            error_rule = Some(rule.to_string());
         } else if trimmed == "```rin" {
             idx += 1;
             let mut buf = Vec::new();

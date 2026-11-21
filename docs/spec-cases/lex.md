@@ -55,7 +55,7 @@
 
 主根拠：`[src.string]`
 
-期待規則： [src.string]
+期待規則：`[src.string]`
 
 **入力：**
 
