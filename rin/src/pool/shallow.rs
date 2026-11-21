@@ -1,12 +1,8 @@
 //! 固定深度までの直接変換。上限以降は反復経路だけで処理する。
 use super::*;
 impl Pool<'_> {
+    #[inline(always)]
     pub(super) fn export_shallow(&self, val: RVal, depth: usize) -> Value {
-        if depth == 32
-            && matches!(val, RVal::Obj(id) if !matches!(self.get(id), Obj::Str(_) | Obj::Closure { .. } | Obj::Module { .. }))
-        {
-            return self.export_deep(val);
-        }
         match val {
             RVal::Void => Value::Void,
             RVal::Int(n) => Value::Int(n),
@@ -16,65 +12,78 @@ impl Pool<'_> {
             RVal::None => Value::None,
             RVal::EmptyList => Value::empty_list(),
             RVal::Builtin(b) => Value::Builtin(b.name()),
-            RVal::Obj(id) => match self.get(id) {
-                Obj::Cons { .. } => {
-                    let mut items = Vec::with_capacity(self.list_len(val));
-                    let mut cur = val;
-                    while let RVal::Obj(cid) = cur {
-                        let Obj::Cons { head, tail, .. } = self.get(cid) else {
-                            break;
-                        };
-                        items.push(self.export_shallow(*head, depth + 1));
-                        cur = *tail;
-                    }
-                    Value::list(items)
-                }
-                Obj::Str(s) => Value::str(s.as_ref()),
-                Obj::Array(xs) => Value::array(
-                    xs.iter()
-                        .map(|v| self.export_shallow(*v, depth + 1))
-                        .collect(),
-                ),
-                Obj::Tuple(xs) => Value::tuple(
-                    xs.iter()
-                        .map(|v| self.export_shallow(*v, depth + 1))
-                        .collect(),
-                ),
-                Obj::Struct { name, fields } => {
-                    // 少数フィールドでは中間 Vec とソートを省く。
-                    // 大きな map は標準の一括構築で木の逐次更新を避ける。
-                    let map = if fields.len() <= 4 {
-                        let mut map = BTreeMap::new();
-                        for (k, v) in fields {
-                            map.insert(k.to_string(), self.export_shallow(*v, depth + 1));
-                        }
-                        map
-                    } else {
-                        fields
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), self.export_shallow(*v, depth + 1)))
-                            .collect()
+            RVal::Obj(id) => self.export_object_shallow(id, depth),
+        }
+    }
+
+    fn export_object_shallow(&self, id: ObjId, depth: usize) -> Value {
+        let val = RVal::Obj(id);
+        if depth == 32
+            && !matches!(
+                self.get(id),
+                Obj::Str(_) | Obj::Closure { .. } | Obj::Module { .. }
+            )
+        {
+            return self.export_deep(val);
+        }
+        match self.get(id) {
+            Obj::Cons { .. } => {
+                let mut items = Vec::with_capacity(self.list_len(val));
+                let mut cur = val;
+                while let RVal::Obj(cid) = cur {
+                    let Obj::Cons { head, tail, .. } = self.get(cid) else {
+                        break;
                     };
-                    Value::structure(name.as_ref(), map)
+                    items.push(self.export_shallow(*head, depth + 1));
+                    cur = *tail;
                 }
-                Obj::Variant {
-                    type_name,
-                    variant,
-                    data,
-                } => Value::variant(
-                    type_name.as_ref(),
-                    variant.as_ref(),
-                    data.map(|d| self.export_shallow(d, depth + 1)),
-                ),
-                Obj::Some(v) => Value::some(self.export_shallow(*v, depth + 1)),
-                Obj::Ok(v) => Value::ok(self.export_shallow(*v, depth + 1)),
-                Obj::Err(v) => Value::err(self.export_shallow(*v, depth + 1)),
-                Obj::Closure { proto, .. } => Value::Builtin(match proto.name.as_deref() {
-                    Some(_) => "<defn>",
-                    None => "<fn>",
-                }),
-                Obj::Module { .. } => Value::Builtin("<module>"),
-            },
+                Value::list(items)
+            }
+            Obj::Str(s) => Value::str(s.as_ref()),
+            Obj::Array(xs) => Value::array(
+                xs.iter()
+                    .map(|v| self.export_shallow(*v, depth + 1))
+                    .collect(),
+            ),
+            Obj::Tuple(xs) => Value::tuple(
+                xs.iter()
+                    .map(|v| self.export_shallow(*v, depth + 1))
+                    .collect(),
+            ),
+            Obj::Struct { name, fields } => {
+                // 少数フィールドでは中間 Vec とソートを省く。
+                // 大きな map は標準の一括構築で木の逐次更新を避ける。
+                let map = if fields.len() <= 4 {
+                    let mut map = BTreeMap::new();
+                    for (k, v) in fields {
+                        map.insert(k.to_string(), self.export_shallow(*v, depth + 1));
+                    }
+                    map
+                } else {
+                    fields
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), self.export_shallow(*v, depth + 1)))
+                        .collect()
+                };
+                Value::structure(name.as_ref(), map)
+            }
+            Obj::Variant {
+                type_name,
+                variant,
+                data,
+            } => Value::variant(
+                type_name.as_ref(),
+                variant.as_ref(),
+                data.map(|d| self.export_shallow(d, depth + 1)),
+            ),
+            Obj::Some(v) => Value::some(self.export_shallow(*v, depth + 1)),
+            Obj::Ok(v) => Value::ok(self.export_shallow(*v, depth + 1)),
+            Obj::Err(v) => Value::err(self.export_shallow(*v, depth + 1)),
+            Obj::Closure { proto, .. } => Value::Builtin(match proto.name.as_deref() {
+                Some(_) => "<defn>",
+                None => "<fn>",
+            }),
+            Obj::Module { .. } => Value::Builtin("<module>"),
         }
     }
 
