@@ -823,7 +823,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(rendered.contains("in inner (at 2:22)"));
     assert!(rendered.contains("in outer (at 3:1)"));
 
-    // 1. Tail-call preserves entry function name & span and records elided count
+    // 1. 末尾呼び出し後も入口の関数名・位置を残し、省略数と遷移先を記録する。
     let tail_src = "\
 (defn g (x) (/ x 0))
 (defn f (x) (g x))
@@ -839,7 +839,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             .contains("in g (tail-called from f at 3:1) [tail calls elided: 1]")
     );
 
-    // 2 & 3. Module names, tail-call across modules, and host entry frames
+    // 2 & 3. モジュール名、モジュールをまたぐ末尾呼び出し、ホスト入口フレーム。
     let mut alloc = HeapAllocator;
     let mut m = Machine::new(Limits::default(), &mut alloc);
     m.load_module("ma", "(defn f (x) (/ x 0))").unwrap();
@@ -857,7 +857,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(mod_bt.contains("in mb.g (called from host)"));
     assert!(!mod_bt.contains("0:0"));
 
-    // Cross-module tail call: mc.f tail-calls ma.f
+    // モジュール間の末尾呼び出し: mc.f が ma.f を末尾呼び出しする。
     m.load_module(
         "mc",
         "(import ma)\n(defn f (x) (ma.f x))\n(defn g (x) (+ 1 (f x)))",
@@ -873,7 +873,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     );
     assert!(tail_mod_rendered.contains("in mc.g (called from host)"));
 
-    // Module top-level call failure records caller_module on outermost frame
+    // モジュールのトップレベル評価で失敗した場合、最外フレームに caller_module を記録する。
     let top_mod_err = m
         .load_module("mc2", "(import ma)\n(def z (+ 1 (ma.f 1)))")
         .unwrap_err();
@@ -884,7 +884,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     );
     assert!(top_mod_err.to_string().contains("in ma.f (at mc2 2:13)"));
 
-    // Innermost top-level lambda inside module call must NOT inherit outer module in header
+    // モジュール関数から呼ばれたトップレベル由来ラムダは、見出しに外側のモジュール名を付けない。
     m.load_module("hof", "(defn apply_it (f) (+ 1 (f 1)))")
         .unwrap();
     let lambda_err = m
@@ -894,7 +894,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(lambda_err.to_string().starts_with("2:23: division by zero"));
     assert!(lambda_err.to_string().contains("in hof.apply_it (at 2:1)"));
 
-    // load_module lex/parse errors carry the module name
+    // load_module の字句・構文エラーにもモジュール名を付与する。
     let lex_err = m
         .load_module("bad_lex", "(defn f () \"unterminated")
         .unwrap_err();
@@ -909,7 +909,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert_eq!(parse_err.module(), Some("bad_parse"));
     assert!(parse_err.to_string().starts_with("bad_parse 2:3:"));
 
-    // 4. Consecutive frame collapsing on TooDeep & middle omission on deep mutual recursion
+    // 4. TooDeep での連続同一フレーム圧縮と、深い相互再帰での中間フレーム省略。
     let deep_limits = Limits {
         steps: 100_000,
         depth: 66,
@@ -931,7 +931,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
     assert!(mutual_err.omitted_frames() > 0);
     assert!(mutual_err.to_string().contains("frames omitted"));
 
-    // 5. Higher-order builtin attribution (e.g. fold / map)
+    // 5. 組み込みの高階関数（fold 等）からの呼び出し元の記録。
     let fold_err = eval("(fold (fn (a x) (/ a x)) 10 [1 0])").unwrap_err();
     assert_eq!(fold_err.backtrace().len(), 1);
     assert_eq!(fold_err.backtrace()[0].via_builtin.as_deref(), Some("fold"));
@@ -941,7 +941,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             .contains("in <lambda> (called by fold at 1:1)")
     );
 
-    // 6. C FFI rin_last_backtrace
+    // 6. C FFI の rin_last_backtrace と早期リターン時の履歴クリア。
     unsafe {
         let cm = crate::ffi::rin_new(
             crate::ffi::rin_limits_default(),
@@ -961,7 +961,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
         assert!(bt_str.contains("in outer (at 3:1)"));
         crate::ffi::rin_res_free(&mut res);
 
-        // Early error returns clear previous backtrace
+        // 早期リターンによるエラーでも前回の呼び出し履歴は消去する。
         let bad_utf8 = [0xffu8, 0x00];
         let mut bad_res = crate::ffi::rin_eval(cm, bad_utf8.as_ptr().cast());
         assert!(!bad_res.ok);

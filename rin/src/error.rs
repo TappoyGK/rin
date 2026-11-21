@@ -47,7 +47,7 @@ pub enum ErrorKind {
     TooMuchMemory,
 }
 
-/// A single call frame recorded when a runtime error unwinds.
+/// 実行時エラーまたは資源上限超過の展開時に記録する呼び出しフレーム。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackFrame {
     pub module: Option<String>,
@@ -179,7 +179,7 @@ impl Error {
         Self::new(ErrorKind::Runtime, at, message)
     }
 
-    /// Returns the module name where the error occurred, if inside a module.
+    /// エラーが発生したモジュール名を返す（モジュール外なら `None`）。
     pub fn module(&self) -> Option<&str> {
         self.module.as_deref()
     }
@@ -191,17 +191,17 @@ impl Error {
         }
     }
 
-    /// Returns the call frames from innermost callee to outermost caller.
+    /// 最も内側の呼び出し先から外側の呼び出し元へ向かう順にフレーム一覧を返す。
     pub fn backtrace(&self) -> &[StackFrame] {
         &self.backtrace
     }
 
-    /// Returns the number of middle call frames omitted when the stack exceeds the display cap.
+    /// 保持上限を超えた場合に中央から省略されたフレーム数を返す。
     pub fn omitted_frames(&self) -> usize {
         self.omitted_frames
     }
 
-    /// Formats the call backtrace lines without the leading error header.
+    /// 先頭の見出し行を除いた呼び出し履歴を整形して返す。
     pub fn format_backtrace(&self) -> String {
         let mut out = String::new();
         for (i, frame) in self.backtrace.iter().enumerate() {

@@ -409,17 +409,17 @@ pub unsafe extern "C" fn rin_call_in(
     }
 }
 
-/// Returns the formatted call backtrace for the most recent error on `machine`,
-/// or NULL if there is no backtrace. Valid until the next evaluation/call or `rin_free`.
+/// `machine` で直近に発生したエラーの整形済み呼び出し履歴を返す。履歴がない場合は `NULL`。
+/// 返されたポインタは次の評価・呼び出しまたは `rin_free` まで有効。
 ///
 /// # Safety
-/// `machine` must be null or a valid pointer returned by `rin_new`.
+/// `machine` は `NULL` または `rin_new` が返した有効なポインタでなければならない。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_last_backtrace(machine: *const RinMachine) -> *const c_char {
     if machine.is_null() {
         return std::ptr::null();
     }
-    // SAFETY: Caller guarantees valid pointer.
+    // SAFETY: 呼び出し側が有効なポインタを保証する。
     let m = unsafe { &*machine };
     match &m.last_backtrace {
         Some(cs) => cs.as_ptr(),
