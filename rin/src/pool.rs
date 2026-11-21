@@ -9,6 +9,7 @@ use crate::error::{Error, ErrorKind, Span};
 use crate::value::Value;
 
 mod convert;
+mod shallow;
 
 const CHUNK_SLOTS: usize = 256;
 

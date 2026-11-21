@@ -282,6 +282,10 @@ fn deep_values_on_small_stacks() {
 
 #[test]
 fn formatting_and_schema_error_order() {
+    assert_eq!(
+        format!("{:#?}", Value::Some(Rc::new(Value::Int(7)))),
+        "Some(\n    Int(\n        7,\n    ),\n)"
+    );
     let cyclic = Schema::parse("(defschema A B) (defschema B A) A").unwrap();
     assert!(
         cyclic
@@ -312,4 +316,37 @@ fn formatting_and_schema_error_order() {
         .check(&v)
         .unwrap_err();
     assert_eq!(err.message, "$: unexpected field 'b' on struct S");
+}
+
+#[test]
+fn shallow_and_iterative_paths_agree() {
+    let mut alloc = HeapAllocator;
+    let mut m = Machine::new(Limits::default(), &mut alloc);
+    for depth in [7, 8, 9, 15, 16, 17, 32] {
+        for shape in 0..8 {
+            let value = nested(shape, depth, Value::Int(7));
+            let other = nested(shape, depth, Value::Int(7));
+            assert!(value == other);
+            assert!(value != nested(shape, depth, Value::Int(8)));
+            m.bind("x", &value).unwrap();
+            assert!(m.eval("x").unwrap() == value);
+            assert_eq!(value.to_string(), other.to_string());
+            assert_eq!(format!("{value:?}"), format!("{other:?}"));
+            let nan = nested(shape, depth, Value::Float(f64::NAN));
+            assert!(nan != nan.clone(), "shared NaN at depth {depth}");
+
+            let before = m.live_bytes();
+            let bad = nested(
+                shape,
+                depth,
+                Value::array(vec![
+                    Value::str("allocated sibling"),
+                    Value::Builtin("invalid"),
+                ]),
+            );
+            assert_eq!(m.bind("bad", &bad).unwrap_err().kind, ErrorKind::Runtime);
+            assert_eq!(m.live_bytes(), before, "failed import at depth {depth}");
+            assert!(m.eval("42").unwrap() == Value::Int(42));
+        }
+    }
 }

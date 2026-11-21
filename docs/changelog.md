@@ -2,6 +2,12 @@
 
 利用者に関わる変更をバージョンごとに記載する。
 
+## v0.1.1（未リリース）
+
+- 深い値の import / export、比較、表示、スキーマ検証、解放でネイティブスタックが溢れる問題を修正した。import の途中失敗時には生成途中の値を回収する（[#31](https://github.com/TappoyGK/rin/issues/31)・[PR #37](https://github.com/TappoyGK/rin/pull/37)）。
+- `Value` / `ListNode` の `{:#?}` は浅い部分を字下げし、書式化の深さ上限に達した部分木をコンパクトに出力する。
+- スキーマ検証で、値を消費しない参照循環を検出してエラーを返すようにした。
+
 ## v0.1.0
 
 - 純粋関数型 Lisp 系言語 Rin の字句解析・構文解析・評価器を実装し、`i64`・`f64`・`bool`・`char`・`string`・`tuple`・`struct`・`variant`・`option`・`result` に対応した。

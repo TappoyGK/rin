@@ -22,24 +22,31 @@ unsafe impl GlobalAlloc for Counting {
 }
 #[global_allocator]
 static GLOBAL: Counting = Counting;
-fn measure(name: &str, mut f: impl FnMut()) {
+fn measure(name: &str, f: impl FnMut()) {
+    measure_n(name, 20000, f);
+}
+fn measure_n(name: &str, n: usize, mut f: impl FnMut()) {
     for _ in 0..100 {
         f();
     }
     let before = ALLOCS.load(Ordering::Relaxed);
     let start = Instant::now();
-    for _ in 0..20_000 {
+    for _ in 0..n {
         f();
     }
     let elapsed = start.elapsed();
     let count = ALLOCS.load(Ordering::Relaxed) - before;
     println!(
-        "{name}: {:.0} ns/op, {:.2} allocs/op",
-        elapsed.as_nanos() as f64 / 20_000.0,
-        count as f64 / 20_000.0
+        "{name}: {:.2} ns/op, {:.2} allocs/op",
+        elapsed.as_nanos() as f64 / n as f64,
+        count as f64 / n as f64
     );
 }
 fn main() {
+    if std::env::args().any(|arg| arg == "--extended") {
+        extended();
+        return;
+    }
     let mut alloc = HeapAllocator;
     let mut m = Machine::new(Limits::default(), &mut alloc);
     let value = Value::list((0..8).map(Value::Int).collect());
@@ -65,5 +72,97 @@ fn main() {
     });
     measure("create/drop list8", || {
         black_box(Value::list((0..8).map(Value::Int).collect()));
+    });
+}
+
+fn make_case(case: &str) -> Value {
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+    fn tree(depth: usize, width: usize) -> Value {
+        if depth == 0 {
+            return Value::Int(1);
+        }
+        if depth.is_multiple_of(2) {
+            Value::structure(
+                "Node",
+                (0..width)
+                    .map(|i| (format!("f{i}"), tree(depth - 1, width)))
+                    .collect(),
+            )
+        } else {
+            Value::list((0..width).map(|_| tree(depth - 1, width)).collect())
+        }
+    }
+    match case {
+        "list8" => Value::list((0..8).map(Value::Int).collect()),
+        "list1000" => Value::list((0..1000).map(Value::Int).collect()),
+        "arr1000" => Value::array(
+            (0..1000)
+                .map(|i| Value::tuple(vec![Value::Int(i), Value::Int(i + 1)]))
+                .collect(),
+        ),
+        "tree4x4" => tree(4, 4),
+        "tree8x2" => tree(8, 2),
+        "struct8" => Value::structure(
+            "S",
+            BTreeMap::from([
+                ("a".into(), Value::Int(1)),
+                ("b".into(), Value::Float(2.0)),
+                ("c".into(), Value::str("abc")),
+                ("d".into(), Value::Bool(true)),
+                ("e".into(), Value::list(vec![Value::Int(1), Value::Int(2)])),
+                ("f".into(), Value::Some(Rc::new(Value::Int(3)))),
+                ("g".into(), Value::None),
+                ("h".into(), Value::str("xyz")),
+            ]),
+        ),
+        _ => unreachable!(),
+    }
+}
+fn extended() {
+    for case in [
+        "list8", "list1000", "struct8", "tree4x4", "tree8x2", "arr1000",
+    ] {
+        let n = if matches!(case, "list8" | "struct8") {
+            20_000
+        } else {
+            2_000
+        };
+        let v = make_case(case);
+        let other = make_case(case);
+        let mut alloc = HeapAllocator;
+        let mut m = Machine::new(Limits::default(), &mut alloc);
+        m.eval("(defn id (x) x)").unwrap();
+        m.bind("x", &v).unwrap();
+        measure_n(&format!("{case} bind"), n, || {
+            m.bind("x", black_box(&v)).unwrap();
+        });
+        measure_n(&format!("{case} export"), n, || {
+            black_box(m.eval("x").unwrap());
+        });
+        measure_n(&format!("{case} call"), n, || {
+            black_box(m.call("id", std::slice::from_ref(&v)).unwrap());
+        });
+        measure_n(&format!("{case} eq"), n, || {
+            black_box(black_box(&v) == black_box(&other));
+        });
+        measure_n(&format!("{case} display"), n, || {
+            black_box(v.to_string());
+        });
+        measure_n(&format!("{case} debug"), n, || {
+            black_box(format!("{v:?}"));
+        });
+        measure_n(&format!("{case} create/drop"), n, || {
+            black_box(make_case(case));
+        });
+        measure_n(&format!("{case} shared clone/drop"), 200_000, || {
+            black_box(black_box(&v).clone());
+        });
+    }
+    let mut alloc = HeapAllocator;
+    let mut m = Machine::new(Limits::default(), &mut alloc);
+    m.eval("(defn dedup () (unique (range 0 1000)))").unwrap();
+    measure_n("VM unique1000", 50, || {
+        black_box(m.call("dedup", &[]).unwrap());
     });
 }

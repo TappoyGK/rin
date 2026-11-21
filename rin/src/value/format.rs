@@ -1,4 +1,4 @@
-//! 表示用の継続をヒープに置き、子の Display / Debug を再帰的に呼ばない。
+//! 浅い部分は直接表示し、固定深度以降の継続は明示的スタックに置く。
 use super::*;
 
 enum Task<'a> {
@@ -183,16 +183,171 @@ fn format(root: Task<'_>, f: &mut fmt::Formatter<'_>, debug: bool) -> fmt::Resul
 }
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format(Task::Value(self), f, false)
+        display(self, f, 0)
     }
 }
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format(Task::Value(self), f, true)
+        DebugAt(self, 0).fmt(f)
     }
 }
 impl fmt::Debug for ListNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format(Task::Node(self), f, true)
+        DebugNodeAt(self, 0).fmt(f)
+    }
+}
+
+struct DisplayAt<'a>(&'a Value, usize);
+impl fmt::Display for DisplayAt<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        display(self.0, f, self.1)
+    }
+}
+fn display(value: &Value, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
+    if depth == 16 {
+        return format(Task::Value(value), f, false);
+    }
+    match value {
+        Value::Void => write!(f, "void"),
+        Value::Int(n) => write!(f, "{n}"),
+        Value::Float(x) => write!(f, "{x}"),
+        Value::Bool(b) => write!(f, "{b}"),
+        Value::Char(c) => write!(f, "{c:?}"),
+        Value::Str(s) => write!(f, "{s:?}"),
+        Value::List(xs) => {
+            write!(f, "[")?;
+            for (i, x) in xs.iter().enumerate() {
+                let x = DisplayAt(x, depth + 1);
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{x}")?;
+            }
+            write!(f, "]")
+        }
+        Value::Array(xs) => {
+            write!(f, "#[")?;
+            for (i, x) in xs.iter().enumerate() {
+                let x = DisplayAt(x, depth + 1);
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{x}")?;
+            }
+            write!(f, "]")
+        }
+        Value::Tuple(xs) => {
+            write!(f, "(")?;
+            for (i, x) in xs.iter().enumerate() {
+                let x = DisplayAt(x, depth + 1);
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{x}")?;
+            }
+            write!(f, ")")
+        }
+        Value::Struct { name, fields } => {
+            write!(f, "{name} {{ ")?;
+            for (i, (k, v)) in fields.iter().enumerate() {
+                let v = DisplayAt(v, depth + 1);
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{k}: {v}")?;
+            }
+            write!(f, " }}")
+        }
+        Value::Variant {
+            type_name,
+            variant,
+            data,
+        } => {
+            write!(f, "{type_name}.{variant}")?;
+            if let Some(d) = data {
+                let d = DisplayAt(d, depth + 1);
+                write!(f, "({d})")?;
+            }
+            Ok(())
+        }
+        Value::None => write!(f, "none"),
+        Value::Some(v) => write!(f, "some({})", DisplayAt(v, depth + 1)),
+        Value::Ok(v) => write!(f, "ok({})", DisplayAt(v, depth + 1)),
+        Value::Err(v) => write!(f, "err({})", DisplayAt(v, depth + 1)),
+        Value::Builtin(name) => write!(f, "<builtin {name}>"),
+    }
+}
+
+struct DebugAt<'a>(&'a Value, usize);
+struct DebugNodeAt<'a>(&'a ListNode, usize);
+struct DebugItems<'a>(&'a [Value], usize);
+struct DebugFields<'a>(&'a BTreeMap<String, Value>, usize);
+impl fmt::Debug for DebugItems<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|v| DebugAt(v, self.1)))
+            .finish()
+    }
+}
+impl fmt::Debug for DebugFields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().map(|(k, v)| (k, DebugAt(v, self.1))))
+            .finish()
+    }
+}
+impl fmt::Debug for DebugNodeAt<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.1 == 16 {
+            return format(Task::Node(self.0), f, true);
+        }
+        match self.0 {
+            ListNode::Nil => f.write_str("Nil"),
+            ListNode::Cons { head, tail, len } => f
+                .debug_struct("Cons")
+                .field("head", &DebugAt(head, self.1 + 1))
+                .field("tail", &DebugNodeAt(tail, self.1 + 1))
+                .field("len", len)
+                .finish(),
+        }
+    }
+}
+impl fmt::Debug for DebugAt<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.1 == 16 {
+            return format(Task::Value(self.0), f, true);
+        }
+        let d = self.1 + 1;
+        match self.0 {
+            Value::Void => f.write_str("Void"),
+            Value::None => f.write_str("None"),
+            Value::Int(v) => f.debug_tuple("Int").field(v).finish(),
+            Value::Float(v) => f.debug_tuple("Float").field(v).finish(),
+            Value::Bool(v) => f.debug_tuple("Bool").field(v).finish(),
+            Value::Char(v) => f.debug_tuple("Char").field(v).finish(),
+            Value::Str(v) => f.debug_tuple("Str").field(v).finish(),
+            Value::Builtin(v) => f.debug_tuple("Builtin").field(v).finish(),
+            Value::Some(v) => f.debug_tuple("Some").field(&DebugAt(v, d)).finish(),
+            Value::Ok(v) => f.debug_tuple("Ok").field(&DebugAt(v, d)).finish(),
+            Value::Err(v) => f.debug_tuple("Err").field(&DebugAt(v, d)).finish(),
+            Value::List(v) => f.debug_tuple("List").field(&DebugNodeAt(v, d)).finish(),
+            Value::Array(v) => f.debug_tuple("Array").field(&DebugItems(v, d)).finish(),
+            Value::Tuple(v) => f.debug_tuple("Tuple").field(&DebugItems(v, d)).finish(),
+            Value::Struct { name, fields } => f
+                .debug_struct("Struct")
+                .field("name", name)
+                .field("fields", &DebugFields(fields, d))
+                .finish(),
+            Value::Variant {
+                type_name,
+                variant,
+                data,
+            } => f
+                .debug_struct("Variant")
+                .field("type_name", type_name)
+                .field("variant", variant)
+                .field("data", &data.as_ref().map(|v| DebugAt(v, d)))
+                .finish(),
+        }
     }
 }

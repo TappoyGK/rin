@@ -20,11 +20,11 @@ impl Pool<'_> {
             Value::None => return Ok(RVal::None),
             _ => {}
         }
-        self.import_deep(value, span)
+        self.import_shallow(value, span, 0)
     }
 
     #[inline(never)]
-    fn import_deep(&mut self, value: &Value, span: Span) -> Result<RVal, Error> {
+    pub(super) fn import_deep(&mut self, value: &Value, span: Span) -> Result<RVal, Error> {
         let mut tasks = crate::work::Work::<_, 16>::with(ImportTask::Visit(value));
         let mut values = Vec::new();
         let result = (|| {
@@ -148,11 +148,11 @@ impl Pool<'_> {
             RVal::Builtin(b) => return Value::Builtin(b.name()),
             _ => {}
         }
-        self.export_deep(value)
+        self.export_shallow(value, 0)
     }
 
     #[inline(never)]
-    fn export_deep(&self, value: RVal) -> Value {
+    pub(super) fn export_deep(&self, value: RVal) -> Value {
         enum Task {
             Visit(RVal),
             Finish(ObjId, usize),

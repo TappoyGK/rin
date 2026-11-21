@@ -246,76 +246,152 @@ impl Value {
 }
 
 impl PartialEq for Value {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
-        let mut work = crate::work::Work::<_, 8>::with((self, other));
-        while let Some((a, b)) = work.pop() {
-            match (a, b) {
-                (Value::Void, Value::Void) | (Value::None, Value::None) => {}
-                (Value::Int(a), Value::Int(b)) if a == b => {}
-                (Value::Float(a), Value::Float(b)) if a == b => {}
-                (Value::Bool(a), Value::Bool(b)) if a == b => {}
-                (Value::Char(a), Value::Char(b)) if a == b => {}
-                (Value::Str(a), Value::Str(b)) if a == b => {}
-                (Value::Builtin(a), Value::Builtin(b)) if a == b => {}
-                (Value::List(a), Value::List(b)) => {
-                    if a.len() != b.len() {
-                        return false;
-                    }
-                    work.extend(a.iter().zip(b.iter()));
-                }
-                (Value::Array(a), Value::Array(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-                    if a.len() != b.len() {
-                        return false;
-                    }
-                    work.extend(a.iter().zip(b.iter()));
-                }
-                (
-                    Value::Struct {
-                        name: an,
-                        fields: a,
-                    },
-                    Value::Struct {
-                        name: bn,
-                        fields: b,
-                    },
-                ) => {
-                    if an != bn || a.len() != b.len() {
-                        return false;
-                    }
-                    for ((ak, av), (bk, bv)) in a.iter().zip(b.iter()) {
-                        if ak != bk {
-                            return false;
-                        }
-                        work.push((av, bv));
-                    }
-                }
-                (Value::Some(a), Value::Some(b))
-                | (Value::Ok(a), Value::Ok(b))
-                | (Value::Err(a), Value::Err(b)) => work.push((a, b)),
-                (
-                    Value::Variant {
-                        type_name: at,
-                        variant: an,
-                        data: a,
-                    },
-                    Value::Variant {
-                        type_name: bt,
-                        variant: bn,
-                        data: b,
-                    },
-                ) => {
-                    if at != bt || an != bn {
-                        return false;
-                    }
-                    match (a, b) {
-                        (Some(a), Some(b)) => work.push((a, b)),
-                        (None, None) => {}
-                        _ => return false,
-                    }
-                }
-                _ => return false,
-            }
-        }
-        true
+        equal(self, other, 0)
     }
+}
+
+#[inline(always)]
+fn equal(a: &Value, b: &Value, depth: usize) -> bool {
+    match (a, b) {
+        (Value::Void, Value::Void) | (Value::None, Value::None) => true,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Builtin(a), Value::Builtin(b)) => a == b,
+        _ => equal_nested(a, b, depth),
+    }
+}
+
+#[inline]
+fn equal_nested(a: &Value, b: &Value, depth: usize) -> bool {
+    if depth == 16 {
+        return equal_deep(a, b);
+    }
+    match (a, b) {
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b, depth + 1))
+        }
+        (Value::Array(a), Value::Array(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b, depth + 1))
+        }
+        (
+            Value::Struct {
+                name: an,
+                fields: a,
+            },
+            Value::Struct {
+                name: bn,
+                fields: b,
+            },
+        ) => {
+            an == bn
+                && a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((ak, av), (bk, bv))| ak == bk && equal(av, bv, depth + 1))
+        }
+        (Value::Some(a), Value::Some(b))
+        | (Value::Ok(a), Value::Ok(b))
+        | (Value::Err(a), Value::Err(b)) => equal(a, b, depth + 1),
+        (
+            Value::Variant {
+                type_name: at,
+                variant: an,
+                data: a,
+            },
+            Value::Variant {
+                type_name: bt,
+                variant: bn,
+                data: b,
+            },
+        ) => {
+            at == bt
+                && an == bn
+                && match (a, b) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => equal(a, b, depth + 1),
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn equal_deep(a: &Value, b: &Value) -> bool {
+    let mut work = crate::work::Work::<_, 8>::with((a, b));
+    while let Some((a, b)) = work.pop() {
+        match (a, b) {
+            (Value::Void, Value::Void) | (Value::None, Value::None) => {}
+            (Value::Int(a), Value::Int(b)) if a == b => {}
+            (Value::Float(a), Value::Float(b)) if a == b => {}
+            (Value::Bool(a), Value::Bool(b)) if a == b => {}
+            (Value::Char(a), Value::Char(b)) if a == b => {}
+            (Value::Str(a), Value::Str(b)) if a == b => {}
+            (Value::Builtin(a), Value::Builtin(b)) if a == b => {}
+            (Value::List(a), Value::List(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                work.extend(a.iter().zip(b.iter()));
+            }
+            (Value::Array(a), Value::Array(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                work.extend(a.iter().zip(b.iter()));
+            }
+            (
+                Value::Struct {
+                    name: an,
+                    fields: a,
+                },
+                Value::Struct {
+                    name: bn,
+                    fields: b,
+                },
+            ) => {
+                if an != bn || a.len() != b.len() {
+                    return false;
+                }
+                for ((ak, av), (bk, bv)) in a.iter().zip(b.iter()) {
+                    if ak != bk {
+                        return false;
+                    }
+                    work.push((av, bv));
+                }
+            }
+            (Value::Some(a), Value::Some(b))
+            | (Value::Ok(a), Value::Ok(b))
+            | (Value::Err(a), Value::Err(b)) => work.push((a, b)),
+            (
+                Value::Variant {
+                    type_name: at,
+                    variant: an,
+                    data: a,
+                },
+                Value::Variant {
+                    type_name: bt,
+                    variant: bn,
+                    data: b,
+                },
+            ) => {
+                if at != bt || an != bn {
+                    return false;
+                }
+                match (a, b) {
+                    (Some(a), Some(b)) => work.push((a, b)),
+                    (None, None) => {}
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }

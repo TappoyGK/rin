@@ -166,7 +166,24 @@ impl Runner<'_, '_> {
         }
     }
 
+    #[inline]
     pub(super) fn values_equal(&self, a: RVal, b: RVal) -> bool {
+        match (a, b) {
+            (RVal::Void, RVal::Void)
+            | (RVal::None, RVal::None)
+            | (RVal::EmptyList, RVal::EmptyList) => true,
+            (RVal::Int(a), RVal::Int(b)) => a == b,
+            (RVal::Float(a), RVal::Float(b)) => a == b,
+            (RVal::Bool(a), RVal::Bool(b)) => a == b,
+            (RVal::Char(a), RVal::Char(b)) => a == b,
+            (RVal::Builtin(a), RVal::Builtin(b)) => a == b,
+            (RVal::Obj(aid), RVal::Obj(bid)) => aid == bid || self.objects_equal(a, b),
+            _ => false,
+        }
+    }
+
+    #[inline(never)]
+    fn objects_equal(&self, a: RVal, b: RVal) -> bool {
         let mut work = crate::work::Work::<_, 8>::new();
         let mut next = Some((a, b));
         while let Some((a, b)) = next.take().or_else(|| work.pop()) {
