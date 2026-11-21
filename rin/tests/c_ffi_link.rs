@@ -52,7 +52,8 @@ int main(void) {
     assert(m != NULL);
 
     RinEvalResult lr = rin_load(m, "base", "(defn make_card (c) Card { id: \"ember\", cost: (- c 1) })");
-    assert(lr.ok);
+    assert(lr.ok && lr.value == NULL);
+    assert(rin_last_error(m) == NULL);
     rin_res_free(&lr);
 
     RinValue *arg = rin_int(4);
@@ -69,6 +70,31 @@ int main(void) {
     rin_drop(cost_v);
 
     rin_res_free(&cr);
+    RinEvalResult failed = rin_load(m, "broken", "(defn fail () (/ 1 0)) (fail)");
+    assert(!failed.ok && failed.value == NULL);
+    const RinError *error = rin_last_error(m);
+    assert(error != NULL && error->kind == RIN_ERR_RUNTIME);
+    assert(strcmp(error->module, "broken") == 0);
+    assert(error->rule == NULL && error->line == 1 && error->col > 0);
+    assert(strstr(error->message, "division by zero") != NULL);
+    assert(error->backtrace != NULL && strstr(error->backtrace, "fail") != NULL);
+    assert(strstr(error->text, "broken") != NULL);
+    rin_res_free(&failed);
+    assert(rin_last_error(m) == error);
+    assert(strstr(error->text, "division by zero") != NULL);
+
+    failed = rin_eval(m, NULL);
+    assert(!failed.ok);
+    error = rin_last_error(m);
+    assert(error->kind == RIN_ERR_HOST);
+    assert(error->module == NULL && error->rule == NULL && error->backtrace == NULL);
+    assert(error->line == 0 && error->col == 0);
+    assert(error->message != NULL && error->text != NULL);
+    rin_res_free(&failed);
+    RinEvalResult success = rin_eval(m, "42");
+    assert(success.ok && success.value != NULL && rin_last_error(m) == NULL);
+    rin_res_free(&success);
+    assert(rin_last_error(NULL) == NULL);
     rin_free(m);
     assert(bump.offset > 0);
     return 0;
