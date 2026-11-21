@@ -437,6 +437,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             Rc::from([]),
             base,
             chunk.local_count as usize,
+            None,
         );
         match res {
             Ok(val) => {
@@ -479,7 +480,13 @@ impl<'a, 'p> Runner<'a, 'p> {
                     self.stack.push(val);
                 }
                 self.stack.resize(base + local_count, RVal::Void);
-                let res = self.exec_frame(FrameSource::Proto(proto), captures, base, local_count);
+                let res = self.exec_frame(
+                    FrameSource::Proto(proto),
+                    captures,
+                    base,
+                    local_count,
+                    Some(span),
+                );
                 self.active_module = prev_mod;
                 self.leave_depth();
                 match res {

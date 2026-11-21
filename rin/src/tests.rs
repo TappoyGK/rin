@@ -779,3 +779,59 @@ fn cross_function_tail_calls_and_first_class_and_or() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn runtime_and_limit_errors_record_call_backtrace() {
+    let src = "\
+(defn inner (x) (/ x 0))
+(defn outer (x) (+ 1 (inner x)))
+(outer 5)";
+    let err = eval(src).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!((err.at.line, err.at.col), (1, 17));
+    assert_eq!(
+        err.backtrace(),
+        &[
+            StackFrame {
+                name: Some("inner".to_string()),
+                at: Span::new(2, 22),
+            },
+            StackFrame {
+                name: Some("outer".to_string()),
+                at: Span::new(3, 1),
+            },
+        ]
+    );
+    let rendered = err.to_string();
+    assert!(rendered.contains("1:17: division by zero"));
+    assert!(rendered.contains("in inner (at 2:22)"));
+    assert!(rendered.contains("in outer (at 3:1)"));
+
+    // Higher-order call & lambda frame
+    let hof = "\
+(defn run (xs) (map (fn (x) (/ 1 x)) xs))
+(run [1, 0])";
+    let hof_err = eval(hof).unwrap_err();
+    assert_eq!(hof_err.backtrace().len(), 2);
+    assert_eq!(hof_err.backtrace()[0].name, None);
+    assert_eq!(hof_err.backtrace()[1].name.as_deref(), Some("run"));
+    assert!(hof_err.to_string().contains("in <lambda>"));
+
+    // TooManySteps also unwinds frames
+    let step_src = "\
+(defn rec (n) (+ 1 (rec n)))
+(rec 1)";
+    let step_err = eval_with(
+        step_src,
+        &[],
+        Limits {
+            steps: 20,
+            depth: 200,
+            memory_bytes: 1024 * 1024,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(step_err.kind, ErrorKind::TooManySteps);
+    assert!(!step_err.backtrace().is_empty());
+    assert_eq!(step_err.backtrace().last().unwrap().at, Span::new(2, 1));
+}

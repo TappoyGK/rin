@@ -12,6 +12,25 @@ impl Runner<'_, '_> {
     pub(super) fn exec_frame(
         &mut self,
         mut source: FrameSource<'_>,
+        captures: Rc<[RVal]>,
+        base: usize,
+        local_count: usize,
+        call_span: Option<Span>,
+    ) -> Result<RVal, Error> {
+        let res = self.exec_frame_inner(&mut source, captures, base, local_count);
+        if let Err(mut err) = res {
+            if let (Some(cs), FrameSource::Proto(p)) = (call_span, &source) {
+                err.push_frame(p.name.clone(), cs);
+            }
+            return Err(err);
+        }
+        res
+    }
+
+    #[inline(always)]
+    fn exec_frame_inner(
+        &mut self,
+        source: &mut FrameSource<'_>,
         mut captures: Rc<[RVal]>,
         base: usize,
         local_count: usize,
@@ -375,6 +394,7 @@ impl Runner<'_, '_> {
                                     cap,
                                     child_base,
                                     child_locals,
+                                    Some(span),
                                 );
                                 self.active_module = prev_mod;
                                 self.leave_depth();
@@ -432,7 +452,7 @@ impl Runner<'_, '_> {
                                 self.stack.resize(base + new_locals, RVal::Void);
                                 self.pool.release_val(callee);
                                 self.active_module = proto.module;
-                                source = FrameSource::Proto(proto);
+                                *source = FrameSource::Proto(proto);
                                 captures = cap;
                                 frame_stack_start = base + new_locals;
                                 ip = 0;

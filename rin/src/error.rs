@@ -47,12 +47,20 @@ pub enum ErrorKind {
     TooMuchMemory,
 }
 
+/// A single call frame recorded when a runtime error unwinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackFrame {
+    pub name: Option<String>,
+    pub at: Span,
+}
+
 /// Error returned by lexing, parsing, or evaluating Rin code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
     pub at: Span,
     pub message: String,
+    backtrace: Vec<StackFrame>,
 }
 
 impl Error {
@@ -61,6 +69,7 @@ impl Error {
             kind,
             at,
             message: message.into(),
+            backtrace: Vec::new(),
         }
     }
 
@@ -75,11 +84,25 @@ impl Error {
     pub fn runtime(at: Span, message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Runtime, at, message)
     }
+
+    /// Returns the call frames from innermost callee to outermost caller.
+    pub fn backtrace(&self) -> &[StackFrame] {
+        &self.backtrace
+    }
+
+    pub(crate) fn push_frame(&mut self, name: Option<String>, at: Span) {
+        self.backtrace.push(StackFrame { name, at });
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.at, self.message)
+        write!(f, "{}: {}", self.at, self.message)?;
+        for frame in &self.backtrace {
+            let name = frame.name.as_deref().unwrap_or("<lambda>");
+            write!(f, "\n  in {name} (at {})", frame.at)?;
+        }
+        Ok(())
     }
 }
 

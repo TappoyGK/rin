@@ -12,7 +12,7 @@ pub mod schema;
 pub mod value;
 
 pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
-pub use error::{Error, ErrorKind, Limits, Span};
+pub use error::{Error, ErrorKind, Limits, Span, StackFrame};
 pub use eval::{Machine, eval_with, eval_with_allocator};
 pub use schema::Schema;
 pub use value::Value;
