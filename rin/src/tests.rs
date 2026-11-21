@@ -1026,3 +1026,38 @@ fn parse_scratch_releases_large_buffers_after_eval_and_error() {
     }
     assert_eq!(scratch.capacities(), (0, 0, 0));
 }
+
+#[test]
+fn fn_and_defn_body_last_expr_counts_step() {
+    let lim = |steps| Limits {
+        steps,
+        ..Limits::default()
+    };
+
+    assert_eq!(
+        eval_with("(defn f (x) x) (f 1)", &[], lim(4))
+            .unwrap_err()
+            .kind,
+        ErrorKind::TooManySteps
+    );
+    assert_eq!(
+        eval_with("(defn f (x) x) (f 1)", &[], lim(5)).unwrap(),
+        Value::Int(1)
+    );
+
+    assert_eq!(
+        eval_with("((fn () 1))", &[], lim(2)).unwrap_err().kind,
+        ErrorKind::TooManySteps
+    );
+    assert_eq!(
+        eval_with("((fn () 1))", &[], lim(3)).unwrap(),
+        Value::Int(1)
+    );
+
+    let chain = "(defn f () 1) (defn g () (f)) (defn f () 2) (g)";
+    assert_eq!(
+        eval_with(chain, &[], lim(7)).unwrap_err().kind,
+        ErrorKind::TooManySteps
+    );
+    assert_eq!(eval_with(chain, &[], lim(8)).unwrap(), Value::Int(2));
+}

@@ -313,6 +313,9 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Pop, expr.span);
             }
         }
+        if !exprs.is_empty() {
+            self.flush_ticks();
+        }
         Ok(())
     }
 

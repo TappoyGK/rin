@@ -9,10 +9,8 @@ use crate::parser::MAX_SYNTAX_NESTING;
 use crate::value::Value;
 
 /// スキーマの型式 AST。
-///
-/// 深い入れ子でもスタックを枯渇させないよう `Clone`・`Debug` は深さ 32 以上で反復処理へ切り替える。
-/// そのため、深さ 32 以上の部分木の `{:#?}` 出力は 1 行形式となる。
-pub enum TypeExpr {
+#[derive(Debug, Clone)]
+pub(crate) enum TypeExpr {
     Any,
     Void,
     I64,
@@ -131,47 +129,6 @@ fn take_type_children(ty: &mut TypeExpr, next: &mut Option<TypeExpr>, work: &mut
 }
 
 impl TypeExpr {
-    fn clone_shallow(&self, depth: usize) -> Self {
-        if depth >= SHALLOW_TYPE_DEPTH {
-            return self.clone_iter();
-        }
-        match self {
-            TypeExpr::Any => TypeExpr::Any,
-            TypeExpr::Void => TypeExpr::Void,
-            TypeExpr::I64 => TypeExpr::I64,
-            TypeExpr::F64 => TypeExpr::F64,
-            TypeExpr::Bool => TypeExpr::Bool,
-            TypeExpr::Char => TypeExpr::Char,
-            TypeExpr::String => TypeExpr::String,
-            TypeExpr::Ref(s) => TypeExpr::Ref(s.clone()),
-            TypeExpr::List(t) => TypeExpr::List(Box::new(t.clone_shallow(depth + 1))),
-            TypeExpr::Array(t) => TypeExpr::Array(Box::new(t.clone_shallow(depth + 1))),
-            TypeExpr::Option(t) => TypeExpr::Option(Box::new(t.clone_shallow(depth + 1))),
-            TypeExpr::Result(a, b) => TypeExpr::Result(
-                Box::new(a.clone_shallow(depth + 1)),
-                Box::new(b.clone_shallow(depth + 1)),
-            ),
-            TypeExpr::Tuple(elems) => {
-                TypeExpr::Tuple(elems.iter().map(|t| t.clone_shallow(depth + 1)).collect())
-            }
-            TypeExpr::Struct { name, fields, open } => TypeExpr::Struct {
-                name: name.clone(),
-                fields: fields
-                    .iter()
-                    .map(|(k, t)| (k.clone(), t.clone_shallow(depth + 1)))
-                    .collect(),
-                open: *open,
-            },
-            TypeExpr::Variant { name, cases } => TypeExpr::Variant {
-                name: name.clone(),
-                cases: cases
-                    .iter()
-                    .map(|(k, opt)| (k.clone(), opt.as_ref().map(|t| t.clone_shallow(depth + 1))))
-                    .collect(),
-            },
-        }
-    }
-
     #[cold]
     #[inline(never)]
     fn clone_iter(&self) -> Self {
@@ -370,103 +327,6 @@ impl TypeExpr {
             }
         }
     }
-}
-
-impl Clone for TypeExpr {
-    #[inline]
-    fn clone(&self) -> Self {
-        self.clone_shallow(0)
-    }
-}
-
-impl TypeExpr {
-    fn fmt_shallow(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
-        if depth >= SHALLOW_TYPE_DEPTH {
-            return self.fmt_iter(f);
-        }
-        struct ShallowTy<'a>(&'a TypeExpr, usize);
-        impl fmt::Debug for ShallowTy<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt_shallow(f, self.1)
-            }
-        }
-        struct ShallowList<'a>(&'a [TypeExpr], usize);
-        impl fmt::Debug for ShallowList<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_list()
-                    .entries(self.0.iter().map(|t| ShallowTy(t, self.1)))
-                    .finish()
-            }
-        }
-        struct ShallowFields<'a>(&'a [(String, TypeExpr)], usize);
-        impl fmt::Debug for ShallowFields<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_list()
-                    .entries(self.0.iter().map(|(k, t)| (k, ShallowTy(t, self.1))))
-                    .finish()
-            }
-        }
-        struct ShallowOpt<'a>(&'a Option<TypeExpr>, usize);
-        impl fmt::Debug for ShallowOpt<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                match self.0 {
-                    Some(t) => f.debug_tuple("Some").field(&ShallowTy(t, self.1)).finish(),
-                    None => f.write_str("None"),
-                }
-            }
-        }
-        struct ShallowCases<'a>(&'a [(String, Option<TypeExpr>)], usize);
-        impl fmt::Debug for ShallowCases<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_list()
-                    .entries(self.0.iter().map(|(k, o)| (k, ShallowOpt(o, self.1))))
-                    .finish()
-            }
-        }
-
-        match self {
-            TypeExpr::Any => f.write_str("Any"),
-            TypeExpr::Void => f.write_str("Void"),
-            TypeExpr::I64 => f.write_str("I64"),
-            TypeExpr::F64 => f.write_str("F64"),
-            TypeExpr::Bool => f.write_str("Bool"),
-            TypeExpr::Char => f.write_str("Char"),
-            TypeExpr::String => f.write_str("String"),
-            TypeExpr::Ref(s) => f.debug_tuple("Ref").field(s).finish(),
-            TypeExpr::List(t) => f
-                .debug_tuple("List")
-                .field(&ShallowTy(t, depth + 1))
-                .finish(),
-            TypeExpr::Array(t) => f
-                .debug_tuple("Array")
-                .field(&ShallowTy(t, depth + 1))
-                .finish(),
-            TypeExpr::Option(t) => f
-                .debug_tuple("Option")
-                .field(&ShallowTy(t, depth + 1))
-                .finish(),
-            TypeExpr::Result(a, b) => f
-                .debug_tuple("Result")
-                .field(&ShallowTy(a, depth + 1))
-                .field(&ShallowTy(b, depth + 1))
-                .finish(),
-            TypeExpr::Tuple(elems) => f
-                .debug_tuple("Tuple")
-                .field(&ShallowList(elems, depth + 1))
-                .finish(),
-            TypeExpr::Struct { name, fields, open } => f
-                .debug_struct("Struct")
-                .field("name", name)
-                .field("fields", &ShallowFields(fields, depth + 1))
-                .field("open", open)
-                .finish(),
-            TypeExpr::Variant { name, cases } => f
-                .debug_struct("Variant")
-                .field("name", name)
-                .field("cases", &ShallowCases(cases, depth + 1))
-                .finish(),
-        }
-    }
 
     #[cold]
     #[inline(never)]
@@ -573,30 +433,47 @@ impl TypeExpr {
     }
 }
 
-impl fmt::Debug for TypeExpr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_shallow(f, 0)
-    }
-}
-
 /// `Value` の構造を検証するコンパイル済み Rin スキーマ。
-#[derive(Clone)]
+///
+/// 深い入れ子（深さ 32 以上）を含むスキーマでは、`Clone`・`Drop`・`Debug` を反復処理へ切り替えるため、
+/// `{:#?}` 出力は 1 行形式となる。
 pub struct Schema {
     defs: BTreeMap<String, TypeExpr>,
     root: TypeExpr,
     has_deep: bool,
 }
 
+impl Clone for Schema {
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.has_deep {
+            Self {
+                defs: self.defs.clone(),
+                root: self.root.clone(),
+                has_deep: false,
+            }
+        } else {
+            self.clone_deep()
+        }
+    }
+}
+
 impl fmt::Debug for Schema {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Schema")
-            .field("defs", &self.defs)
-            .field("root", &self.root)
-            .finish()
+        if !self.has_deep {
+            f.debug_struct("Schema")
+                .field("defs", &self.defs)
+                .field("root", &self.root)
+                .finish()
+        } else {
+            self.fmt_deep(f)
+        }
     }
 }
 
 impl Drop for Schema {
+    #[inline]
     fn drop(&mut self) {
         if self.has_deep {
             self.drop_deep();
@@ -605,6 +482,45 @@ impl Drop for Schema {
 }
 
 impl Schema {
+    #[cold]
+    #[inline(never)]
+    fn clone_deep(&self) -> Self {
+        let defs = self
+            .defs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone_iter()))
+            .collect();
+        let root = self.root.clone_iter();
+        Self {
+            defs,
+            root,
+            has_deep: true,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fmt_deep(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct DeepTy<'a>(&'a TypeExpr);
+        impl fmt::Debug for DeepTy<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt_iter(f)
+            }
+        }
+        struct DeepMap<'a>(&'a BTreeMap<String, TypeExpr>);
+        impl fmt::Debug for DeepMap<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_map()
+                    .entries(self.0.iter().map(|(k, v)| (k, DeepTy(v))))
+                    .finish()
+            }
+        }
+        f.debug_struct("Schema")
+            .field("defs", &DeepMap(&self.defs))
+            .field("root", &DeepTy(&self.root))
+            .finish()
+    }
+
     #[cold]
     #[inline(never)]
     fn drop_deep(&mut self) {
