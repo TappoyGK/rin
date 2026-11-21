@@ -176,8 +176,6 @@ if (!result.ok) {
 rin_res_free(&result);
 ```
 
-以前の `RinEvalResult.error_message` / `error_line` / `error_col` および `rin_last_backtrace` は削除した。呼び出し側は `rin_last_error` の各欄を使う。
-
 ### 2.3 値の生成と解放
 
 生成関数が返す `RinValue *` は呼び出し側が所有し、不要になったら `rin_drop` で解放する。
