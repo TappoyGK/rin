@@ -4,6 +4,8 @@
 
 ## v0.1.1（未リリース）
 
+- ホストが提供したソースの該当行にキャレットを付けて、エラーとともに表示する `Error::render` / `render_with` と、`fmt::Write` 向けの `render_to` / `render_with_to` を追加した。モジュールごとのソース選択と呼び出し履歴に対応し、タブ・全角文字・結合文字・絵文字の表示幅を考慮する（[PR #41](https://github.com/TappoyGK/rin/pull/41)）。
+
 - 未定義名のエラーに近い名前の候補を、構造体の不存在フィールドやモジュールの不存在公開シンボルに利用可能な名前の一覧を付ける。Rust / C FFI のメッセージと表示文字列に含まれ、規則名・位置・呼び出し履歴も保持する（[PR #39](https://github.com/TappoyGK/rin/pull/39)）。
 
 - エラーに仕様の規則名を付け、Rust の `Error::rule()` と C の `RinError.rule` から取得できるようにした。表示の先頭行にも `[rule.id]` を付ける。`Error` の各コンストラクタは第 1 引数に規則名を必須とする（[PR #38](https://github.com/TappoyGK/rin/pull/38)）。

@@ -10,6 +10,7 @@ struct SpecCase {
     rule_id: String,
     error_rule: Option<String>,
     error_message: Option<String>,
+    rendered: Option<String>,
     source: String,
     limit_spec: String,
     expected_kind: String,
@@ -136,6 +137,7 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     let mut rule_id = None;
     let mut error_rule = None;
     let mut error_message = None;
+    let mut rendered = None;
     let mut source = None;
     let mut table_row = None;
 
@@ -160,6 +162,22 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                     })
                     .to_string(),
             );
+        } else if trimmed == "```text" {
+            assert!(
+                rendered.is_none(),
+                "{file_label} ({id}): duplicate expected rendering"
+            );
+            idx += 1;
+            let mut buf = Vec::new();
+            while idx < lines.len() && lines[idx].trim() != "```" {
+                buf.push(lines[idx]);
+                idx += 1;
+            }
+            assert!(
+                idx < lines.len(),
+                "{file_label} ({id}): unclosed ```text block"
+            );
+            rendered = Some(buf.join("\n"));
         } else if trimmed == "```rin" {
             idx += 1;
             let mut buf = Vec::new();
@@ -198,6 +216,7 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
         rule_id: rule_id.unwrap_or_else(|| panic!("{file_label}: missing 主根拠")),
         error_rule,
         error_message,
+        rendered,
         source: source.unwrap_or_else(|| panic!("{file_label}: missing ```rin source block")),
         limit_spec,
         expected_kind,
@@ -230,6 +249,14 @@ fn run_case(case: &SpecCase) {
     };
 
     if let Err(err) = &result {
+        if let Some(expected) = &case.rendered {
+            assert_eq!(
+                &err.render(&case.source),
+                expected,
+                "{}: rendered diagnostic mismatch",
+                case.id
+            );
+        }
         if let Some(expected) = &case.error_message {
             assert_eq!(
                 &err.message, expected,
@@ -329,7 +356,9 @@ fn verify_all_spec_cases() {
             );
             if case.expected_kind == "値" {
                 assert!(
-                    case.error_rule.is_none() && case.error_message.is_none(),
+                    case.error_rule.is_none()
+                        && case.error_message.is_none()
+                        && case.rendered.is_none(),
                     "{}: value case has error rule",
                     case.id
                 );

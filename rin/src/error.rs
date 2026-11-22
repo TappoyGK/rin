@@ -1,8 +1,10 @@
 //! ソース位置、資源上限、エラー型、および呼び出し履歴フレームを定義する。
 
+mod render;
+
 use std::fmt;
 
-/// ソース内の 1 始まりの行・列位置。
+/// ソース内の 1 始まりの行・UTF-8 バイト単位の列位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
     pub line: usize,
@@ -233,6 +235,15 @@ impl Error {
         out
     }
 
+    fn write_header(&self, f: &mut (impl fmt::Write + ?Sized)) -> fmt::Result {
+        if let Some(m) = &self.module {
+            write!(f, "{m} {}: {}", self.at, self.message)?;
+        } else {
+            write!(f, "{}: {}", self.at, self.message)?;
+        }
+        write!(f, " [{}]", self.rule)
+    }
+
     pub(crate) fn push_frame(&mut self, frame: StackFrame) {
         if let Some(last) = self.backtrace.last_mut()
             && last.same_site(&frame)
@@ -250,12 +261,7 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(m) = &self.module {
-            write!(f, "{m} {}: {}", self.at, self.message)?;
-        } else {
-            write!(f, "{}: {}", self.at, self.message)?;
-        }
-        write!(f, " [{}]", self.rule)?;
+        self.write_header(f)?;
         let bt = self.format_backtrace();
         if !bt.is_empty() {
             write!(f, "\n{bt}")?;

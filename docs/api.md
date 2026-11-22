@@ -91,7 +91,7 @@ pub struct StackFrame {
 
 pub struct Error {
     pub kind: ErrorKind,
-    pub at: Span, // 1始まりの line, col
+    pub at: Span, // 1始まりの line, col（col は UTF-8 バイト位置）
     pub message: String,
 }
 
@@ -126,6 +126,55 @@ import がメモリ上限・アロケータの確保失敗・取り込めない�
 変換と解放は深さ 32、比較と書式化は深さ 16 まで直接処理し、それ以降は反復処理だけで進める。反復処理から深さをリセットして再帰へ戻ることはない。作業スタックの小さい部分は固定長領域に置き、必要な場合だけシステムヒープへ拡張する。この一時領域とホスト側の `Value` は `memory_bytes` の計数対象ではない。すべての確保を指定アロケータへ統合する変更は別途行う。評価器の関数呼び出し深度に関する制約は 1.4 の `depth` と同じである。
 
 `Debug` は入れ子を省略せず、`{:#?}` は浅い部分を字下げして出力する。書式化の深さはリストの各セル（tail 方向）も 1 段と数えるため、平らな長いリストも途中で切り替わる。書式化の深さ上限に達した部分木は、スタック消費を抑えるためコンパクトな形式で出力する。
+
+### 1.6 ソース付きエラー表示
+
+```rust
+impl Error {
+    pub fn render(&self, source: &str) -> String;
+    pub fn render_with<'s>(
+        &self,
+        source: impl FnMut(Option<&str>) -> Option<&'s str>,
+    ) -> String;
+    pub fn render_to(
+        &self, out: &mut (impl std::fmt::Write + ?Sized), source: &str,
+    ) -> std::fmt::Result;
+    pub fn render_with_to<'s>(
+        &self,
+        out: &mut (impl std::fmt::Write + ?Sized),
+        source: impl FnMut(Option<&str>) -> Option<&'s str>,
+    ) -> std::fmt::Result;
+}
+```
+
+`render` にエラーが発生したソースコード全体を渡すと、該当行に `^` キャレットを付けて、エラーメッセージとともに表示する文字列を返す。呼び出し履歴にも同じソースコード内の行を表示する。別のモジュールからの呼び出しについては、履歴だけを表示する。
+
+複数のモジュールのソースコードを表示するには、`render_with` を使う。引数には、モジュール名を受け取ってソースコード全体を返すコールバックを渡す。エラーの発生箇所には、そのモジュールのソースコードを使う。呼び出し履歴には、関数を呼び出した側のモジュールのソースコードを使う。
+
+- コールバックが `Some(name)` を受け取ったら、名前が `name` のモジュールのソースコードを `Some(source)` で返す。
+- `None` を受け取ったら、モジュールに属さないコード（`eval` に渡したコードなど）を `Some(source)` で返す。
+- 対応するソースコードを用意できなければ、`None` を返す。その箇所はエラーメッセージや呼び出し履歴だけを表示する。
+
+コールバックは表示する位置ごとに 1 回呼ばれるため、同じモジュール名を複数回受け取ることがある。
+
+渡すソースコードは、エラーが発生したときに実行していたものと一致させる。たとえば、エラー発生後にモジュールを読み込み直した場合、更新後のコードでは行番号が合わないことがある。実行時のソースコードを特定できなければ、コールバックから `None` を返す。
+
+`render_to` / `render_with_to` は同じ表示を `fmt::Write` へ追記し、書き込みが失敗した時点で `fmt::Error` を返す。末尾の改行は付けない。表示幅・無効な位置の扱いは言語仕様の `[eval.snippet]` に従う。
+
+```rust
+let source = "(/ 1 0)";
+let error = rin::eval(source).unwrap_err();
+println!("{}", error.render(source));
+```
+
+```text
+1:1: division by zero [op.arith]
+  |
+1 | (/ 1 0)
+  | ^
+```
+
+ソース付き表示はこの API を明示的に呼んだときだけ生成する。`Error.message`、通常の `Display`、C FFI の `RinError.message` / `text` はソースを含まない。
 
 ---
 
