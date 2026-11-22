@@ -44,12 +44,31 @@ typedef struct RinMachine RinMachine;
 typedef struct RinValue RinValue;
 typedef struct RinSchema RinSchema;
 
+typedef enum RinErrorKind {
+    RIN_ERR_LEX = 0,
+    RIN_ERR_PARSE = 1,
+    RIN_ERR_RUNTIME = 2,
+    RIN_ERR_TOO_MANY_STEPS = 3,
+    RIN_ERR_TOO_DEEP = 4,
+    RIN_ERR_TOO_MUCH_MEMORY = 5,
+    RIN_ERR_HOST = 6
+} RinErrorKind;
+
+/* 文字列は UTF-8・NUL 終端。machine が所有し、ホストは解放しない。 */
+typedef struct RinError {
+    RinErrorKind kind;
+    const char *message;   /* 常に非 NULL。見出しの本文。 */
+    const char *module;    /* モジュール外なら NULL。 */
+    const char *rule;      /* 根拠となる仕様の規則名。非 NULL、角括弧なし。 */
+    size_t line;          /* 1 始まり。位置がなければ 0。 */
+    size_t col;           /* 1 始まり。位置がなければ 0。 */
+    const char *backtrace; /* 履歴がなければ NULL。 */
+    const char *text;      /* 常に非 NULL。見出しと履歴の全体。 */
+} RinError;
+
 typedef struct RinEvalResult {
     bool ok;
-    RinValue *value;
-    char *error_message;
-    size_t error_line;
-    size_t error_col;
+    RinValue *value; /* 評価・呼び出し成功時に所有。rin_load 成功時と失敗時は NULL。 */
 } RinEvalResult;
 
 RinLimits rin_limits_default(void);
@@ -60,6 +79,15 @@ RinEvalResult rin_eval(RinMachine *machine, const char *source);
 RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source);
 RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc);
 RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
+/* 直近の対象操作のエラー。エラーなし、または machine == NULL なら NULL。
+ * ポインタと文字列は同じ machine の次の rin_eval / rin_load / rin_call /
+ * rin_call_in / rin_bind、または rin_free まで有効。
+ * 対象操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
+ * rin_last_error や rin_res_free は無効化しない。
+ * NULL machine には記録できない。それ以外の引数エラーは RIN_ERR_HOST、位置は 0。
+ * 同じ machine の対象操作・解放と並行して参照してはならない。
+ */
+const RinError *rin_last_error(const RinMachine *machine);
 void rin_res_free(RinEvalResult *res);
 
 RinValue *rin_int(int64_t n);

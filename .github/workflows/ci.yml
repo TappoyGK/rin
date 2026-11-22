@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, release]
+  push:
+    branches: [main, release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  work:
+    name: work checks
+    if: >-
+      (github.event_name == 'pull_request' && (github.event.pull_request.stack.base.ref || github.base_ref) == 'release') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/release')
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cc --version
+
+      - name: Check formatting and lint
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --locked --all-targets -- -D warnings
+
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --locked --no-deps
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  release:
+    name: release checks
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && (github.event.pull_request.stack.base.ref || github.base_ref) == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cc --version
+
+      - name: Check formatting and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --locked --all-targets -- -D warnings
+
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --locked --no-deps
+
+      - name: Run tests (debug and release)
+        run: |
+          cargo test --workspace --locked
+          cargo test --workspace --locked --release
+
+      - name: Verify release library artifact
+        run: |
+          cargo build --release --workspace --locked
+          test -f target/release/librin.a
+          test -f rin/include/rin.h

@@ -1,3 +1,5 @@
+//! Rin ソース文字列を位置付きの字句トークン列へ分解する。
+
 use crate::error::{Error, Span};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,13 +25,19 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
-    /// True if there was no whitespace or comment immediately before this token.
+    /// 直前に空白やコメントがない場合に true となる。
     pub attached: bool,
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
-    let mut lexer = Lexer::new(input);
     let mut tokens = Vec::new();
+    tokenize_into(input, &mut tokens)?;
+    Ok(tokens)
+}
+
+pub(crate) fn tokenize_into(input: &str, tokens: &mut Vec<Token>) -> Result<(), Error> {
+    tokens.clear();
+    let mut lexer = Lexer::new(input);
     loop {
         let tok = lexer.next_token()?;
         let is_eof = tok.kind == TokenKind::Eof;
@@ -38,7 +46,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
             break;
         }
     }
-    Ok(tokens)
+    Ok(())
 }
 
 struct Lexer<'a> {
@@ -167,6 +175,7 @@ impl<'a> Lexer<'a> {
             _ if is_ident_start(b) => TokenKind::Ident(self.lex_ident()),
             _ => {
                 return Err(Error::lex(
+                    "src.token",
                     span,
                     format!("unexpected character {:?}", b as char),
                 ));
@@ -182,7 +191,11 @@ impl<'a> Lexer<'a> {
 
     fn lex_escape(&mut self, span: Span) -> Result<char, Error> {
         let Some(esc) = self.bump() else {
-            return Err(Error::lex(span, "unterminated escape sequence"));
+            return Err(Error::lex(
+                "src.escape",
+                span,
+                "unterminated escape sequence",
+            ));
         };
         match esc {
             b'n' => Ok('\n'),
@@ -193,6 +206,7 @@ impl<'a> Lexer<'a> {
             b'\'' => Ok('\''),
             b'0' => Ok('\0'),
             other => Err(Error::lex(
+                "src.escape",
                 span,
                 format!("unknown escape sequence \\{}", other as char),
             )),
@@ -200,18 +214,22 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_string(&mut self, span: Span) -> Result<String, Error> {
-        self.bump(); // opening "
+        self.bump(); // 開始の '"'
         let mut out = String::new();
         loop {
             let Some(b) = self.bump() else {
-                return Err(Error::lex(span, "unterminated string literal"));
+                return Err(Error::lex(
+                    "src.string",
+                    span,
+                    "unterminated string literal",
+                ));
             };
             match b {
                 b'"' => return Ok(out),
                 b'\\' => out.push(self.lex_escape(span)?),
                 _ if b < 0x80 => out.push(b as char),
                 _ => {
-                    // Decode UTF-8 multi-byte char from slice
+                    // スライスから UTF-8 マルチバイト文字を読み取る。
                     let start = self.pos - 1;
                     while let Some(next) = self.peek() {
                         if (next & 0xC0) != 0x80 {
@@ -219,8 +237,9 @@ impl<'a> Lexer<'a> {
                         }
                         self.bump();
                     }
-                    let s = std::str::from_utf8(&self.src[start..self.pos])
-                        .map_err(|_| Error::lex(span, "invalid UTF-8 in string literal"))?;
+                    let s = std::str::from_utf8(&self.src[start..self.pos]).map_err(|_| {
+                        Error::lex("src.encoding", span, "invalid UTF-8 in string literal")
+                    })?;
                     out.push_str(s);
                 }
             }
@@ -228,9 +247,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_char(&mut self, span: Span) -> Result<char, Error> {
-        self.bump(); // opening '
+        self.bump(); // 開始の '\''
         let Some(b) = self.bump() else {
-            return Err(Error::lex(span, "unterminated char literal"));
+            return Err(Error::lex("src.char", span, "unterminated char literal"));
         };
         let ch = if b == b'\\' {
             self.lex_escape(span)?
@@ -245,22 +264,19 @@ impl<'a> Lexer<'a> {
                 self.bump();
             }
             let s = std::str::from_utf8(&self.src[start..self.pos])
-                .map_err(|_| Error::lex(span, "invalid UTF-8 in char literal"))?;
+                .map_err(|_| Error::lex("src.encoding", span, "invalid UTF-8 in char literal"))?;
             s.chars()
                 .next()
-                .ok_or_else(|| Error::lex(span, "empty char literal"))?
+                .ok_or_else(|| Error::lex("src.char", span, "empty char literal"))?
         };
         if self.bump() != Some(b'\'') {
-            return Err(Error::lex(span, "unterminated char literal"));
+            return Err(Error::lex("src.char", span, "unterminated char literal"));
         }
         Ok(ch)
     }
 
     fn lex_number(&mut self, span: Span, neg: bool) -> Result<TokenKind, Error> {
-        if !neg
-            && self.peek() == Some(b'0')
-            && matches!(self.peek_at(1), Some(b'x') | Some(b'X'))
-        {
+        if !neg && self.peek() == Some(b'0') && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
             self.bump();
             self.bump();
             let mut hex = String::new();
@@ -275,10 +291,10 @@ impl<'a> Lexer<'a> {
                 }
             }
             if hex.is_empty() {
-                return Err(Error::lex(span, "invalid hexadecimal literal"));
+                return Err(Error::lex("src.int", span, "invalid hexadecimal literal"));
             }
             let n = i64::from_str_radix(&hex, 16)
-                .map_err(|_| Error::lex(span, "integer literal out of i64 range"))?;
+                .map_err(|_| Error::lex("src.int", span, "integer literal out of i64 range"))?;
             return Ok(TokenKind::Int(n));
         }
 
@@ -334,19 +350,19 @@ impl<'a> Lexer<'a> {
                 }
             }
             if buf.len() == before {
-                return Err(Error::lex(span, "invalid float exponent"));
+                return Err(Error::lex("src.float", span, "invalid float exponent"));
             }
         }
 
         if is_float {
             let x: f64 = buf
                 .parse()
-                .map_err(|_| Error::lex(span, "invalid float literal"))?;
+                .map_err(|_| Error::lex("src.float", span, "invalid float literal"))?;
             Ok(TokenKind::Float(x))
         } else {
             let n: i64 = buf
                 .parse()
-                .map_err(|_| Error::lex(span, "integer literal out of i64 range"))?;
+                .map_err(|_| Error::lex("src.int", span, "integer literal out of i64 range"))?;
             Ok(TokenKind::Int(n))
         }
     }

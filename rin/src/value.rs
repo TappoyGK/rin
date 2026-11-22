@@ -1,22 +1,16 @@
+//! ホスト境界で受け渡しする不変値 `Value` とコンスリスト `ConsList` を定義する。
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::ast::Expr;
+mod drop;
+mod format;
+mod owner;
+pub use owner::{ValueChild, ValueFields, ValueItems};
 
-/// Lexical environment captured by a closure or defined at top level.
-pub type Env = Rc<BTreeMap<String, Value>>;
-
-#[derive(Debug, Clone)]
-pub struct Closure {
-    pub name: Option<String>,
-    pub params: Vec<String>,
-    pub body: Vec<Expr>,
-    pub env: Env,
-}
-
-/// Persistent cons-cell linked list with O(1) cons, car, cdr, and len.
-#[derive(Debug, Clone)]
+/// `cons`・`car`・`cdr`・`len` を O(1) で行う永続コンスリスト。
+#[derive(Clone)]
 pub enum ListNode {
     Nil,
     Cons {
@@ -99,18 +93,6 @@ impl PartialEq for ListNode {
     }
 }
 
-impl Drop for ListNode {
-    fn drop(&mut self) {
-        let Self::Cons { tail, .. } = self else {
-            return;
-        };
-        let mut cur = std::mem::replace(tail, Rc::new(Self::Nil));
-        while let Some(ListNode::Cons { tail, .. }) = Rc::get_mut(&mut cur) {
-            cur = std::mem::replace(tail, Rc::new(Self::Nil));
-        }
-    }
-}
-
 pub struct ListIter<'a> {
     cur: &'a ListNode,
 }
@@ -129,8 +111,8 @@ impl<'a> Iterator for ListIter<'a> {
     }
 }
 
-/// A Rin runtime value. All values are immutable.
-#[derive(Debug, Clone)]
+/// Rin の不変な値表現。
+#[derive(Clone)]
 pub enum Value {
     Void,
     Int(i64),
@@ -139,26 +121,35 @@ pub enum Value {
     Char(char),
     Str(Rc<String>),
     List(Rc<ListNode>),
-    Array(Rc<Vec<Value>>),
-    Tuple(Rc<Vec<Value>>),
+    Array(Rc<ValueItems>),
+    Tuple(Rc<ValueItems>),
     Struct {
         name: Rc<String>,
-        fields: Rc<BTreeMap<String, Value>>,
+        fields: Rc<ValueFields>,
     },
     Variant {
         type_name: Rc<String>,
         variant: Rc<String>,
-        data: Option<Rc<Value>>,
+        data: Option<Rc<ValueChild>>,
     },
     None,
-    Some(Rc<Value>),
-    Ok(Rc<Value>),
-    Err(Rc<Value>),
-    Fn(Rc<Closure>),
+    Some(Rc<ValueChild>),
+    Ok(Rc<ValueChild>),
+    Err(Rc<ValueChild>),
     Builtin(&'static str),
 }
 
 impl Value {
+    pub fn some(value: Value) -> Self {
+        Self::Some(Rc::new(value.into()))
+    }
+    pub fn ok(value: Value) -> Self {
+        Self::Ok(Rc::new(value.into()))
+    }
+    pub fn err(value: Value) -> Self {
+        Self::Err(Rc::new(value.into()))
+    }
+
     pub fn str(s: impl Into<String>) -> Self {
         Self::Str(Rc::new(s.into()))
     }
@@ -176,17 +167,17 @@ impl Value {
     }
 
     pub fn array(items: Vec<Value>) -> Self {
-        Self::Array(Rc::new(items))
+        Self::Array(Rc::new(items.into()))
     }
 
     pub fn tuple(items: Vec<Value>) -> Self {
-        Self::Tuple(Rc::new(items))
+        Self::Tuple(Rc::new(items.into()))
     }
 
     pub fn structure(name: impl Into<String>, fields: BTreeMap<String, Value>) -> Self {
         Self::Struct {
             name: Rc::new(name.into()),
-            fields: Rc::new(fields),
+            fields: Rc::new(fields.into()),
         }
     }
 
@@ -198,38 +189,52 @@ impl Value {
         Self::Variant {
             type_name: Rc::new(type_name.into()),
             variant: Rc::new(variant.into()),
-            data: data.map(Rc::new),
+            data: data.map(|v| Rc::new(v.into())),
         }
     }
 
-    /// Rough byte-size estimate for memory budget accounting.
+    /// メモリ予算管理用の概算バイトサイズを返す。
     pub fn approx_bytes(&self) -> usize {
-        match self {
-            Value::Void | Value::None | Value::Builtin(_) => 8,
-            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) => 16,
-            Value::Str(s) => 24 + s.len(),
-            Value::List(xs) => 24 + xs.iter().map(Value::approx_bytes).sum::<usize>(),
-            Value::Array(xs) => 24 + xs.iter().map(Value::approx_bytes).sum::<usize>(),
-            Value::Tuple(xs) => 24 + xs.iter().map(Value::approx_bytes).sum::<usize>(),
-            Value::Struct { name, fields } => {
-                32 + name.len()
-                    + fields
-                        .iter()
-                        .map(|(k, v)| 24 + k.len() + v.approx_bytes())
-                        .sum::<usize>()
-            }
-            Value::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                32 + type_name.len()
-                    + variant.len()
-                    + data.as_ref().map_or(0, |d| d.approx_bytes())
-            }
-            Value::Some(v) | Value::Ok(v) | Value::Err(v) => 16 + v.approx_bytes(),
-            Value::Fn(c) => 48 + c.params.len() * 16 + c.body.len() * 32,
+        let mut work = crate::work::Work::<_, 8>::with(self);
+        let mut size = 0usize;
+        while let Some(v) = work.pop() {
+            let own = match v {
+                Value::Void | Value::None | Value::Builtin(_) => 8,
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) => 16,
+                Value::Str(s) => 24 + s.len(),
+                Value::List(xs) => {
+                    work.extend(xs.iter());
+                    24
+                }
+                Value::Array(xs) | Value::Tuple(xs) => {
+                    work.extend(xs.iter());
+                    24
+                }
+                Value::Struct { name, fields } => {
+                    for (k, v) in fields.iter() {
+                        size = size.saturating_add(24 + k.len());
+                        work.push(v);
+                    }
+                    32 + name.len()
+                }
+                Value::Variant {
+                    type_name,
+                    variant,
+                    data,
+                } => {
+                    if let Some(v) = data {
+                        work.push(v);
+                    }
+                    32 + type_name.len() + variant.len()
+                }
+                Value::Some(v) | Value::Ok(v) | Value::Err(v) => {
+                    work.push(v);
+                    16
+                }
+            };
+            size = size.saturating_add(own);
         }
+        size
     }
 
     pub fn type_name(&self) -> &str {
@@ -247,124 +252,165 @@ impl Value {
             Value::Variant { type_name, .. } => type_name.as_str(),
             Value::None | Value::Some(_) => "option",
             Value::Ok(_) | Value::Err(_) => "result",
-            Value::Fn(_) | Value::Builtin(_) => "fn",
+            Value::Builtin(_) => "fn",
         }
     }
 }
 
 impl PartialEq for Value {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Void, Value::Void) => true,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::List(a), Value::List(b)) => a == b,
-            (Value::Array(a), Value::Array(b)) => a == b,
-            (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (
-                Value::Struct {
-                    name: n1,
-                    fields: f1,
-                },
-                Value::Struct {
-                    name: n2,
-                    fields: f2,
-                },
-            ) => n1 == n2 && f1 == f2,
-            (
-                Value::Variant {
-                    type_name: t1,
-                    variant: v1,
-                    data: d1,
-                },
-                Value::Variant {
-                    type_name: t2,
-                    variant: v2,
-                    data: d2,
-                },
-            ) => t1 == t2 && v1 == v2 && d1 == d2,
-            (Value::None, Value::None) => true,
-            (Value::Some(a), Value::Some(b)) => a == b,
-            (Value::Ok(a), Value::Ok(b)) => a == b,
-            (Value::Err(a), Value::Err(b)) => a == b,
-            (Value::Builtin(a), Value::Builtin(b)) => a == b,
-            _ => false,
-        }
+        equal(self, other, 0)
     }
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Void => write!(f, "void"),
-            Value::Int(n) => write!(f, "{n}"),
-            Value::Float(x) => write!(f, "{x}"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Char(c) => write!(f, "{c:?}"),
-            Value::Str(s) => write!(f, "{s:?}"),
-            Value::List(xs) => {
-                write!(f, "[")?;
-                for (i, x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{x}")?;
-                }
-                write!(f, "]")
-            }
-            Value::Array(xs) => {
-                write!(f, "#[")?;
-                for (i, x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{x}")?;
-                }
-                write!(f, "]")
-            }
-            Value::Tuple(xs) => {
-                write!(f, "(")?;
-                for (i, x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{x}")?;
-                }
-                write!(f, ")")
-            }
-            Value::Struct { name, fields } => {
-                write!(f, "{name} {{ ")?;
-                for (i, (k, v)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{k}: {v}")?;
-                }
-                write!(f, " }}")
-            }
-            Value::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                write!(f, "{type_name}.{variant}")?;
-                if let Some(d) = data {
-                    write!(f, "({d})")?;
-                }
-                Ok(())
-            }
-            Value::None => write!(f, "none"),
-            Value::Some(v) => write!(f, "some({v})"),
-            Value::Ok(v) => write!(f, "ok({v})"),
-            Value::Err(v) => write!(f, "err({v})"),
-            Value::Fn(c) => match &c.name {
-                Some(name) => write!(f, "<fn {name}>"),
-                None => write!(f, "<fn>"),
+#[inline(always)]
+fn equal(a: &Value, b: &Value, depth: usize) -> bool {
+    match (a, b) {
+        (Value::Void, Value::Void) | (Value::None, Value::None) => true,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Builtin(a), Value::Builtin(b)) => a == b,
+        _ => equal_nested(a, b, depth),
+    }
+}
+
+#[inline]
+fn equal_nested(a: &Value, b: &Value, depth: usize) -> bool {
+    if depth == 16 {
+        return equal_deep(a, b);
+    }
+    match (a, b) {
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b, depth + 1))
+        }
+        (Value::Array(a), Value::Array(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b, depth + 1))
+        }
+        (
+            Value::Struct {
+                name: an,
+                fields: a,
             },
-            Value::Builtin(name) => write!(f, "<builtin {name}>"),
+            Value::Struct {
+                name: bn,
+                fields: b,
+            },
+        ) => {
+            if an != bn || a.len() != b.len() {
+                return false;
+            }
+            // 1 フィールドのノードでは二つの木イテレータを作らない。
+            if a.len() == 1 {
+                let (ak, av) = a.first_key_value().unwrap();
+                let (bk, bv) = b.first_key_value().unwrap();
+                return ak == bk && equal(av, bv, depth + 1);
+            }
+            a.iter()
+                .zip(b.iter())
+                .all(|((ak, av), (bk, bv))| ak == bk && equal(av, bv, depth + 1))
+        }
+        (Value::Some(a), Value::Some(b))
+        | (Value::Ok(a), Value::Ok(b))
+        | (Value::Err(a), Value::Err(b)) => equal(a, b, depth + 1),
+        (
+            Value::Variant {
+                type_name: at,
+                variant: an,
+                data: a,
+            },
+            Value::Variant {
+                type_name: bt,
+                variant: bn,
+                data: b,
+            },
+        ) => {
+            at == bt
+                && an == bn
+                && match (a, b) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => equal(a, b, depth + 1),
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn equal_deep(a: &Value, b: &Value) -> bool {
+    let mut work = crate::work::Work::<_, 8>::with((a, b));
+    while let Some((a, b)) = work.pop() {
+        match (a, b) {
+            (Value::Void, Value::Void) | (Value::None, Value::None) => {}
+            (Value::Int(a), Value::Int(b)) if a == b => {}
+            (Value::Float(a), Value::Float(b)) if a == b => {}
+            (Value::Bool(a), Value::Bool(b)) if a == b => {}
+            (Value::Char(a), Value::Char(b)) if a == b => {}
+            (Value::Str(a), Value::Str(b)) if a == b => {}
+            (Value::Builtin(a), Value::Builtin(b)) if a == b => {}
+            (Value::List(a), Value::List(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                work.extend(a.iter().zip(b.iter()));
+            }
+            (Value::Array(a), Value::Array(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                work.extend(a.iter().zip(b.iter()));
+            }
+            (
+                Value::Struct {
+                    name: an,
+                    fields: a,
+                },
+                Value::Struct {
+                    name: bn,
+                    fields: b,
+                },
+            ) => {
+                if an != bn || a.len() != b.len() {
+                    return false;
+                }
+                for ((ak, av), (bk, bv)) in a.iter().zip(b.iter()) {
+                    if ak != bk {
+                        return false;
+                    }
+                    work.push((av, bv));
+                }
+            }
+            (Value::Some(a), Value::Some(b))
+            | (Value::Ok(a), Value::Ok(b))
+            | (Value::Err(a), Value::Err(b)) => work.push((a, b)),
+            (
+                Value::Variant {
+                    type_name: at,
+                    variant: an,
+                    data: a,
+                },
+                Value::Variant {
+                    type_name: bt,
+                    variant: bn,
+                    data: b,
+                },
+            ) => {
+                if at != bt || an != bn {
+                    return false;
+                }
+                match (a, b) {
+                    (Some(a), Some(b)) => work.push((a, b)),
+                    (None, None) => {}
+                    _ => return false,
+                }
+            }
+            _ => return false,
         }
     }
+    true
 }

@@ -1,17 +1,23 @@
+//! 外部アロケータ上で動作する参照カウント付きオブジェクトプールを実装する。
+
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::alloc::{AllocBuf, Allocator};
-use crate::ast::Expr;
+use crate::bytecode::{BuiltinId, FnProto};
 use crate::error::{Error, ErrorKind, Span};
 use crate::value::Value;
 
+mod convert;
+mod shallow;
+
 const CHUNK_SLOTS: usize = 256;
 
-/// Handle to a refcounted object inside Rin's internal pool.
+/// 内部プール内の参照カウント付きオブジェクトへのハンドル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ObjId(pub u32);
 
-/// Compact runtime value stored in variables, stacks, and pool objects.
+/// 変数・スタック・プールオブジェクトに格納する軽量な実行時値。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RVal {
     Void,
@@ -21,7 +27,7 @@ pub(crate) enum RVal {
     Char(char),
     None,
     EmptyList,
-    Builtin(&'static str),
+    Builtin(BuiltinId),
     Obj(ObjId),
 }
 
@@ -59,30 +65,27 @@ pub(crate) enum Obj {
         len: usize,
     },
     Array(Vec<RVal>),
-    Str(String),
+    Str(Rc<str>),
     Tuple(Vec<RVal>),
     Struct {
-        name: String,
-        fields: BTreeMap<String, RVal>,
+        name: Rc<str>,
+        fields: BTreeMap<Rc<str>, RVal>,
     },
     Variant {
-        type_name: String,
-        variant: String,
+        type_name: Rc<str>,
+        variant: Rc<str>,
         data: Option<RVal>,
     },
     Some(RVal),
     Ok(RVal),
     Err(RVal),
     Closure {
-        name: Option<String>,
-        module: Option<String>,
-        params: Vec<String>,
-        body: Vec<Expr>,
-        env: BTreeMap<String, RVal>,
+        proto: Rc<FnProto>,
+        captures: Rc<[RVal]>,
     },
     Module {
-        name: String,
-        exports: BTreeMap<String, RVal>,
+        name: Rc<str>,
+        exports: BTreeMap<Rc<str>, RVal>,
     },
 }
 
@@ -98,9 +101,7 @@ impl Obj {
                 type_name, variant, ..
             } => 48 + type_name.len() + variant.len(),
             Obj::Some(_) | Obj::Ok(_) | Obj::Err(_) => 24,
-            Obj::Closure {
-                params, body, env, ..
-            } => 64 + params.len() * 16 + body.len() * 24 + env.len() * 32,
+            Obj::Closure { captures, .. } => 64 + captures.len() * 16,
             Obj::Module { name, exports } => 48 + name.len() + exports.len() * 32,
         }
     }
@@ -140,8 +141,8 @@ impl Obj {
                     out.push(*id);
                 }
             }
-            Obj::Closure { env, .. } => {
-                for v in env.values() {
+            Obj::Closure { captures, .. } => {
+                for v in captures.iter() {
                     if let RVal::Obj(id) = v {
                         out.push(*id);
                     }
@@ -163,18 +164,18 @@ enum Slot {
     Live { rc: u32, bytes: usize, obj: Obj },
 }
 
-/// Refcounted object pool backed by chunked slabs from a caller-provided `Allocator`.
+/// 呼び出し側の `Allocator` から確保したスラブ群で動く参照カウント付きオブジェクトプール。
 ///
-/// Dead objects are returned to a free-list and reused immediately on subsequent
-/// allocations, preventing monotonic memory growth within a single arena/session.
+/// 不要になったスロットはフリーリストへ返し、次回確保時に即座に再利用する。
 pub(crate) struct Pool<'a> {
     alloc: &'a mut dyn Allocator,
     chunks: Vec<AllocBuf<Slot>>,
-    /// Number of initialized slots in the last chunk.
+    /// 最終チャンク内の初期化済みスロット数。
     last_chunk_len: usize,
     free_head: Option<u32>,
     live_bytes: usize,
     max_bytes: usize,
+    release_worklist: Vec<ObjId>,
 }
 
 impl<'a> Pool<'a> {
@@ -186,6 +187,7 @@ impl<'a> Pool<'a> {
             free_head: None,
             live_bytes: 0,
             max_bytes,
+            release_worklist: Vec::new(),
         }
     }
 
@@ -243,14 +245,31 @@ impl<'a> Pool<'a> {
     }
 
     pub fn release(&mut self, root: ObjId) {
-        let mut worklist = vec![root];
+        let should_free_root = match self.slot_mut(root) {
+            Slot::Live { rc, .. } => {
+                *rc -= 1;
+                *rc == 0
+            }
+            Slot::Free { .. } => false,
+        };
+        if !should_free_root {
+            return;
+        }
+        let mut worklist = std::mem::take(&mut self.release_worklist);
+        worklist.push(root);
+        let mut first = true;
         while let Some(id) = worklist.pop() {
-            let should_free = match self.slot_mut(id) {
-                Slot::Live { rc, .. } => {
-                    *rc -= 1;
-                    *rc == 0
+            let should_free = if first {
+                first = false;
+                true
+            } else {
+                match self.slot_mut(id) {
+                    Slot::Live { rc, .. } => {
+                        *rc -= 1;
+                        *rc == 0
+                    }
+                    Slot::Free { .. } => false,
                 }
-                Slot::Free { .. } => false,
             };
             if should_free {
                 let next_free = self.free_head;
@@ -262,13 +281,25 @@ impl<'a> Pool<'a> {
                 }
             }
         }
+        self.release_worklist = worklist;
+    }
+
+    fn release_unallocated(&mut self, obj: Obj) {
+        let mut worklist = std::mem::take(&mut self.release_worklist);
+        obj.push_children(&mut worklist);
+        self.release_worklist = worklist;
+        while let Some(id) = self.release_worklist.pop() {
+            self.release(id);
+        }
     }
 
     pub fn alloc_obj(&mut self, obj: Obj, span: Span) -> Result<ObjId, Error> {
         let bytes = obj.approx_bytes();
         let next_live = self.live_bytes.saturating_add(bytes);
         if next_live > self.max_bytes {
+            self.release_unallocated(obj);
             return Err(Error::new(
+                "eval.limits",
                 ErrorKind::TooMuchMemory,
                 span,
                 format!("memory limit exceeded ({} bytes)", self.max_bytes),
@@ -288,13 +319,15 @@ impl<'a> Pool<'a> {
         }
 
         if self.chunks.is_empty() || self.last_chunk_len == CHUNK_SLOTS {
-            let buf = AllocBuf::<Slot>::with_capacity(self.alloc, CHUNK_SLOTS).ok_or_else(|| {
-                Error::new(
+            let Some(buf) = AllocBuf::<Slot>::with_capacity(self.alloc, CHUNK_SLOTS) else {
+                self.release_unallocated(obj);
+                return Err(Error::new(
+                    "eval.limits",
                     ErrorKind::TooMuchMemory,
                     span,
                     "allocator exhausted while growing pool",
-                )
-            })?;
+                ));
+            };
             self.chunks.push(buf);
             self.last_chunk_len = 0;
         }
@@ -303,7 +336,7 @@ impl<'a> Pool<'a> {
         let in_chunk = self.last_chunk_len;
         let global_idx = (chunk_idx * CHUNK_SLOTS + in_chunk) as u32;
         let slot = Slot::Live { rc: 1, bytes, obj };
-        // SAFETY: `in_chunk < CHUNK_SLOTS` and is uninitialized.
+        // SAFETY: `in_chunk < CHUNK_SLOTS` かつ未初期化。
         unsafe { self.chunks[chunk_idx].write_at(in_chunk, slot) };
         self.last_chunk_len += 1;
         self.live_bytes = next_live;
@@ -314,21 +347,15 @@ impl<'a> Pool<'a> {
         let tail_len = self.list_len(tail);
         self.retain_val(head);
         self.retain_val(tail);
-        match self.alloc_obj(
+        let id = self.alloc_obj(
             Obj::Cons {
                 head,
                 tail,
                 len: tail_len + 1,
             },
             span,
-        ) {
-            Ok(id) => Ok(RVal::Obj(id)),
-            Err(e) => {
-                self.release_val(head);
-                self.release_val(tail);
-                Err(e)
-            }
-        }
+        )?;
+        Ok(RVal::Obj(id))
     }
 
     pub fn list_len(&self, val: RVal) -> usize {
@@ -339,162 +366,6 @@ impl<'a> Pool<'a> {
                 _ => 0,
             },
             _ => 0,
-        }
-    }
-
-    /// Exports a runtime `RVal` into a standalone `Value`.
-    pub fn export(&self, val: RVal) -> Value {
-        match val {
-            RVal::Void => Value::Void,
-            RVal::Int(n) => Value::Int(n),
-            RVal::Float(x) => Value::Float(x),
-            RVal::Bool(b) => Value::Bool(b),
-            RVal::Char(c) => Value::Char(c),
-            RVal::None => Value::None,
-            RVal::EmptyList => Value::empty_list(),
-            RVal::Builtin(name) => Value::Builtin(name),
-            RVal::Obj(id) => match self.get(id) {
-                Obj::Cons { .. } => {
-                    let mut items = Vec::with_capacity(self.list_len(val));
-                    let mut cur = val;
-                    while let RVal::Obj(cid) = cur {
-                        let Obj::Cons { head, tail, .. } = self.get(cid) else {
-                            break;
-                        };
-                        items.push(self.export(*head));
-                        cur = *tail;
-                    }
-                    Value::list(items)
-                }
-                Obj::Str(s) => Value::str(s.clone()),
-                Obj::Array(xs) => Value::array(xs.iter().map(|v| self.export(*v)).collect()),
-                Obj::Tuple(xs) => Value::tuple(xs.iter().map(|v| self.export(*v)).collect()),
-                Obj::Struct { name, fields } => {
-                    let map = fields
-                        .iter()
-                        .map(|(k, v)| (k.clone(), self.export(*v)))
-                        .collect();
-                    Value::structure(name.clone(), map)
-                }
-                Obj::Variant {
-                    type_name,
-                    variant,
-                    data,
-                } => Value::variant(
-                    type_name.clone(),
-                    variant.clone(),
-                    data.map(|d| self.export(d)),
-                ),
-                Obj::Some(v) => Value::Some(std::rc::Rc::new(self.export(*v))),
-                Obj::Ok(v) => Value::Ok(std::rc::Rc::new(self.export(*v))),
-                Obj::Err(v) => Value::Err(std::rc::Rc::new(self.export(*v))),
-                Obj::Closure { name, .. } => Value::Builtin(match name.as_deref() {
-                    Some(_) => "<defn>",
-                    None => "<fn>",
-                }),
-                Obj::Module { .. } => Value::Builtin("<module>"),
-            },
-        }
-    }
-
-    /// Imports an external `Value` into the pool.
-    pub fn import(&mut self, val: &Value, span: Span) -> Result<RVal, Error> {
-        match val {
-            Value::Void => Ok(RVal::Void),
-            Value::Int(n) => Ok(RVal::Int(*n)),
-            Value::Float(x) => Ok(RVal::Float(*x)),
-            Value::Bool(b) => Ok(RVal::Bool(*b)),
-            Value::Char(c) => Ok(RVal::Char(*c)),
-            Value::None => Ok(RVal::None),
-            Value::Builtin(name) => Ok(RVal::Builtin(name)),
-            Value::Str(s) => Ok(RVal::Obj(
-                self.alloc_obj(Obj::Str((**s).clone()), span)?,
-            )),
-            Value::List(xs) => {
-                let items: Vec<Value> = xs.to_vec();
-                let mut acc = RVal::EmptyList;
-                for item in items.iter().rev() {
-                    let h = self.import(item, span)?;
-                    let next = self.alloc_cons(h, acc, span);
-                    self.release_val(h);
-                    self.release_val(acc);
-                    acc = next?;
-                }
-                Ok(acc)
-            }
-            Value::Array(xs) => {
-                let mut items = Vec::with_capacity(xs.len());
-                for x in xs.iter() {
-                    items.push(self.import(x, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(Obj::Array(items), span)?))
-            }
-            Value::Tuple(xs) => {
-                let mut items = Vec::with_capacity(xs.len());
-                for x in xs.iter() {
-                    items.push(self.import(x, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(Obj::Tuple(items), span)?))
-            }
-            Value::Struct { name, fields } => {
-                let mut map = BTreeMap::new();
-                for (k, v) in fields.iter() {
-                    map.insert(k.clone(), self.import(v, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(
-                    Obj::Struct {
-                        name: (**name).clone(),
-                        fields: map,
-                    },
-                    span,
-                )?))
-            }
-            Value::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                let d = match data {
-                    Some(inner) => Some(self.import(inner, span)?),
-                    None => None,
-                };
-                Ok(RVal::Obj(self.alloc_obj(
-                    Obj::Variant {
-                        type_name: (**type_name).clone(),
-                        variant: (**variant).clone(),
-                        data: d,
-                    },
-                    span,
-                )?))
-            }
-            Value::Some(v) => {
-                let inner = self.import(v, span)?;
-                Ok(RVal::Obj(self.alloc_obj(Obj::Some(inner), span)?))
-            }
-            Value::Ok(v) => {
-                let inner = self.import(v, span)?;
-                Ok(RVal::Obj(self.alloc_obj(Obj::Ok(inner), span)?))
-            }
-            Value::Err(v) => {
-                let inner = self.import(v, span)?;
-                Ok(RVal::Obj(self.alloc_obj(Obj::Err(inner), span)?))
-            }
-            Value::Fn(c) => {
-                let mut env = BTreeMap::new();
-                for (k, v) in c.env.iter() {
-                    env.insert(k.clone(), self.import(v, span)?);
-                }
-                Ok(RVal::Obj(self.alloc_obj(
-                    Obj::Closure {
-                        name: c.name.clone(),
-                        module: None,
-                        params: c.params.clone(),
-                        body: c.body.clone(),
-                        env,
-                    },
-                    span,
-                )?))
-            }
         }
     }
 }

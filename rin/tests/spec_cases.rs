@@ -8,6 +8,9 @@ use rin::{ArenaAllocator, ErrorKind, Limits, eval, eval_with, eval_with_allocato
 struct SpecCase {
     id: String,
     rule_id: String,
+    error_rule: Option<String>,
+    error_message: Option<String>,
+    rendered: Option<String>,
     source: String,
     limit_spec: String,
     expected_kind: String,
@@ -70,11 +73,7 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
     while i < lines.len() {
         let line = lines[i].trim();
         if let Some(heading) = line.strip_prefix("### ") {
-            let id = heading
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let id = heading.split_whitespace().next().unwrap_or("").to_string();
             assert!(
                 !id.is_empty(),
                 "{file_label}:{}: missing case ID in heading",
@@ -89,7 +88,9 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
                 if cur.trim_start().starts_with("```") {
                     in_fence = !in_fence;
                 }
-                if !in_fence && (cur.starts_with("# ") || cur.starts_with("## ") || cur.starts_with("### ")) {
+                if !in_fence
+                    && (cur.starts_with("# ") || cur.starts_with("## ") || cur.starts_with("### "))
+                {
                     break;
                 }
                 section_lines.push(cur);
@@ -104,8 +105,39 @@ fn parse_spec_cases_file(content: &str, file_label: &str) -> Vec<SpecCase> {
     cases
 }
 
+// 主根拠・期待規則はともにバッククォート付きの `[rule.id]` とする。
+fn parse_rule_reference(text: &str) -> Option<&str> {
+    let id = text.trim().strip_prefix("`[")?.strip_suffix("]`")?;
+    (!id.is_empty() && !id.chars().any(|c| c.is_whitespace() || "[]`".contains(c))).then_some(id)
+}
+
+#[test]
+fn rule_references_require_code_and_brackets() {
+    assert_eq!(parse_rule_reference("`[op.arith]`"), Some("op.arith"));
+    assert_eq!(
+        parse_rule_reference(" `[src.nesting-limit]` "),
+        Some("src.nesting-limit")
+    );
+    for malformed in [
+        "op.arith",
+        "[op.arith]",
+        "`op.arith`",
+        "`[op.arith`",
+        "`op.arith]`",
+        "`[]`",
+        "`[[op.arith]]`",
+        "`[op. arith]`",
+        "`[op.arith]` trailing",
+    ] {
+        assert_eq!(parse_rule_reference(malformed), None, "{malformed}");
+    }
+}
+
 fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     let mut rule_id = None;
+    let mut error_rule = None;
+    let mut error_message = None;
+    let mut rendered = None;
     let mut source = None;
     let mut table_row = None;
 
@@ -113,8 +145,39 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     while idx < lines.len() {
         let trimmed = lines[idx].trim();
         if let Some(rest) = trimmed.strip_prefix("主根拠：") {
-            let cleaned = rest.trim().trim_end_matches('。').trim_matches('`');
-            rule_id = Some(cleaned.to_string());
+            let rule = parse_rule_reference(rest)
+                .unwrap_or_else(|| panic!("{file_label} ({id}): 主根拠 must use `[rule.id]`"));
+            rule_id = Some(format!("[{rule}]"));
+        } else if let Some(rest) = trimmed.strip_prefix("期待規則：") {
+            let rule = parse_rule_reference(rest)
+                .unwrap_or_else(|| panic!("{file_label} ({id}): 期待規則 must use `[rule.id]`"));
+            error_rule = Some(rule.to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("期待メッセージ：") {
+            error_message = Some(
+                rest.trim()
+                    .strip_prefix('`')
+                    .and_then(|s| s.strip_suffix('`'))
+                    .unwrap_or_else(|| {
+                        panic!("{file_label} ({id}): 期待メッセージ must use backticks")
+                    })
+                    .to_string(),
+            );
+        } else if trimmed == "```text" {
+            assert!(
+                rendered.is_none(),
+                "{file_label} ({id}): duplicate expected rendering"
+            );
+            idx += 1;
+            let mut buf = Vec::new();
+            while idx < lines.len() && lines[idx].trim() != "```" {
+                buf.push(lines[idx]);
+                idx += 1;
+            }
+            assert!(
+                idx < lines.len(),
+                "{file_label} ({id}): unclosed ```text block"
+            );
+            rendered = Some(buf.join("\n"));
         } else if trimmed == "```rin" {
             idx += 1;
             let mut buf = Vec::new();
@@ -122,9 +185,13 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                 buf.push(lines[idx]);
                 idx += 1;
             }
-            assert!(idx < lines.len(), "{file_label} ({id}): unclosed ```rin block");
+            assert!(
+                idx < lines.len(),
+                "{file_label} ({id}): unclosed ```rin block"
+            );
             source = Some(buf.join("\n"));
-        } else if trimmed.starts_with("|") && !trimmed.contains("---") && !trimmed.contains("上限") {
+        } else if trimmed.starts_with("|") && !trimmed.contains("---") && !trimmed.contains("上限")
+        {
             let cols: Vec<&str> = trimmed
                 .split('|')
                 .map(str::trim)
@@ -147,6 +214,9 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     SpecCase {
         id,
         rule_id: rule_id.unwrap_or_else(|| panic!("{file_label}: missing 主根拠")),
+        error_rule,
+        error_message,
+        rendered,
         source: source.unwrap_or_else(|| panic!("{file_label}: missing ```rin source block")),
         limit_spec,
         expected_kind,
@@ -178,11 +248,37 @@ fn run_case(case: &SpecCase) {
         eval_with(&case.source, &[], limits)
     };
 
+    if let Err(err) = &result {
+        if let Some(expected) = &case.rendered {
+            assert_eq!(
+                &err.render(&case.source),
+                expected,
+                "{}: rendered diagnostic mismatch",
+                case.id
+            );
+        }
+        if let Some(expected) = &case.error_message {
+            assert_eq!(
+                &err.message, expected,
+                "{}: error message mismatch",
+                case.id
+            );
+        }
+        assert_eq!(
+            Some(err.rule()),
+            case.error_rule.as_deref(),
+            "{}: error rule mismatch: {err}",
+            case.id
+        );
+    }
     match case.expected_kind.as_str() {
         "値" => {
             let actual = result.unwrap_or_else(|e| panic!("{}: unexpected error: {e}", case.id));
             let expected = eval(&case.expected_value).unwrap_or_else(|e| {
-                panic!("{}: failed to eval expected '{}': {e}", case.id, case.expected_value)
+                panic!(
+                    "{}: failed to eval expected '{}': {e}",
+                    case.id, case.expected_value
+                )
             });
             assert_eq!(actual, expected, "{}: value mismatch", case.id);
         }
@@ -223,7 +319,10 @@ fn verify_all_spec_cases() {
 
     let index_md = fs::read_to_string(docs.join("spec-cases.md")).unwrap();
     let index = parse_index_counts(&index_md);
-    assert!(!index.is_empty(), "no category table found in docs/spec-cases.md");
+    assert!(
+        !index.is_empty(),
+        "no category table found in docs/spec-cases.md"
+    );
 
     let mut seen_ids = BTreeSet::new();
     for (prefix, (rel_file, expected_count)) in &index {
@@ -255,6 +354,22 @@ fn verify_all_spec_cases() {
                 case.id,
                 case.rule_id
             );
+            if case.expected_kind == "値" {
+                assert!(
+                    case.error_rule.is_none()
+                        && case.error_message.is_none()
+                        && case.rendered.is_none(),
+                    "{}: value case has error rule",
+                    case.id
+                );
+            } else {
+                let rule = case.error_rule.as_ref().expect("error case needs 期待規則");
+                assert!(
+                    rule_ids.contains(&format!("[{rule}]")),
+                    "{}: unknown error rule {rule}",
+                    case.id
+                );
+            }
             run_case(case);
         }
     }

@@ -63,7 +63,7 @@ pub trait Allocator {
 ```rust
 pub struct Limits {
     pub steps: usize,        // 既定: 100_000
-    pub depth: usize,        // 既定: 200
+    pub depth: usize,        // 既定: 200（2 MiB のスレッドスタックで検証）
     pub memory_bytes: usize, // 既定: 16 * 1024 * 1024
 }
 
@@ -76,18 +76,113 @@ pub enum ErrorKind {
     TooMuchMemory,
 }
 
+pub struct StackFrame {
+    pub module: Option<String>,
+    pub name: Option<String>,
+    pub caller_module: Option<String>,
+    pub at: Span,
+    pub tail_calls: usize,
+    pub tail_target_module: Option<String>,
+    pub tail_target_name: Option<String>,
+    pub repeat_count: usize,
+    pub from_host: bool,
+    pub via_builtin: Option<String>,
+}
+
 pub struct Error {
     pub kind: ErrorKind,
-    pub at: Span, // 1始まりの line, col
+    pub at: Span, // 1始まりの line, col（col は UTF-8 バイト位置）
     pub message: String,
 }
+
+impl Error {
+    pub fn rule(&self) -> &'static str; // 角括弧を含まない規則名
+    pub fn module(&self) -> Option<&str>;
+    pub fn backtrace(&self) -> &[StackFrame];
+    pub fn omitted_frames(&self) -> usize;
+    pub fn format_backtrace(&self) -> String;
+}
 ```
+
+`Error::new(rule, kind, at, message)` と `Error::lex/parse/runtime(rule, at, message)` はすべて `&'static str` の規則名を必須とする（空文字は panic）。表示の先頭行は `L:C: message [rule.id]`、モジュール内では `module L:C: message [rule.id]` となり、その後に呼び出し履歴が続く。`message` と `format_backtrace()` の内容には規則名を追加しない。
+
+名前解決に失敗したときは、候補名やフィールド・公開シンボル一覧を `Error.message` に含める。表示順・件数上限・候補の選択規則は [言語仕様の `[eval.hints]`](spec.md) に従う。C FFI の `RinError.message` / `text` にも含まれる。
+
+`depth` は、ユーザー定義関数の呼び出しの入れ子の深さを制限する。組み込み関数からの呼び出しも含めるが、末尾呼び出し最適化が適用された呼び出しは深さを増やさない。既定値の 200 は Debug / Release ともに 2 MiB のスレッドスタックで検証している。上限を増やす場合や、より小さいスタックのスレッドから実行する場合は、利用する環境でスタック容量を確認する。
+
+### 1.5 深い値の処理
+
+ホスト側のコンテナは `Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
+
+解放処理はこれらの所有データと `ListNode` に実装している。`Value` 自身は独自の `Drop` を持たないため、パターンマッチで所有データを取り出せる。共有参照の解放では参照カウントを減らすだけで、最後の所有者になったときだけ子を処理する。
+
+ソースの構文入れ子上限とは別に、繰り返し処理やホストから渡す値は深く入れ子になり得る。次の処理は明示的な作業スタックを使い、値の深さに比例してネイティブスタックを消費しない。
+
+- ホストと内部プールの値変換（import / export）。`bind`・評価結果・関数の引数と戻り値を含む。
+- `Value` の `Display`・`Debug`・`PartialEq`・`approx_bytes`、`ListNode` の `Debug`・等値比較、および Rin 内の `==` / `!=`。
+- `Schema::check`（C FFI の `rin_check` / `rin_check_str` を含む）。値を消費せず同じ参照を巡回するスキーマは検証エラーとなる。
+- `Value` / `ListNode` の解放。共有された子は残し、最後の強参照を解放する際に子を分解する。Weak 参照が残る場合も扱う。
+
+import がメモリ上限・アロケータの確保失敗・取り込めない値で失敗した場合、生成途中の値を回収する。既存の束縛は保持し、同じ `Machine` を引き続き使える。C FFI の値操作は同じ値表現・解放処理を使用する。
+
+変換と解放は深さ 32、比較と書式化は深さ 16 まで直接処理し、それ以降は反復処理だけで進める。反復処理から深さをリセットして再帰へ戻ることはない。作業スタックの小さい部分は固定長領域に置き、必要な場合だけシステムヒープへ拡張する。この一時領域とホスト側の `Value` は `memory_bytes` の計数対象ではない。すべての確保を指定アロケータへ統合する変更は別途行う。評価器の関数呼び出し深度に関する制約は 1.4 の `depth` と同じである。
+
+`Debug` は入れ子を省略せず、`{:#?}` は浅い部分を字下げして出力する。書式化の深さはリストの各セル（tail 方向）も 1 段と数えるため、平らな長いリストも途中で切り替わる。書式化の深さ上限に達した部分木は、スタック消費を抑えるためコンパクトな形式で出力する。
+
+### 1.6 ソース付きエラー表示
+
+```rust
+impl Error {
+    pub fn render(&self, source: &str) -> String;
+    pub fn render_with<'s>(
+        &self,
+        source: impl FnMut(Option<&str>) -> Option<&'s str>,
+    ) -> String;
+    pub fn render_to(
+        &self, out: &mut (impl std::fmt::Write + ?Sized), source: &str,
+    ) -> std::fmt::Result;
+    pub fn render_with_to<'s>(
+        &self,
+        out: &mut (impl std::fmt::Write + ?Sized),
+        source: impl FnMut(Option<&str>) -> Option<&'s str>,
+    ) -> std::fmt::Result;
+}
+```
+
+`render` にエラーが発生したソースコード全体を渡すと、該当行に `^` キャレットを付けて、エラーメッセージとともに表示する文字列を返す。呼び出し履歴にも同じソースコード内の行を表示する。別のモジュールからの呼び出しについては、履歴だけを表示する。
+
+複数のモジュールのソースコードを表示するには、`render_with` を使う。引数には、モジュール名を受け取ってソースコード全体を返すコールバックを渡す。エラーの発生箇所には、そのモジュールのソースコードを使う。呼び出し履歴には、関数を呼び出した側のモジュールのソースコードを使う。
+
+- コールバックが `Some(name)` を受け取ったら、名前が `name` のモジュールのソースコードを `Some(source)` で返す。
+- `None` を受け取ったら、モジュールに属さないコード（`eval` に渡したコードなど）を `Some(source)` で返す。
+- 対応するソースコードを用意できなければ、`None` を返す。その箇所はエラーメッセージや呼び出し履歴だけを表示する。
+
+コールバックは表示する位置ごとに 1 回呼ばれるため、同じモジュール名を複数回受け取ることがある。
+
+渡すソースコードは、エラーが発生したときに実行していたものと一致させる。たとえば、エラー発生後にモジュールを読み込み直した場合、更新後のコードでは行番号が合わないことがある。実行時のソースコードを特定できなければ、コールバックから `None` を返す。
+
+`render_to` / `render_with_to` は同じ表示を `fmt::Write` へ追記し、書き込みが失敗した時点で `fmt::Error` を返す。末尾の改行は付けない。表示幅・無効な位置の扱いは言語仕様の `[eval.snippet]` に従う。
+
+```rust
+let source = "(/ 1 0)";
+let error = rin::eval(source).unwrap_err();
+println!("{}", error.render(source));
+```
+
+```text
+1:1: division by zero [op.arith]
+  |
+1 | (/ 1 0)
+  | ^
+```
+
+ソース付き表示はこの API を明示的に呼んだときだけ生成する。`Error.message`、通常の `Display`、C FFI の `RinError.message` / `text` はソースを含まない。
 
 ---
 
 ## 2. C FFI API
 
-ヘッダ：[rin.h](file:///Users/tappoy/proj/rin/rin/include/rin.h)
+ヘッダ：[rin.h](../rin/include/rin.h)
 
 ### 2.1 型定義
 
@@ -96,7 +191,7 @@ pub struct Error {
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
   - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
 - `RinMachine` / `RinValue`：不透明ハンドル型。
-- `RinEvalResult`：`{ bool ok; RinValue *value; char *error_message; size_t error_line; size_t error_col; }`
+- `RinEvalResult`：`{ bool ok; RinValue *value; }`
 
 ### 2.2 マシン操作
 
@@ -110,7 +205,51 @@ pub struct Error {
 | `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む |
 | `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す |
 | `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す |
-| `void rin_res_free(RinEvalResult *res)` | `rin_eval` の結果（`value` / `error_message`）を解放する |
+| `const RinError *rin_last_error(const RinMachine *machine)` | 直近の対象操作のエラーを借用する（エラーなし・NULL machine は NULL） |
+| `void rin_res_free(RinEvalResult *res)` | 結果の `value` を解放し NULL にする（エラー情報は保持する） |
+
+#### エラー情報の借用
+
+`RinError` は次の情報を持つ。ホストは構造体・文字列のいずれも解放しない。
+
+```c
+typedef enum RinErrorKind {
+    RIN_ERR_LEX = 0, RIN_ERR_PARSE = 1, RIN_ERR_RUNTIME = 2,
+    RIN_ERR_TOO_MANY_STEPS = 3, RIN_ERR_TOO_DEEP = 4,
+    RIN_ERR_TOO_MUCH_MEMORY = 5, RIN_ERR_HOST = 6
+} RinErrorKind;
+
+typedef struct RinError {
+    RinErrorKind kind;
+    const char *message;
+    const char *module;
+    const char *rule;
+    size_t line;
+    size_t col;
+    const char *backtrace;
+    const char *text;
+} RinError;
+```
+
+- `message` は見出しの本文、`text` は Rust の `Error::to_string()` 相当の見出しと履歴全体であり、必ず非 NULL の UTF-8・NUL 終端文字列である。内部 NUL は可視の `\0` に置き換える。ほかの文字列にも同じ変換を適用する。
+- `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
+- `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
+- `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
+- 対象操作は `rin_eval` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` の 5 関数である。同じ machine への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ machine の対象操作・解放と並行して参照してはならない。
+- 対象操作は引数検査の前に前回の情報をクリアする。有効な machine への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
+- NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。machine 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
+- `RinEvalResult.value` は評価・関数呼び出し成功時にはホストが所有する値であり、`rin_res_free` で解放する。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
+
+有効な `m` に対する利用例：
+
+```c
+RinEvalResult result = rin_eval(m, source);
+if (!result.ok) {
+    const RinError *error = rin_last_error(m);
+    fprintf(stderr, "%s\n", error->text);
+}
+rin_res_free(&result);
+```
 
 ### 2.3 値の生成と解放
 
