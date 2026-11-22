@@ -173,3 +173,56 @@ fn writer_output_and_failures() {
             .is_err()
     );
 }
+
+#[test]
+fn gutter_uses_only_visible_lines_and_resolves_each_position_once() {
+    let ma = "(defn fail () (/ 1 0))";
+    let mb = format!(
+        "(import ma)\n{}(defn run () (+ 1 (ma.fail)))",
+        "\n".repeat(8)
+    );
+    let root = format!("(import mb)\n{}(mb.run)", "\n".repeat(98));
+    let mut alloc = HeapAllocator;
+    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    machine.load_module("ma", ma).unwrap();
+    machine.load_module("mb", &mb).unwrap();
+    let error = machine.eval(&root).unwrap_err();
+    let mut requests = Vec::new();
+    let rendered = error.render_with(|module| {
+        requests.push(module.map(str::to_owned));
+        match module {
+            Some("ma") => Some(ma),
+            Some("mb") => Some(mb.as_str()),
+            None => Some(root.as_str()),
+            _ => unreachable!(),
+        }
+    });
+    assert_eq!(requests, [Some("ma".into()), Some("mb".into()), None]);
+    let gutters = |output: &str, column: usize, lines: usize| {
+        let positions: Vec<_> = output.lines().filter_map(|line| line.find('|')).collect();
+        assert_eq!(positions, vec![column; lines * 3], "{output}");
+    };
+    gutters(&rendered, 4, 3);
+    assert!(rendered.contains("\n  1 | (defn fail"));
+    assert!(rendered.contains("\n 10 | (defn run"));
+    assert!(rendered.contains("\n100 | (mb.run)"));
+    for outer in [None, Some("short source")] {
+        let rendered = error.render_with(|module| match module {
+            Some("ma") => Some(ma),
+            Some("mb") => Some(mb.as_str()),
+            None => outer,
+            _ => unreachable!(),
+        });
+        gutters(&rendered, 3, 2);
+        assert!(rendered.contains("\n 1 | (defn fail"));
+    }
+    // A supplied line with an out-of-range column must not widen the gutter either.
+    let short_mb = format!("{}x", "\n".repeat(9));
+    let rendered = error.render_with(|module| match module {
+        Some("ma") => Some(ma),
+        Some("mb") => Some(short_mb.as_str()),
+        _ => None,
+    });
+    gutters(&rendered, 2, 1);
+    assert_eq!(rendered, error.render(ma));
+}

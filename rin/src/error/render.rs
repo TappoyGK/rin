@@ -24,7 +24,7 @@ impl Error {
     ///
     /// `None` はモジュール外のソースを表す。取得できないソースには `None` を返す。
     /// 履歴には呼び出し先ではなく呼び出し元のモジュールのソースを使う。
-    /// 同じモジュールについて複数回呼び出す場合がある。
+    /// 同じモジュールについて複数回呼び出す場合があるが、各表示位置につき 1 回だけ取得する。
     pub fn render_with<'s>(&self, source: impl FnMut(Option<&str>) -> Option<&'s str>) -> String {
         let mut out = String::new();
         self.render_with_to(&mut out, source)
@@ -49,36 +49,75 @@ impl Error {
         mut source: impl FnMut(Option<&str>) -> Option<&'s str>,
     ) -> fmt::Result {
         self.write_header(out)?;
-        if self.at.line > 0 && self.at.col > 0 {
-            snippet(out, source(self.module()), self.at)?;
-        }
+        // 幅の決定と出力で同じ取得結果を使い、FnMut を二度呼ばない。
+        let mut resolve = |module: Option<&str>, at: Span| {
+            if at.line == 0 || at.col == 0 {
+                return None;
+            }
+            Snippet::new(source(module)?, at)
+        };
+        let primary = resolve(self.module(), self.at);
+        let frames: Vec<_> = self
+            .backtrace
+            .iter()
+            .map(|frame| {
+                if frame.from_host {
+                    None
+                } else {
+                    resolve(frame.caller_module.as_deref(), frame.at)
+                }
+            })
+            .collect();
+        let max_line = primary
+            .iter()
+            .chain(frames.iter().flatten())
+            .map(|snippet| snippet.number)
+            .max()
+            .unwrap_or(1);
+        let digits = max_line.ilog10() as usize + 1;
+        snippet(out, primary.as_ref(), digits)?;
         for (i, frame) in self.backtrace.iter().enumerate() {
             if i == MAX_BACKTRACE_SIDE && self.omitted_frames > 0 {
                 write!(out, "\n  ... {} frames omitted", self.omitted_frames)?;
             }
             write!(out, "\n  in {frame}")?;
-            if !frame.from_host && frame.at.line > 0 && frame.at.col > 0 {
-                snippet(out, source(frame.caller_module.as_deref()), frame.at)?;
-            }
+            snippet(out, frames[i].as_ref(), digits)?;
         }
         Ok(())
     }
 }
 
-fn snippet(out: &mut (impl fmt::Write + ?Sized), source: Option<&str>, at: Span) -> fmt::Result {
-    let Some(line) = source.and_then(|s| s.split('\n').nth(at.line - 1)) else {
+struct Snippet<'s> {
+    line: &'s str,
+    prefix: &'s str,
+    number: usize,
+}
+
+impl<'s> Snippet<'s> {
+    fn new(source: &'s str, at: Span) -> Option<Self> {
+        let line = source.split('\n').nth(at.line - 1)?;
+        // CRLF の CR を表示に含めない。最終行の末尾 CR も同じく扱う。
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let prefix = line.get(..at.col - 1)?;
+        Some(Self {
+            line,
+            prefix,
+            number: at.line,
+        })
+    }
+}
+
+fn snippet(
+    out: &mut (impl fmt::Write + ?Sized),
+    snippet: Option<&Snippet<'_>>,
+    digits: usize,
+) -> fmt::Result {
+    let Some(snippet) = snippet else {
         return Ok(());
     };
-    // CRLF の CR を表示に含めない。最終行の末尾 CR も同じく扱う。
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    let offset = at.col - 1;
-    let Some(prefix) = line.get(..offset) else {
-        return Ok(());
-    };
-    let caret = write_line(&mut NullWriter, prefix)?;
-    let digits = at.line.ilog10() as usize + 1;
-    write!(out, "\n{:digits$} |\n{} | ", "", at.line)?;
-    write_line(out, line)?;
+    let caret = write_line(&mut NullWriter, snippet.prefix)?;
+    write!(out, "\n{:digits$} |\n{:>digits$} | ", "", snippet.number)?;
+    write_line(out, snippet.line)?;
     write!(out, "\n{:digits$} | {:caret$}^", "", "")
 }
 
