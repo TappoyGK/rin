@@ -286,40 +286,44 @@ impl<'a> Compiler<'a> {
     fn emit(&mut self, op: Op, span: Span) -> usize {
         self.flush_ticks();
         let ip = self.chunk().emit(op, span);
-        if let Op::GetGlobal(id) = op {
-            // 大域の束縛は上書きされても消えない。既存の値があれば、この参照は
-            // 未定義名エラーにならないため、診断用のローカル情報を記録しない。
-            // 再読込で消えるモジュールの束縛は、この判定に含めない。
-            if matches!(self.globals.get(id as usize), Some(Some(_))) {
-                return ip;
-            }
-            let scope = self.scopes.last().unwrap();
-            // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
-            if scope.outer_local_count == 0 && scope.locals.is_empty() {
-                return ip;
-            }
-            if !needs_name_candidates(&self.syms.names[id as usize]) {
-                return ip;
-            }
-            if self.shared_names.is_none() {
-                self.shared_names = Some(Rc::new(OnceCell::new()));
-            }
-            if let Some(head) = self.visible_name_head() {
-                let previous = self.chunk().names.as_ref().map(|names| names.last_site);
-                let site = self.name_table.sites.len();
-                self.name_table.sites.push(NameSite { ip, head, previous });
-                if let Some(names) = &mut self.chunk().names {
-                    names.last_site = site;
-                } else {
-                    let table = Rc::clone(self.shared_names.as_ref().unwrap());
-                    self.chunk().names = Some(NameInfo {
-                        table,
-                        last_site: site,
-                    });
-                }
-            }
+        if let Op::GetGlobal(id) = op
+            && !matches!(self.globals.get(id as usize), Some(Some(_)))
+        {
+            self.record_name_site(id, ip);
         }
         ip
+    }
+
+    // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
+    // 再読込で消えるモジュールの束縛は、この判定に含めない。
+    // 通常の emit を小さく保ち、診断記録の処理を分離する。
+    #[cold]
+    fn record_name_site(&mut self, id: u32, ip: usize) {
+        let scope = self.scopes.last().unwrap();
+        // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
+        if scope.outer_local_count == 0 && scope.locals.is_empty() {
+            return;
+        }
+        if !needs_name_candidates(&self.syms.names[id as usize]) {
+            return;
+        }
+        if self.shared_names.is_none() {
+            self.shared_names = Some(Rc::new(OnceCell::new()));
+        }
+        if let Some(head) = self.visible_name_head() {
+            let previous = self.chunk().names.as_ref().map(|names| names.last_site);
+            let site = self.name_table.sites.len();
+            self.name_table.sites.push(NameSite { ip, head, previous });
+            if let Some(names) = &mut self.chunk().names {
+                names.last_site = site;
+            } else {
+                let table = Rc::clone(self.shared_names.as_ref().unwrap());
+                self.chunk().names = Some(NameInfo {
+                    table,
+                    last_site: site,
+                });
+            }
+        }
     }
 
     fn resolve_var(&mut self, name: &str, span: Span) -> Result<Op, Error> {
