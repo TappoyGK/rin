@@ -565,7 +565,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     }
                 }
             }
-            RVal::Builtin(b) => self.apply_builtin(b, args, span),
+            RVal::Builtin(b) => self.dispatch_builtin(b, args, span),
             other => Err(Error::runtime(
                 "expr.call",
                 span,

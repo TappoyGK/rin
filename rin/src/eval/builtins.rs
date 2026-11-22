@@ -25,15 +25,19 @@ impl BuiltinId {
 }
 
 impl Runner<'_, '_> {
-    // 高階関数の再入時に通常の組み込み命令の作業領域を残さない。
+    // Debug では高階関数の再入時に通常の組み込み命令の作業領域を残さない。
+    // Release は apply_builtin への単純な委譲。大きな本体は VM にインライン化しない。
     #[cfg_attr(debug_assertions, inline(never))]
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub(super) fn apply_builtin(
+    pub(super) fn dispatch_builtin(
         &mut self,
         b: BuiltinId,
         args: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
+        #[cfg(not(debug_assertions))]
+        return self.apply_builtin(b, args, span);
+        #[cfg(debug_assertions)]
         match b {
             BuiltinId::Find => self.builtin_find(args, span),
             BuiltinId::Any => self.builtin_any(args, span),
@@ -43,25 +47,12 @@ impl Runner<'_, '_> {
             BuiltinId::FlatMap => self.builtin_flat_map(args, span),
             BuiltinId::Fold => self.builtin_fold(args, span),
             BuiltinId::SortBy => self.builtin_sort_by(args, span),
-            _ => self.apply_simple_builtin(b, args, span),
+            _ => self.apply_builtin(b, args, span),
         }
     }
 
-    fn apply_simple_builtin(
-        &mut self,
-        b: BuiltinId,
-        args: &[RVal],
-        span: Span,
-    ) -> Result<RVal, Error> {
+    fn apply_builtin(&mut self, b: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
         match b {
-            BuiltinId::Find
-            | BuiltinId::Any
-            | BuiltinId::All
-            | BuiltinId::Map
-            | BuiltinId::Filter
-            | BuiltinId::FlatMap
-            | BuiltinId::Fold
-            | BuiltinId::SortBy => unreachable!(),
             BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div | BuiltinId::Rem => {
                 self.arith(b, args, span)
             }
@@ -461,7 +452,13 @@ impl Runner<'_, '_> {
                 }
                 Ok(RVal::Bool(false))
             }
-
+            BuiltinId::Find => self.builtin_find(args, span),
+            BuiltinId::Any => self.builtin_any(args, span),
+            BuiltinId::All => self.builtin_all(args, span),
+            BuiltinId::Map => self.builtin_map(args, span),
+            BuiltinId::Filter => self.builtin_filter(args, span),
+            BuiltinId::FlatMap => self.builtin_flat_map(args, span),
+            BuiltinId::Fold => self.builtin_fold(args, span),
             BuiltinId::Zip => {
                 let [a_v, b_v] = args else {
                     return Err(Error::runtime(
@@ -525,7 +522,7 @@ impl Runner<'_, '_> {
                 }
                 self.build_list_from_borrowed(&items, span)
             }
-
+            BuiltinId::SortBy => self.builtin_sort_by(args, span),
             BuiltinId::Unique => {
                 let xs = self.expect_one_list("unique", args, span)?;
                 let items = self.list_to_vec(xs);
@@ -584,6 +581,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_find(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::Find;
 
@@ -627,6 +625,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_any(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::Any;
 
@@ -667,6 +666,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_all(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::All;
 
@@ -707,6 +707,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_map(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::Map;
 
@@ -741,6 +742,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_filter(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::Filter;
 
@@ -792,6 +794,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_flat_map(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::FlatMap;
 
@@ -836,6 +839,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_fold(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::Fold;
 
@@ -874,6 +878,7 @@ impl Runner<'_, '_> {
     }
 
     #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn builtin_sort_by(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let b = BuiltinId::SortBy;
 
