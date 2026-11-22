@@ -4,6 +4,10 @@
 
 ## 1. リリース運用と作業 PR
 
+各バージョンの開発を始めたら、最初に `release` → `main` のリリース PR を **ドラフト** で作る。作業 PR を `release` に取り込むと、同じリリース PR の差分も更新されるため、準備中に作り直さない。取り込む機能・破壊的変更・対象イシューに合わせて本文を更新する。
+
+リリース PR をマージしたら、その PR は完了とする。次のバージョンでは、同じ `release` ブランチから新しいドラフト PR を作る。PR のマージとタグの公開はユーザーが行う。
+
 1. 作業ブランチは `release` から作成し、仕様（`docs/spec.md` / `docs/schema.md` / `docs/api.md`）・実装（`rin/src/`）・仕様例（`docs/spec-cases/`）・テストを揃えて `release` 向けの PR を出す。
 2. コミットメッセージは `docs:` / `feat:` / `fix:` などの接頭辞に続けて日本語で書く。
 3. 作業 PR 本文では関連イシューを `Refs #番号` 等で紐づけ、自動クローズ（`Closes #番号`）は `main` 向けリリース PR でまとめて行う。
@@ -11,7 +15,7 @@
 
 ## 2. リリース準備
 
-公開対象が揃ったら、`release` 上で最終確認とバージョン確定を行う準備 PR を作成・取り込む。
+公開対象が揃ったら、`release` から準備ブランチを作り、バージョンと変更履歴を確定する準備 PR を `release` 向けに作成する。検証後、ユーザーが準備 PR をマージするまでリリース PR はドラフトのままにする。
 
 1. `rin/Cargo.toml` の `version` を `VERSION` に更新する（`Cargo.lock` も同期する）。
 2. [変更履歴](changelog.md) に `## vVERSION` を確定し、取り込む作業 PR のリンク（`（[PR #番号](...)）`）が漏れていないか照合する。変更履歴にはイシューへのリンクを記載しない。
@@ -21,6 +25,7 @@
 cargo fmt --all -- --check
 cargo clippy --workspace --locked --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps
+cargo test --workspace --locked
 cargo test --workspace --locked --release
 cargo build --release --workspace --locked
 ```
@@ -29,7 +34,7 @@ cargo build --release --workspace --locked
 
 ## 3. マージとタグ公開
 
-1. `release` から `main` へのリリース PR に `Closes #番号` を揃えてレビュー・`release checks` 通過後にマージする。
+1. 準備 PR を取り込んだ後、既存のリリース PR に `Closes #番号` を揃え、最新の `release checks` 通過を確認してドラフトを解除する。レビュー後、ユーザーがマージする。
    - **重要**：`release` ブランチを継続して使い回すため、`release` → `main` のマージは必ず **merge commit** を使う（squash merge しない）。
 2. マージ後の `main` に `vVERSION` タグを付与して push・公開する。
 
