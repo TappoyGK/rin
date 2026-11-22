@@ -7,7 +7,7 @@ use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, Span, StackFrame};
-use crate::pool::{Obj, RVal};
+use crate::pool::{Obj, ObjId, RVal};
 
 use super::{CallOrigin, FrameSource, Runner};
 
@@ -16,6 +16,13 @@ struct Resume {
     ip: usize,
     stack_start: usize,
     captures: Rc<[RVal]>,
+}
+
+// 末尾呼び出し先のクロージャを所有し、捕捉値を実行終了まで生かす。
+// Rc<[RVal]> の共有だけでは、Pool 内の値の参照数は増えない。
+struct TailState {
+    calls: usize,
+    callee: Option<ObjId>,
 }
 
 // Release の戻り値は従来どおり RVal。Debug だけ呼び出し前に命令ループを抜ける。
@@ -93,7 +100,10 @@ impl Runner<'_, '_> {
         caller_module: Option<u32>,
     ) -> Result<RVal, Error> {
         let mut tail_source = None;
-        let mut tail_calls = 0;
+        let mut tail = TailState {
+            calls: 0,
+            callee: None,
+        };
         #[cfg(debug_assertions)]
         let mut resume = Resume {
             ip: 0,
@@ -104,20 +114,14 @@ impl Runner<'_, '_> {
         let mut res = self.exec_frame_inner(
             &entry,
             &mut tail_source,
-            &mut tail_calls,
+            &mut tail,
             captures,
             base,
             local_count,
         );
         #[cfg(debug_assertions)]
         let mut res = loop {
-            match self.exec_frame_inner(
-                &entry,
-                &mut tail_source,
-                &mut tail_calls,
-                base,
-                &mut resume,
-            ) {
+            match self.exec_frame_inner(&entry, &mut tail_source, &mut tail, base, &mut resume) {
                 Ok(FrameExit::Return(value)) => break Ok(value),
                 Ok(FrameExit::Call {
                     arg_start,
@@ -135,10 +139,13 @@ impl Runner<'_, '_> {
                 err,
                 &entry,
                 tail_source.as_ref(),
-                tail_calls,
+                tail.calls,
                 origin,
                 caller_module,
             );
+        }
+        if let Some(callee) = tail.callee {
+            self.pool.release(callee);
         }
         // キャプチャを直接解放し、状態構造体の drop を経由しない。
         #[cfg(debug_assertions)]
@@ -209,7 +216,7 @@ impl Runner<'_, '_> {
         &mut self,
         entry: &FrameSource<'_>,
         tail_source: &mut Option<FrameSource<'_>>,
-        tail_calls: &mut usize,
+        tail: &mut TailState,
         #[cfg(not(debug_assertions))] mut captures: Rc<[RVal]>,
         base: usize,
         #[cfg(not(debug_assertions))] local_count: usize,
@@ -661,10 +668,14 @@ impl Runner<'_, '_> {
                                 self.stack.truncate(base + argc);
                                 let new_locals = proto.local_count as usize;
                                 self.stack.resize(base + new_locals, RVal::Void);
-                                self.pool.release_val(callee);
+                                // スタックにあった呼び出し先の所有権を移す。
+                                // 前の呼び出し先を解放する前に、新しいものを保持する。
+                                if let Some(previous) = tail.callee.replace(id) {
+                                    self.pool.release(previous);
+                                }
                                 self.active_module = proto.module;
                                 *tail_source = Some(FrameSource::Proto(proto));
-                                *tail_calls += 1;
+                                tail.calls += 1;
                                 #[cfg(not(debug_assertions))]
                                 {
                                     captures = cap;
