@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- 処理系とテストを責務ごとのモジュールに分割し、公開APIと既存の動作を保ったままソース構成を整理した（[PR #56](https://github.com/TappoyGK/rin/pull/56)）。
+
 - ソース整形API `rin::fmt::format` と `rin fmt` CLIを追加した。コメント・リテラル・構文の意味を保ちながら書式を揃え、ファイルの書き換え、`--check`、標準入力からの整形に対応する（[PR #54](https://github.com/TappoyGK/rin/pull/54)）。
 
 - ゲームなしでModを検証する `deftest`・`check`・`check_eq`、Rustのテスト実行API、`rin test` CLIを追加した。テストごとの独立した環境、検査失敗の蓄積、ソース付き診断、JSON出力、フィルタと資源上限の指定に対応する。CLIオプションはSuzと同じ形式とし、外部クレートを使わずに実装した（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
