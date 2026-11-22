@@ -6,6 +6,8 @@ use crate::pool::{Obj, RVal};
 
 use super::Runner;
 
+mod equality;
+
 impl Runner<'_, '_> {
     pub(super) fn is_list(&self, v: RVal) -> bool {
         matches!(v, RVal::EmptyList)
@@ -34,21 +36,28 @@ impl Runner<'_, '_> {
         }
     }
 
-    pub(super) fn list_get(&self, mut v: RVal, mut idx: usize) -> Option<RVal> {
+    pub(super) fn list_get(
+        &mut self,
+        mut v: RVal,
+        mut idx: usize,
+        span: Span,
+    ) -> Result<Option<RVal>, Error> {
+        self.charge(idx.saturating_add(1).min(self.pool.list_len(v)), span)?;
         while let RVal::Obj(id) = v {
             let Obj::Cons { head, tail, .. } = self.pool.get(id) else {
                 break;
             };
             if idx == 0 {
-                return Some(*head);
+                return Ok(Some(*head));
             }
             idx -= 1;
             v = *tail;
         }
-        None
+        Ok(None)
     }
 
-    pub(super) fn list_to_vec(&self, mut v: RVal) -> Vec<RVal> {
+    pub(super) fn list_to_vec(&mut self, mut v: RVal, span: Span) -> Result<Vec<RVal>, Error> {
+        self.charge(self.pool.list_len(v), span)?;
         let mut out = Vec::with_capacity(self.pool.list_len(v));
         while let RVal::Obj(id) = v {
             let Obj::Cons { head, tail, .. } = self.pool.get(id) else {
@@ -57,7 +66,7 @@ impl Runner<'_, '_> {
             out.push(*head);
             v = *tail;
         }
-        out
+        Ok(out)
     }
 
     pub(super) fn build_list_from_owned(
@@ -65,6 +74,10 @@ impl Runner<'_, '_> {
         items: Vec<RVal>,
         span: Span,
     ) -> Result<RVal, Error> {
+        if let Err(e) = self.charge(items.len(), span) {
+            self.release_all(items);
+            return Err(e);
+        }
         let mut acc = RVal::EmptyList;
         for (idx, item) in items.iter().enumerate().rev() {
             match self.pool.alloc_cons(*item, acc, span) {
@@ -92,6 +105,10 @@ impl Runner<'_, '_> {
     ) -> Result<RVal, Error> {
         let mut acc = RVal::EmptyList;
         let end = self.stack.len();
+        if let Err(e) = self.charge(end - start, span) {
+            self.release_stack_from(start);
+            return Err(e);
+        }
         for idx in (start..end).rev() {
             let item = self.stack[idx];
             match self.pool.alloc_cons(item, acc, span) {
@@ -116,6 +133,7 @@ impl Runner<'_, '_> {
         items: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
+        self.charge(items.len(), span)?;
         let mut acc = RVal::EmptyList;
         for &item in items.iter().rev() {
             match self.pool.alloc_cons(item, acc, span) {
@@ -172,128 +190,32 @@ impl Runner<'_, '_> {
         }
     }
 
-    #[inline]
-    pub(super) fn values_equal(&self, a: RVal, b: RVal) -> bool {
-        match (a, b) {
-            (RVal::Void, RVal::Void)
-            | (RVal::None, RVal::None)
-            | (RVal::EmptyList, RVal::EmptyList) => true,
-            (RVal::Int(a), RVal::Int(b)) => a == b,
-            (RVal::Float(a), RVal::Float(b)) => a == b,
-            (RVal::Bool(a), RVal::Bool(b)) => a == b,
-            (RVal::Char(a), RVal::Char(b)) => a == b,
-            (RVal::Builtin(a), RVal::Builtin(b)) => a == b,
-            (RVal::Obj(aid), RVal::Obj(bid)) => aid == bid || self.objects_equal(a, b),
-            _ => false,
+    // 標準ソートの比較回数には依存せず、最悪時のオーダーで前払いする。
+    pub(super) fn charge_sort(
+        &mut self,
+        keys: impl Iterator<Item = RVal>,
+        n: usize,
+        span: Span,
+    ) -> Result<(), Error> {
+        if n < 2 {
+            return Ok(());
         }
-    }
-
-    #[inline(never)]
-    fn objects_equal(&self, a: RVal, b: RVal) -> bool {
-        let mut work = crate::work::Work::<_, 8>::new();
-        let mut next = Some((a, b));
-        while let Some((a, b)) = next.take().or_else(|| work.pop()) {
-            let equal = match (a, b) {
-                (RVal::Void, RVal::Void) => true,
-                (RVal::Int(x), RVal::Int(y)) => x == y,
-                (RVal::Float(x), RVal::Float(y)) => x == y,
-                (RVal::Bool(x), RVal::Bool(y)) => x == y,
-                (RVal::Char(x), RVal::Char(y)) => x == y,
-                (RVal::None, RVal::None) => true,
-                (RVal::EmptyList, RVal::EmptyList) => true,
-                (RVal::Builtin(x), RVal::Builtin(y)) => x == y,
-                (RVal::Obj(id1), RVal::Obj(id2)) => {
-                    if id1 == id2 {
-                        continue;
-                    }
-                    match (self.pool.get(id1), self.pool.get(id2)) {
-                        (
-                            Obj::Cons {
-                                head: h1,
-                                tail: t1,
-                                len: l1,
-                            },
-                            Obj::Cons {
-                                head: h2,
-                                tail: t2,
-                                len: l2,
-                            },
-                        ) => {
-                            if l1 != l2 {
-                                return false;
-                            }
-                            work.push((*t1, *t2));
-                            next = Some((*h1, *h2));
-                            true
-                        }
-                        (Obj::Str(s1), Obj::Str(s2)) => s1 == s2,
-                        (Obj::Array(xs1), Obj::Array(xs2)) | (Obj::Tuple(xs1), Obj::Tuple(xs2)) => {
-                            if xs1.len() != xs2.len() {
-                                return false;
-                            }
-                            work.extend(xs1.iter().zip(xs2.iter()).rev().map(|(x, y)| (*x, *y)));
-                            true
-                        }
-                        (
-                            Obj::Struct {
-                                name: n1,
-                                fields: f1,
-                            },
-                            Obj::Struct {
-                                name: n2,
-                                fields: f2,
-                            },
-                        ) => {
-                            if n1 != n2 || f1.len() != f2.len() {
-                                return false;
-                            }
-                            for ((k1, v1), (k2, v2)) in f1.iter().zip(f2.iter()).rev() {
-                                if k1 != k2 {
-                                    return false;
-                                }
-                                work.push((*v1, *v2));
-                            }
-                            true
-                        }
-                        (
-                            Obj::Variant {
-                                type_name: t1,
-                                variant: v1,
-                                data: d1,
-                            },
-                            Obj::Variant {
-                                type_name: t2,
-                                variant: v2,
-                                data: d2,
-                            },
-                        ) => {
-                            t1 == t2
-                                && v1 == v2
-                                && match (d1, d2) {
-                                    (None, None) => true,
-                                    (Some(x), Some(y)) => {
-                                        work.push((*x, *y));
-                                        true
-                                    }
-                                    _ => false,
-                                }
-                        }
-                        (Obj::Some(x), Obj::Some(y))
-                        | (Obj::Ok(x), Obj::Ok(y))
-                        | (Obj::Err(x), Obj::Err(y)) => {
-                            work.push((*x, *y));
-                            true
-                        }
-                        _ => false,
-                    }
-                }
-                _ => false,
-            };
-            if !equal {
-                return false;
-            }
-        }
-        true
+        let bytes = keys
+            .map(|key| match key {
+                RVal::Obj(id) => match self.pool.get(id) {
+                    Obj::Str(s) => s.len(),
+                    _ => 0,
+                },
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let log = (usize::BITS - (n - 1).leading_zeros()) as usize;
+        let cost = bytes
+            .checked_add(1)
+            .and_then(|width| n.checked_mul(log)?.checked_mul(width))
+            .ok_or_else(|| self.step_limit_err(span))?;
+        self.charge(cost, span)
     }
 
     pub(super) fn compare_vals(
@@ -332,7 +254,12 @@ impl Runner<'_, '_> {
         }
     }
 
-    pub(super) fn arith(&self, op: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn arith(
+        &mut self,
+        op: BuiltinId,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, Error> {
         if op == BuiltinId::Sub && args.len() == 1 {
             return match args[0] {
                 RVal::Int(a) => a
@@ -348,6 +275,7 @@ impl Runner<'_, '_> {
             };
         }
         if (op == BuiltinId::Add || op == BuiltinId::Mul) && args.len() >= 2 {
+            self.charge(args.len() - 2, span)?;
             let mut acc = args[0];
             for &rhs in &args[1..] {
                 acc = self.arith_bin(op, acc, rhs, span)?;
@@ -415,7 +343,12 @@ impl Runner<'_, '_> {
         }
     }
 
-    pub(super) fn eq_cmp(&self, want_eq: bool, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn eq_cmp(
+        &mut self,
+        want_eq: bool,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, Error> {
         let [a, b] = args else {
             return Err(Error::runtime(
                 "op.cmp",
@@ -434,7 +367,7 @@ impl Runner<'_, '_> {
                 ),
             ));
         }
-        let eq = self.values_equal(*a, *b);
+        let eq = self.values_equal(*a, *b, span)?;
         Ok(RVal::Bool(if want_eq { eq } else { !eq }))
     }
 

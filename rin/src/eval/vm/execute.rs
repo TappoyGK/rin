@@ -368,12 +368,13 @@ impl Runner<'_, '_> {
                                 ),
                             ))
                         } else {
-                            match self.list_get(list_val, idx as usize) {
-                                Some(v) => {
+                            match self.list_get(list_val, idx as usize, span) {
+                                Err(e) => Err(e),
+                                Ok(Some(v)) => {
                                     self.pool.retain_val(v);
                                     Ok(v)
                                 }
-                                None => Err(Error::runtime(
+                                Ok(None) => Err(Error::runtime(
                                     "expr.index",
                                     span,
                                     format!(

@@ -15,7 +15,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("find", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         for x in items {
             let res = self.apply(
                 *f,
@@ -59,7 +59,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("any", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         for x in items {
             let res = self.apply(
                 *f,
@@ -100,7 +100,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("all", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         for x in items {
             let res = self.apply(
                 *f,
@@ -141,7 +141,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("map", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         let mut out = Vec::with_capacity(items.len());
         for x in items {
             match self.apply(
@@ -176,7 +176,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("filter", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         let mut out = Vec::new();
         for x in items {
             let res = match self.apply(
@@ -228,7 +228,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("flat_map", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         let mut out = Vec::new();
         for x in items {
             let mapped = match self.apply(
@@ -251,7 +251,15 @@ impl Runner<'_, '_> {
                 self.release_all(out);
                 return Err(e);
             }
-            for sub in self.list_to_vec(mapped) {
+            let subs = match self.list_to_vec(mapped, span) {
+                Ok(subs) => subs,
+                Err(e) => {
+                    self.pool.release_val(mapped);
+                    self.release_all(out);
+                    return Err(e);
+                }
+            };
+            for sub in subs {
                 self.pool.retain_val(sub);
                 out.push(sub);
             }
@@ -273,7 +281,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("fold", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         let mut acc = *init;
         self.pool.retain_val(acc);
         for x in items {
@@ -312,7 +320,7 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("sort_by", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let items = self.list_to_vec(*list_v, span)?;
         let mut keyed = Vec::with_capacity(items.len());
         for x in items {
             match self.apply(
@@ -332,6 +340,12 @@ impl Runner<'_, '_> {
                     return Err(e);
                 }
             }
+        }
+        if let Err(e) = self.charge_sort(keyed.iter().map(|(k, _)| *k), keyed.len(), span) {
+            for (k, _) in keyed {
+                self.pool.release_val(k);
+            }
+            return Err(e);
         }
         let mut sort_err = None;
         keyed.sort_by(|(ka, _), (kb, _)| match self.compare_vals(*ka, *kb, span) {

@@ -4,15 +4,19 @@ use super::*;
 impl<'a, 'p> Runner<'a, 'p> {
     #[inline(always)]
     pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
-        let next = self.steps + count as usize;
-        if next > self.limits.steps {
+        let next = self.steps.checked_add(count as usize);
+        if next.is_none_or(|n| n > self.limits.steps) {
             let over = self.limits.steps.saturating_sub(self.steps);
             let span = chunk.tick_spans[start as usize + over];
-            self.steps = next;
+            self.steps = next.unwrap_or(usize::MAX);
             return Err(self.step_limit_err(span));
         }
-        self.steps = next;
+        self.steps = next.unwrap_or(usize::MAX);
         Ok(())
+    }
+
+    pub(super) fn charge(&mut self, amount: usize, span: Span) -> Result<(), Error> {
+        charge_steps(&mut self.steps, self.limits.steps, amount, span)
     }
 
     #[cold]
@@ -267,5 +271,26 @@ impl<'a, 'p> Runner<'a, 'p> {
                 format!("cannot call value of type {}", other.type_name(self.pool)),
             )),
         }
+    }
+}
+
+// Pool の借用中も、ステップカウンタだけを更新できる。
+pub(super) fn charge_steps(
+    steps: &mut usize,
+    limit: usize,
+    amount: usize,
+    span: Span,
+) -> Result<(), Error> {
+    match steps.checked_add(amount) {
+        Some(next) if next <= limit => {
+            *steps = next;
+            Ok(())
+        }
+        _ => Err(Error::new(
+            "eval.limits",
+            ErrorKind::TooManySteps,
+            span,
+            format!("step limit exceeded ({limit})"),
+        )),
     }
 }

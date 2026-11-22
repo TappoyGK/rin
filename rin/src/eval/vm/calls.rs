@@ -70,6 +70,23 @@ impl Runner<'_, '_> {
             let rhs = self.stack[arg_start + 1];
             self.stack.truncate(arg_start - 1);
             if let (RVal::Int(x), RVal::Int(y)) = (lhs, rhs) {
+                if matches!(
+                    b,
+                    BuiltinId::Add
+                        | BuiltinId::Sub
+                        | BuiltinId::Mul
+                        | BuiltinId::Lt
+                        | BuiltinId::Le
+                        | BuiltinId::Gt
+                        | BuiltinId::Ge
+                        | BuiltinId::Eq
+                        | BuiltinId::Ne
+                ) {
+                    self.charge(1, span)?;
+                    if matches!(b, BuiltinId::Eq | BuiltinId::Ne) {
+                        self.charge(1, span)?;
+                    }
+                }
                 match b {
                     BuiltinId::Add => {
                         return x
