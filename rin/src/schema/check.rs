@@ -1,5 +1,7 @@
 //! 値の深さに依存しないスキーマ検証。パスは 1 本の文字列を伸縮して保持する。
-use super::*;
+use super::{Schema, TypeExpr};
+use crate::{Error, Span, Value};
+use std::collections::BTreeMap;
 
 enum Segment<'a> {
     None,
@@ -224,4 +226,20 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn expect_match(ok: bool, expected: &str, actual: &Value, path: &str) -> Result<(), Error> {
+    if ok {
+        Ok(())
+    } else {
+        mismatch(expected, actual.type_name(), path)
+    }
+}
+
+fn mismatch(expected: &str, actual: &str, path: &str) -> Result<(), Error> {
+    Err(Error::runtime(
+        "schema.type",
+        Span::default(),
+        format!("{path}: expected {expected}, got {actual}"),
+    ))
 }
