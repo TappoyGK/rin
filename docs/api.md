@@ -180,6 +180,29 @@ println!("{}", error.render(source));
 
 ---
 
+### テスト実行API
+
+```rust
+pub fn rin::test::run(
+    sources: &[(&str, &str)],
+    modules: &[(&str, &str)],
+    limits: Limits,
+) -> rin::test::TestReport;
+
+pub fn rin::test::run_filtered(
+    sources: &[(&str, &str)],
+    modules: &[(&str, &str)],
+    limits: Limits,
+    filter: Option<&str>,
+) -> rin::test::TestReport;
+```
+
+`sources` はファイル名とソース、`modules` はモジュール名とソースの組を渡す。`filter` はテスト名の部分一致で、`None` は全件を実行する。
+
+`TestReport.tests` は各テストの `source`、`name`、`at`、`status`、`failures`、`error` を保持する。`status` は `TestStatus::{Passed, Failed, Error}`。`CheckFailure` は `at`、`actual`、`expected` と、`check_eq` なら真となる `equality` を持つ。値は所有された `Value` で、実行環境を破棄した後も参照できる。
+
+構文やモジュール依存のエラーは `TestReport.errors` の `SourceError { source, error }` に入る。`is_success()` は全テストが成功し、準備段階のエラーもない場合に真を返す。テストが0件でエラーがない場合も真となる。実行順と上限の適用範囲は[テストツール仕様](testing.md)を参照。
+
 ## 2. C FFI API
 
 ヘッダ：[rin.h](../rin/include/rin.h)

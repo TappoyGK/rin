@@ -12,6 +12,7 @@ mod lexer;
 mod parser;
 mod pool;
 pub mod schema;
+pub mod test;
 pub mod value;
 mod work;
 

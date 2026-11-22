@@ -23,6 +23,16 @@ pub(crate) fn compile_program(
     syms: &mut SymTable,
     globals: &[Option<RVal>],
 ) -> Result<Chunk, Error> {
+    compile_program_parts(exprs, &[], module, syms, globals)
+}
+
+pub(crate) fn compile_program_parts<'a>(
+    exprs: &'a [Expr],
+    body: &'a [Expr],
+    module: Option<u32>,
+    syms: &mut SymTable,
+    globals: &[Option<RVal>],
+) -> Result<Chunk, Error> {
     let mut compiler = Compiler {
         scopes: vec![Scope::new(module)],
         module,
@@ -31,10 +41,18 @@ pub(crate) fn compile_program(
         name_table: NameTable::default(),
         shared_names: None,
     };
-    if exprs.is_empty() {
+    if exprs.is_empty() && body.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
     } else {
-        compiler.compile_body_shallow(exprs, false, 0)?;
+        if !exprs.is_empty() {
+            compiler.compile_body_shallow(exprs, false, 0)?;
+            if !body.is_empty() {
+                compiler.emit(Op::Pop, Span::default());
+            }
+        }
+        if !body.is_empty() {
+            compiler.compile_body_shallow(body, false, 0)?;
+        }
         compiler.flush_ticks();
     }
     if let Some(names) = compiler.shared_names.take() {
@@ -698,6 +716,15 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::Call { callee, args } => {
+                if let ExprKind::Ident(name) = &callee.kind
+                    && matches!(name.as_str(), "check" | "check_eq")
+                {
+                    for arg in args {
+                        self.compile_expr_shallow(arg, false, depth + 1)?;
+                    }
+                    self.emit(Op::Check(name == "check_eq"), span);
+                    return Ok(());
+                }
                 if let ExprKind::Ident(op) = &callee.kind
                     && (op == "and" || op == "or")
                 {
@@ -1232,6 +1259,21 @@ impl<'a> Compiler<'a> {
                 });
             }
             ExprKind::Call { callee, args } => {
+                if let ExprKind::Ident(name) = &callee.kind
+                    && matches!(name.as_str(), "check" | "check_eq")
+                {
+                    steps.push(Step::EmitFlushed {
+                        op: Op::Check(name == "check_eq"),
+                        span,
+                    });
+                    for arg in args.iter().rev() {
+                        steps.push(Step::Expr {
+                            expr: arg,
+                            is_tail: false,
+                        });
+                    }
+                    return Ok(());
+                }
                 if let ExprKind::Ident(op) = &callee.kind
                     && (op == "and" || op == "or")
                 {

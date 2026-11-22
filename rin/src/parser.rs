@@ -77,12 +77,27 @@ pub(crate) fn parse_program_with_scratch<'s>(
     input: &str,
     scratch: &'s mut ParseScratch,
 ) -> Result<&'s [Expr], Error> {
+    parse_with_mode(input, scratch, false)
+}
+
+pub(crate) fn parse_tests(input: &str) -> Result<Vec<Expr>, Error> {
+    let mut scratch = ParseScratch::new();
+    parse_with_mode(input, &mut scratch, true)?;
+    Ok(std::mem::take(&mut scratch.exprs))
+}
+
+fn parse_with_mode<'s>(
+    input: &str,
+    scratch: &'s mut ParseScratch,
+    test_mode: bool,
+) -> Result<&'s [Expr], Error> {
     tokenize_into(input, &mut scratch.tokens)?;
     scratch.exprs.clear();
     let mut parser = Parser {
         tokens: &scratch.tokens,
         pos: 0,
         frames: &mut scratch.frames,
+        test_mode,
     };
     while !parser.at_eof() {
         scratch.exprs.push(parser.parse_expr_iter()?);
@@ -91,6 +106,7 @@ pub(crate) fn parse_program_with_scratch<'s>(
 }
 
 struct Parser<'f> {
+    test_mode: bool,
     tokens: &'f [Token],
     pos: usize,
     frames: &'f mut Vec<ParseFrame>,
@@ -547,6 +563,21 @@ impl Parser<'_> {
         };
 
         if let Some(head) = special {
+            if !self.test_mode && matches!(head.as_str(), "deftest" | "check" | "check_eq") {
+                return Err(if head == "deftest" {
+                    Error::parse(
+                        "test.deftest",
+                        start,
+                        "deftest is only allowed in test files",
+                    )
+                } else {
+                    Error::parse(
+                        "test.check",
+                        start,
+                        "checks are only allowed inside deftest",
+                    )
+                });
+            }
             match head.as_str() {
                 "def" => {
                     self.advance(); // def

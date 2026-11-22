@@ -231,6 +231,34 @@ impl Runner<'_, '_> {
                     Op::Tick(start, count) => {
                         self.tick(chunk, start, count)?;
                     }
+                    Op::Check(equality) => {
+                        let span = chunk.spans[ip - 1];
+                        let expected = if equality {
+                            self.stack.pop().unwrap()
+                        } else {
+                            RVal::Bool(true)
+                        };
+                        let actual = self.stack.pop().unwrap();
+                        let result = if equality {
+                            self.eq_cmp(true, &[actual, expected], span)
+                        } else {
+                            Ok(RVal::Bool(matches!(actual, RVal::Bool(true))))
+                        };
+                        if matches!(result, Ok(RVal::Bool(false))) {
+                            self.check_failures.push(crate::test::CheckFailure {
+                                at: span,
+                                actual: self.pool.export(actual),
+                                expected: self.pool.export(expected),
+                                equality,
+                            });
+                        }
+                        self.pool.release_val(actual);
+                        if equality {
+                            self.pool.release_val(expected);
+                        }
+                        result?;
+                        self.stack.push(RVal::Void);
+                    }
                     Op::Void => self.stack.push(RVal::Void),
                     Op::Int(n) => self.stack.push(RVal::Int(n)),
                     Op::Float(idx) => self.stack.push(RVal::Float(chunk.floats[idx as usize])),

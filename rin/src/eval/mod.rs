@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use crate::alloc::{Allocator, HeapAllocator};
 use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
-use crate::compiler::compile_program;
+use crate::compiler::{compile_program, compile_program_parts};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, ErrorKind, Limits, Span};
 use crate::parser::{ParseScratch, ParseScratchGuard};
@@ -197,6 +197,22 @@ impl<'a> Machine<'a> {
         Ok(exported)
     }
 
+    pub(crate) fn run_test(
+        &mut self,
+        setup: &[crate::ast::Expr],
+        body: &[crate::ast::Expr],
+    ) -> (Vec<crate::test::CheckFailure>, Result<(), Error>) {
+        let chunk = match compile_program_parts(setup, body, None, &mut self.syms, &self.globals) {
+            Ok(chunk) => chunk,
+            Err(error) => return (Vec::new(), Err(error)),
+        };
+        let mut runner = self.runner(None);
+        let result = runner
+            .run_top_chunk(&chunk)
+            .map(|value| runner.pool.release_val(value));
+        (std::mem::take(&mut runner.check_failures), result)
+    }
+
     /// 定義済みの大域関数をソース再解析なしで直接呼び出す。
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
         let Some(callee) = self
@@ -310,6 +326,7 @@ impl<'a> Machine<'a> {
             module_envs: &mut self.module_envs,
             active_module,
             export_list: None,
+            check_failures: Vec::new(),
             stack: Vec::with_capacity(64),
         }
     }
@@ -335,6 +352,7 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) active_module: Option<u32>,
     pub(super) export_list: Option<Vec<String>>,
     pub(super) stack: Vec<RVal>,
+    pub(super) check_failures: Vec<crate::test::CheckFailure>,
 }
 
 impl<'a, 'p> Runner<'a, 'p> {

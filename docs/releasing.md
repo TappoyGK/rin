@@ -17,7 +17,7 @@
 
 公開対象が揃ったら、`release` から準備ブランチを作り、バージョンと変更履歴を確定する準備 PR を `release` 向けに作成する。検証後、ユーザーが準備 PR をマージするまでリリース PR はドラフトのままにする。
 
-1. `rin/Cargo.toml` の `version` を `VERSION` に更新する（`Cargo.lock` も同期する）。
+1. `rin/Cargo.toml` と `rin-cli/Cargo.toml` の `version` を `VERSION` に更新する（`Cargo.lock` も同期する）。
 2. [変更履歴](changelog.md) に `## vVERSION` を確定し、取り込む作業 PR のリンク（`（[PR #番号](...)）`）が漏れていないか照合する。変更履歴にはイシューへのリンクを記載しない。
 3. 次の検査を実行し、すべて警告・失敗なしで通ることを確認する。
 
