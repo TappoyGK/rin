@@ -27,7 +27,7 @@ fn main() {
         (defn cb_filter () (len (filter (fn (x) (< x 50)) xs)))
         (defn cb_any () (any (fn (x) (== x 99)) xs))
         (defn cb_all () (all (fn (x) (< x 1000)) xs))
-        (defn cb_find () (find (fn (x) (== x 99)) xs))
+        (defn cb_find () (find (fn (x) (> x 98)) xs))
         (defn cb_sort_by () (len (sort_by (fn (x) (- 100 x)) xs)))
         (defn cb_flat_map () (len (flat_map (fn (x) [x]) xs)))
         (defn folded () (fold (fn (acc x) (+ acc x)) 0 xs))

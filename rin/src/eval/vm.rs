@@ -661,7 +661,15 @@ impl Runner<'_, '_> {
                                 self.stack.truncate(base + argc);
                                 let new_locals = proto.local_count as usize;
                                 self.stack.resize(base + new_locals, RVal::Void);
-                                self.pool.release_val(callee);
+                                // 捕捉値の所有者をローカル領域の直後に残す。
+                                // 通常の命令はこの位置より上を使い、次のフレーム置換や
+                                // 呼び出し終了時のスタック巻き戻しで一緒に解放する。
+                                // 捕捉値がなければ、従来どおりここで解放できる。
+                                if cap.is_empty() {
+                                    self.pool.release_val(callee);
+                                } else {
+                                    self.stack.push(callee);
+                                }
                                 self.active_module = proto.module;
                                 *tail_source = Some(FrameSource::Proto(proto));
                                 *tail_calls += 1;
@@ -673,7 +681,7 @@ impl Runner<'_, '_> {
                                 {
                                     *captures = cap;
                                 }
-                                frame_stack_start = base + new_locals;
+                                frame_stack_start = self.stack.len();
                                 ip = 0;
                                 continue 'frame;
                             }
