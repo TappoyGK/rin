@@ -63,7 +63,7 @@ pub trait Allocator {
 ```rust
 pub struct Limits {
     pub steps: usize,        // 既定: 100_000
-    pub depth: usize,        // 既定: 200（大きくするとネイティブスタック容量に依存）
+    pub depth: usize,        // 既定: 200（2 MiB のスレッドスタックで検証）
     pub memory_bytes: usize, // 既定: 16 * 1024 * 1024
 }
 
@@ -107,6 +107,8 @@ impl Error {
 `Error::new(rule, kind, at, message)` と `Error::lex/parse/runtime(rule, at, message)` はすべて `&'static str` の規則名を必須とする（空文字は panic）。表示の先頭行は `L:C: message [rule.id]`、モジュール内では `module L:C: message [rule.id]` となり、その後に呼び出し履歴が続く。`message` と `format_backtrace()` の内容には規則名を追加しない。
 
 名前解決に失敗したときは、候補名やフィールド・公開シンボル一覧を `Error.message` に含める。表示順・件数上限・候補の選択規則は [言語仕様の `[eval.hints]`](spec.md) に従う。C FFI の `RinError.message` / `text` にも含まれる。
+
+`depth` は、ユーザー定義関数の呼び出しの入れ子の深さを制限する。組み込み関数からの呼び出しも含めるが、末尾呼び出し最適化が適用された呼び出しは深さを増やさない。既定値の 200 は Debug / Release ともに 2 MiB のスレッドスタックで検証している。上限を増やす場合や、より小さいスタックのスレッドから実行する場合は、利用する環境でスタック容量を確認する。
 
 ### 1.5 深い値の処理
 

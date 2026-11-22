@@ -6,13 +6,52 @@ use crate::pool::{Obj, RVal};
 
 use super::{CallOrigin, Runner};
 
+#[cfg(debug_assertions)]
+impl BuiltinId {
+    /// Rin の関数を呼び戻す組み込み関数。Debug では命令ループを抜けてから実行する。
+    #[inline(always)]
+    pub(super) fn has_callback(self) -> bool {
+        matches!(
+            self,
+            Self::Find
+                | Self::Any
+                | Self::All
+                | Self::Map
+                | Self::Filter
+                | Self::FlatMap
+                | Self::Fold
+                | Self::SortBy
+        )
+    }
+}
+
 impl Runner<'_, '_> {
-    pub(super) fn apply_builtin(
+    // Debug では高階関数の再入時に通常の組み込み命令の作業領域を残さない。
+    // Release は apply_builtin への単純な委譲。大きな本体は VM にインライン化しない。
+    #[inline(always)]
+    pub(super) fn dispatch_builtin(
         &mut self,
         b: BuiltinId,
         args: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
+        #[cfg(not(debug_assertions))]
+        return self.apply_builtin(b, args, span);
+        #[cfg(debug_assertions)]
+        match b {
+            BuiltinId::Find => self.builtin_find(args, span),
+            BuiltinId::Any => self.builtin_any(args, span),
+            BuiltinId::All => self.builtin_all(args, span),
+            BuiltinId::Map => self.builtin_map(args, span),
+            BuiltinId::Filter => self.builtin_filter(args, span),
+            BuiltinId::FlatMap => self.builtin_flat_map(args, span),
+            BuiltinId::Fold => self.builtin_fold(args, span),
+            BuiltinId::SortBy => self.builtin_sort_by(args, span),
+            _ => self.apply_builtin(b, args, span),
+        }
+    }
+
+    fn apply_builtin(&mut self, b: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
         match b {
             BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div | BuiltinId::Rem => {
                 self.arith(b, args, span)
@@ -413,268 +452,13 @@ impl Runner<'_, '_> {
                 }
                 Ok(RVal::Bool(false))
             }
-            BuiltinId::Find => {
-                let [f, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'find' takes 2 arguments (fn, list)",
-                    ));
-                };
-                self.expect_list("find", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                for x in items {
-                    let res = self.apply(
-                        *f,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    )?;
-                    match res {
-                        RVal::Bool(true) => {
-                            self.pool.retain_val(x);
-                            return Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(x), span)?));
-                        }
-                        RVal::Bool(false) => {}
-                        other => {
-                            let tname = other.type_name(self.pool);
-                            self.pool.release_val(res);
-                            return Err(Error::runtime(
-                                "fn.list",
-                                span,
-                                format!("'find' predicate must return bool, got {tname}"),
-                            ));
-                        }
-                    }
-                }
-                Ok(RVal::None)
-            }
-            BuiltinId::Any => {
-                let [f, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'any' takes 2 arguments (fn, list)",
-                    ));
-                };
-                self.expect_list("any", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                for x in items {
-                    let res = self.apply(
-                        *f,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    )?;
-                    match res {
-                        RVal::Bool(true) => return Ok(RVal::Bool(true)),
-                        RVal::Bool(false) => {}
-                        other => {
-                            let tname = other.type_name(self.pool);
-                            self.pool.release_val(res);
-                            return Err(Error::runtime(
-                                "fn.list",
-                                span,
-                                format!("'any' predicate must return bool, got {tname}"),
-                            ));
-                        }
-                    }
-                }
-                Ok(RVal::Bool(false))
-            }
-            BuiltinId::All => {
-                let [f, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'all' takes 2 arguments (fn, list)",
-                    ));
-                };
-                self.expect_list("all", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                for x in items {
-                    let res = self.apply(
-                        *f,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    )?;
-                    match res {
-                        RVal::Bool(true) => {}
-                        RVal::Bool(false) => return Ok(RVal::Bool(false)),
-                        other => {
-                            let tname = other.type_name(self.pool);
-                            self.pool.release_val(res);
-                            return Err(Error::runtime(
-                                "fn.list",
-                                span,
-                                format!("'all' predicate must return bool, got {tname}"),
-                            ));
-                        }
-                    }
-                }
-                Ok(RVal::Bool(true))
-            }
-            BuiltinId::Map => {
-                let [f, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'map' takes 2 arguments (fn, list)",
-                    ));
-                };
-                self.expect_list("map", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                let mut out = Vec::with_capacity(items.len());
-                for x in items {
-                    match self.apply(
-                        *f,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    ) {
-                        Ok(v) => out.push(v),
-                        Err(e) => {
-                            self.release_all(out);
-                            return Err(e);
-                        }
-                    }
-                }
-                self.build_list_from_owned(out, span)
-            }
-            BuiltinId::Filter => {
-                let [f, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'filter' takes 2 arguments (fn, list)",
-                    ));
-                };
-                self.expect_list("filter", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                let mut out = Vec::new();
-                for x in items {
-                    let res = match self.apply(
-                        *f,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.release_all(out);
-                            return Err(e);
-                        }
-                    };
-                    match res {
-                        RVal::Bool(true) => {
-                            self.pool.retain_val(x);
-                            out.push(x);
-                        }
-                        RVal::Bool(false) => {}
-                        other => {
-                            let tname = other.type_name(self.pool);
-                            self.pool.release_val(res);
-                            self.release_all(out);
-                            return Err(Error::runtime(
-                                "fn.list",
-                                span,
-                                format!("'filter' predicate must return bool, got {tname}"),
-                            ));
-                        }
-                    }
-                }
-                self.build_list_from_owned(out, span)
-            }
-            BuiltinId::FlatMap => {
-                let [f, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'flat_map' takes 2 arguments (fn, list)",
-                    ));
-                };
-                self.expect_list("flat_map", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                let mut out = Vec::new();
-                for x in items {
-                    let mapped = match self.apply(
-                        *f,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.release_all(out);
-                            return Err(e);
-                        }
-                    };
-                    if let Err(e) = self.expect_list("flat_map", mapped, span) {
-                        self.pool.release_val(mapped);
-                        self.release_all(out);
-                        return Err(e);
-                    }
-                    for sub in self.list_to_vec(mapped) {
-                        self.pool.retain_val(sub);
-                        out.push(sub);
-                    }
-                    self.pool.release_val(mapped);
-                }
-                self.build_list_from_owned(out, span)
-            }
-            BuiltinId::Fold => {
-                let [f, init, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'fold' takes 3 arguments (fn, init, list)",
-                    ));
-                };
-                self.expect_list("fold", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                let mut acc = *init;
-                self.pool.retain_val(acc);
-                for x in items {
-                    match self.apply(
-                        *f,
-                        &[acc, x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    ) {
-                        Ok(next) => {
-                            self.pool.release_val(acc);
-                            acc = next;
-                        }
-                        Err(e) => {
-                            self.pool.release_val(acc);
-                            return Err(e);
-                        }
-                    }
-                }
-                Ok(acc)
-            }
+            BuiltinId::Find => self.builtin_find(args, span),
+            BuiltinId::Any => self.builtin_any(args, span),
+            BuiltinId::All => self.builtin_all(args, span),
+            BuiltinId::Map => self.builtin_map(args, span),
+            BuiltinId::Filter => self.builtin_filter(args, span),
+            BuiltinId::FlatMap => self.builtin_flat_map(args, span),
+            BuiltinId::Fold => self.builtin_fold(args, span),
             BuiltinId::Zip => {
                 let [a_v, b_v] = args else {
                     return Err(Error::runtime(
@@ -738,55 +522,7 @@ impl Runner<'_, '_> {
                 }
                 self.build_list_from_borrowed(&items, span)
             }
-            BuiltinId::SortBy => {
-                let [key_fn, list_v] = args else {
-                    return Err(Error::runtime(
-                        "fn.list",
-                        span,
-                        "'sort_by' takes 2 arguments (key_fn, list)",
-                    ));
-                };
-                self.expect_list("sort_by", *list_v, span)?;
-                let items = self.list_to_vec(*list_v);
-                let mut keyed = Vec::with_capacity(items.len());
-                for x in items {
-                    match self.apply(
-                        *key_fn,
-                        &[x],
-                        span,
-                        CallOrigin::Builtin {
-                            name: b.name(),
-                            at: span,
-                        },
-                    ) {
-                        Ok(k) => keyed.push((k, x)),
-                        Err(e) => {
-                            for (k, _) in keyed {
-                                self.pool.release_val(k);
-                            }
-                            return Err(e);
-                        }
-                    }
-                }
-                let mut sort_err = None;
-                keyed.sort_by(|(ka, _), (kb, _)| match self.compare_vals(*ka, *kb, span) {
-                    Ok(ord) => ord,
-                    Err(e) => {
-                        if sort_err.is_none() {
-                            sort_err = Some(e);
-                        }
-                        std::cmp::Ordering::Equal
-                    }
-                });
-                let sorted: Vec<RVal> = keyed.iter().map(|(_, v)| *v).collect();
-                for (k, _) in keyed {
-                    self.pool.release_val(k);
-                }
-                if let Some(e) = sort_err {
-                    return Err(e);
-                }
-                self.build_list_from_borrowed(&sorted, span)
-            }
+            BuiltinId::SortBy => self.builtin_sort_by(args, span),
             BuiltinId::Unique => {
                 let xs = self.expect_one_list("unique", args, span)?;
                 let items = self.list_to_vec(xs);
@@ -842,5 +578,356 @@ impl Runner<'_, '_> {
                 self.build_list_from_borrowed(&items, span)
             }
         }
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_find(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::Find;
+
+        let [f, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'find' takes 2 arguments (fn, list)",
+            ));
+        };
+        self.expect_list("find", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        for x in items {
+            let res = self.apply(
+                *f,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            )?;
+            match res {
+                RVal::Bool(true) => {
+                    self.pool.retain_val(x);
+                    return Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(x), span)?));
+                }
+                RVal::Bool(false) => {}
+                other => {
+                    let tname = other.type_name(self.pool);
+                    self.pool.release_val(res);
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        format!("'find' predicate must return bool, got {tname}"),
+                    ));
+                }
+            }
+        }
+        Ok(RVal::None)
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_any(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::Any;
+
+        let [f, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'any' takes 2 arguments (fn, list)",
+            ));
+        };
+        self.expect_list("any", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        for x in items {
+            let res = self.apply(
+                *f,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            )?;
+            match res {
+                RVal::Bool(true) => return Ok(RVal::Bool(true)),
+                RVal::Bool(false) => {}
+                other => {
+                    let tname = other.type_name(self.pool);
+                    self.pool.release_val(res);
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        format!("'any' predicate must return bool, got {tname}"),
+                    ));
+                }
+            }
+        }
+        Ok(RVal::Bool(false))
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_all(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::All;
+
+        let [f, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'all' takes 2 arguments (fn, list)",
+            ));
+        };
+        self.expect_list("all", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        for x in items {
+            let res = self.apply(
+                *f,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            )?;
+            match res {
+                RVal::Bool(true) => {}
+                RVal::Bool(false) => return Ok(RVal::Bool(false)),
+                other => {
+                    let tname = other.type_name(self.pool);
+                    self.pool.release_val(res);
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        format!("'all' predicate must return bool, got {tname}"),
+                    ));
+                }
+            }
+        }
+        Ok(RVal::Bool(true))
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_map(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::Map;
+
+        let [f, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'map' takes 2 arguments (fn, list)",
+            ));
+        };
+        self.expect_list("map", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        let mut out = Vec::with_capacity(items.len());
+        for x in items {
+            match self.apply(
+                *f,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            ) {
+                Ok(v) => out.push(v),
+                Err(e) => {
+                    self.release_all(out);
+                    return Err(e);
+                }
+            }
+        }
+        self.build_list_from_owned(out, span)
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_filter(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::Filter;
+
+        let [f, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'filter' takes 2 arguments (fn, list)",
+            ));
+        };
+        self.expect_list("filter", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        let mut out = Vec::new();
+        for x in items {
+            let res = match self.apply(
+                *f,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.release_all(out);
+                    return Err(e);
+                }
+            };
+            match res {
+                RVal::Bool(true) => {
+                    self.pool.retain_val(x);
+                    out.push(x);
+                }
+                RVal::Bool(false) => {}
+                other => {
+                    let tname = other.type_name(self.pool);
+                    self.pool.release_val(res);
+                    self.release_all(out);
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        format!("'filter' predicate must return bool, got {tname}"),
+                    ));
+                }
+            }
+        }
+        self.build_list_from_owned(out, span)
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_flat_map(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::FlatMap;
+
+        let [f, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'flat_map' takes 2 arguments (fn, list)",
+            ));
+        };
+        self.expect_list("flat_map", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        let mut out = Vec::new();
+        for x in items {
+            let mapped = match self.apply(
+                *f,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.release_all(out);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = self.expect_list("flat_map", mapped, span) {
+                self.pool.release_val(mapped);
+                self.release_all(out);
+                return Err(e);
+            }
+            for sub in self.list_to_vec(mapped) {
+                self.pool.retain_val(sub);
+                out.push(sub);
+            }
+            self.pool.release_val(mapped);
+        }
+        self.build_list_from_owned(out, span)
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_fold(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::Fold;
+
+        let [f, init, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'fold' takes 3 arguments (fn, init, list)",
+            ));
+        };
+        self.expect_list("fold", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        let mut acc = *init;
+        self.pool.retain_val(acc);
+        for x in items {
+            match self.apply(
+                *f,
+                &[acc, x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            ) {
+                Ok(next) => {
+                    self.pool.release_val(acc);
+                    acc = next;
+                }
+                Err(e) => {
+                    self.pool.release_val(acc);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(acc)
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn builtin_sort_by(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+        let b = BuiltinId::SortBy;
+
+        let [key_fn, list_v] = args else {
+            return Err(Error::runtime(
+                "fn.list",
+                span,
+                "'sort_by' takes 2 arguments (key_fn, list)",
+            ));
+        };
+        self.expect_list("sort_by", *list_v, span)?;
+        let items = self.list_to_vec(*list_v);
+        let mut keyed = Vec::with_capacity(items.len());
+        for x in items {
+            match self.apply(
+                *key_fn,
+                &[x],
+                span,
+                CallOrigin::Builtin {
+                    name: b.name(),
+                    at: span,
+                },
+            ) {
+                Ok(k) => keyed.push((k, x)),
+                Err(e) => {
+                    for (k, _) in keyed {
+                        self.pool.release_val(k);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let mut sort_err = None;
+        keyed.sort_by(|(ka, _), (kb, _)| match self.compare_vals(*ka, *kb, span) {
+            Ok(ord) => ord,
+            Err(e) => {
+                if sort_err.is_none() {
+                    sort_err = Some(e);
+                }
+                std::cmp::Ordering::Equal
+            }
+        });
+        let sorted: Vec<RVal> = keyed.iter().map(|(_, v)| *v).collect();
+        for (k, _) in keyed {
+            self.pool.release_val(k);
+        }
+        if let Some(e) = sort_err {
+            return Err(e);
+        }
+        self.build_list_from_borrowed(&sorted, span)
     }
 }
