@@ -6,7 +6,7 @@
 
 | 分野 | ファイル | 接頭辞 | 件数 |
 |---|---|---|---|
-| 字句 | [lex.md](spec-cases/lex.md) | `lex` | 4 |
+| 字句 | [lex.md](spec-cases/lex.md) | `lex` | 6 |
 | 式と構文 | [expr.md](spec-cases/expr.md) | `expr` | 6 |
 | リストと配列 | [list.md](spec-cases/list.md) | `list` | 6 |
 | 演算・制限・エラー | [eval.md](spec-cases/eval.md) | `eval` | 13 |
