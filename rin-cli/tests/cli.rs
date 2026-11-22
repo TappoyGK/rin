@@ -186,3 +186,46 @@ fn formatter_preserves_permissions_and_skips_symlinks() {
     );
     assert_eq!(fs::read_dir(&f.0).unwrap().count(), 2);
 }
+
+#[test]
+fn formatter_explicit_paths_and_stdin_marker() {
+    let f = Fixture::new();
+    f.write("-", "[1 2]");
+    f.write("source", "[3 4]");
+    for args in [
+        vec!["fmt", "--check", "./-"],
+        vec!["fmt", "--check", "--", "-"],
+    ] {
+        let output = f.run(&args);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains('/'));
+    }
+    assert!(f.run(&["fmt", "--", "-", "source"]).status.success());
+    assert_eq!(fs::read_to_string(f.0.join("-")).unwrap(), "[1, 2]\n");
+    assert_eq!(fs::read_to_string(f.0.join("source")).unwrap(), "[3, 4]\n");
+    assert_eq!(f.run(&["fmt", "-", "source"]).status.code(), Some(2));
+    assert_eq!(f.run(&["fmt", "-", "-"]).status.code(), Some(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn formatter_rejects_explicit_symlinks() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    f.write("real.rin", "[1 2]");
+    symlink("real.rin", f.0.join("link.rin")).unwrap();
+    symlink(".", f.0.join("directory")).unwrap();
+    for path in ["link.rin", "directory"] {
+        for check in [true, false] {
+            let args = if check {
+                vec!["fmt", "--check", path]
+            } else {
+                vec!["fmt", path]
+            };
+            let output = f.run(&args);
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("symlink"));
+        }
+    }
+    assert_eq!(fs::read_to_string(f.0.join("real.rin")).unwrap(), "[1 2]");
+}

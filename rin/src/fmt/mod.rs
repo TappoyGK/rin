@@ -3,7 +3,7 @@ mod syntax;
 
 use crate::ast::Expr;
 use crate::lexer::{Token, TokenKind, tokenize_lossless};
-use crate::parser::{ParseScratch, ParseScratchGuard, parse_tests};
+use crate::parser::{parse_owned, parse_tests};
 use crate::{Error, Span};
 use std::ops::Range;
 use syntax::{Plan, Style, Syntax, equivalent};
@@ -18,9 +18,12 @@ pub fn format(source: &str) -> Result<String, Error> {
     let tokens = tokenize_lossless(source)?;
     let syntax = Syntax::new(&tokens, &before);
     let cst = Cst::build(source, &syntax);
+    drop(syntax);
     let mut out = Output::default();
     cst.render_root(&mut out);
     let output = out.finish();
+    drop(cst);
+    drop(tokens);
     let after = parse(&output).map_err(|_| {
         Error::parse(
             "fmt.preserve",
@@ -39,16 +42,14 @@ pub fn format(source: &str) -> Result<String, Error> {
 }
 
 fn parse(source: &str) -> Result<Vec<Expr>, Error> {
-    let mut scratch = ParseScratch::new();
-    let mut guard = ParseScratchGuard::new(&mut scratch);
-    if let Err(error) = guard.parse(source) {
-        if matches!(error.rule(), "test.deftest" | "test.check") {
+    match parse_owned(source, false) {
+        Ok(exprs) => Ok(exprs),
+        Err(error) if matches!(error.rule(), "test.deftest" | "test.check") => {
             crate::test::validate_source(source)?;
-        } else {
-            return Err(error);
+            parse_tests(source)
         }
+        Err(error) => Err(error),
     }
-    parse_tests(source)
 }
 
 enum Kind<'a> {
@@ -69,7 +70,7 @@ struct Node<'a> {
     kind: Kind<'a>,
     range: Range<usize>,
     blank: bool,
-    flat: Option<String>,
+    flat: Option<usize>,
 }
 struct Cst<'a> {
     nodes: Vec<Node<'a>>,
@@ -241,10 +242,8 @@ impl<'a> Cst<'a> {
 
     fn add(&mut self, kind: Kind<'a>, range: Range<usize>, blank: bool) -> usize {
         let flat = match &kind {
-            Kind::Atom(text)
-                if !text.contains(['\n', '\r', '\t']) && text.chars().count() <= WIDTH =>
-            {
-                Some((*text).into())
+            Kind::Atom(text) if !text.contains(['\n', '\r']) && text.chars().count() <= WIDTH => {
+                Some(text.chars().count())
             }
             Kind::Sequence(items) => self.flat_items(items, None),
             Kind::Group {
@@ -291,14 +290,14 @@ impl<'a> Cst<'a> {
         true
     }
 
-    fn flat_items(&self, items: &[usize], group: Option<(char, char, Style)>) -> Option<String> {
-        let mut text = String::new();
-        if let Some((open, _, _)) = group {
-            text.push(open);
-            if open == '{' && !items.is_empty() {
-                text.push(' ');
+    fn flat_items(&self, items: &[usize], group: Option<(char, char, Style)>) -> Option<usize> {
+        let mut width = group.map_or(0, |(open, _, _)| {
+            2 + if open == '{' && !items.is_empty() {
+                2
+            } else {
+                0
             }
-        }
+        });
         let data =
             group.is_some_and(|(_, _, s)| matches!(s, Style::Data | Style::Tuple | Style::Fields));
         for (i, &id) in items.iter().enumerate() {
@@ -306,29 +305,67 @@ impl<'a> Cst<'a> {
             if node.blank {
                 return None;
             }
-            let flat = node.flat.as_ref()?;
+            width += node.flat?;
             if i > 0 {
-                if data {
-                    text.push_str(", ");
-                } else if self.space(items[i - 1], id) {
-                    text.push(' ');
-                }
+                width += if data {
+                    2
+                } else {
+                    usize::from(self.space(items[i - 1], id))
+                };
             }
-            text.push_str(flat);
-            if text.chars().count() > WIDTH {
+            if width > WIDTH {
                 return None;
             }
         }
+        if group.is_some_and(|(_, _, s)| matches!(s, Style::Tuple)) && items.len() == 1 {
+            width += 1;
+        }
+        (width <= WIDTH).then_some(width)
+    }
+
+    // 幅だけを保持し、平坦な出力は原文のリテラルと子ノードから直接書く。
+    fn render_flat(&self, id: usize, out: &mut Output) {
+        let (items, group) = match &self.nodes[id].kind {
+            Kind::Atom(text) => {
+                out.write(text);
+                return;
+            }
+            Kind::Sequence(items) => (items, None),
+            Kind::Group {
+                open,
+                close,
+                style,
+                items,
+            } => (items, Some((*open, *close, *style))),
+            Kind::Comment { .. } => unreachable!(),
+        };
+        if let Some((open, _, _)) = group {
+            out.write(&open.to_string());
+            if open == '{' && !items.is_empty() {
+                out.write(" ");
+            }
+        }
+        let data =
+            group.is_some_and(|(_, _, s)| matches!(s, Style::Data | Style::Tuple | Style::Fields));
+        for (i, &child) in items.iter().enumerate() {
+            if i > 0 {
+                if data {
+                    out.write(", ");
+                } else if self.space(items[i - 1], child) {
+                    out.write(" ");
+                }
+            }
+            self.render_flat(child, out);
+        }
         if let Some((open, close, style)) = group {
             if matches!(style, Style::Tuple) && items.len() == 1 {
-                text.push(',');
+                out.write(",");
             }
             if open == '{' && !items.is_empty() {
-                text.push(' ');
+                out.write(" ");
             }
-            text.push(close);
+            out.write(&close.to_string());
         }
-        (text.chars().count() <= WIDTH).then_some(text)
     }
 
     fn definition(&self, id: usize) -> bool {
@@ -379,9 +416,9 @@ impl<'a> Cst<'a> {
     fn render(&self, id: usize, indent: usize, reserve: usize, out: &mut Output) {
         let node = &self.nodes[id];
         if let Some(flat) = &node.flat
-            && out.column() + flat.chars().count() + reserve <= WIDTH
+            && out.column() + flat + reserve <= WIDTH
         {
-            out.write(flat);
+            self.render_flat(id, out);
             return;
         }
         match &node.kind {
@@ -463,8 +500,7 @@ impl<'a> Cst<'a> {
                         );
                     let child_reserve = 1 + if count + 1 == total { reserve } else { 0 };
                     let overflow = child.flat.as_ref().is_some_and(|flat| {
-                        out.column() + usize::from(space) + flat.chars().count() + child_reserve
-                            > WIDTH
+                        out.column() + usize::from(space) + flat + child_reserve > WIDTH
                     });
                     if count == 1 && matches!(style, Style::Call | Style::If) {
                         align = if overflow {

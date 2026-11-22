@@ -8,6 +8,7 @@ fn formatted(source: &str) -> String {
 
 #[test]
 fn basic_whitespace_literals_comments_and_definitions() {
+    assert_eq!(formatted("(+ 1 \"\ta\")"), "(+ 1 \"\ta\")\n");
     assert_eq!(formatted(" ( +  1  2 )\n\n"), "(+ 1 2)\n");
     assert_eq!(formatted("(def a 1)(def b 2)"), "(def a 1)\n\n(def b 2)\n");
     assert_eq!(

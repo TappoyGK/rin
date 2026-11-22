@@ -92,6 +92,12 @@ fn discover(
 ) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if metadata.file_type().is_symlink() {
+        if explicit && matches!(mode, Discovery::All) {
+            return Err(format!(
+                "{}: explicitly specified symlink is not supported",
+                path.display()
+            ));
+        }
         return Ok(());
     }
     if metadata.is_dir() {
@@ -110,7 +116,7 @@ fn discover(
         let accepted = match mode {
             Discovery::Tests => (explicit && rin_source) || test_source,
             Discovery::Modules => rin_source && !test_source,
-            Discovery::All => rin_source,
+            Discovery::All => explicit || rin_source,
         };
         if accepted {
             files.insert(fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?);

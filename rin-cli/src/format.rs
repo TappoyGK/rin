@@ -8,7 +8,7 @@ use std::{
 };
 
 pub fn run(options: &FmtOptions) -> Result<bool, String> {
-    if options.paths.len() == 1 && options.paths[0].as_os_str() == "-" {
+    if options.stdin {
         let mut source = String::new();
         io::stdin()
             .read_to_string(&mut source)

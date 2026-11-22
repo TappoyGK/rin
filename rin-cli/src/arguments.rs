@@ -131,10 +131,12 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Action, String>
 }
 
 pub struct FmtOptions {
+    pub stdin: bool,
     pub paths: Vec<PathBuf>,
     pub check: bool,
 }
 fn parse_format(mut args: impl Iterator<Item = OsString>) -> Result<Action, String> {
+    let mut stdin = false;
     let mut paths = Vec::new();
     let mut check = false;
     let mut help = false;
@@ -154,7 +156,10 @@ fn parse_format(mut args: impl Iterator<Item = OsString>) -> Result<Action, Stri
                     check = true;
                     continue;
                 }
-                Some("-") => {}
+                Some("-") if !stdin => {
+                    stdin = true;
+                    continue;
+                }
                 _ if arg.as_encoded_bytes().starts_with(b"-") => {
                     return Err(format!("invalid or duplicate option: {}", arg.display()));
                 }
@@ -169,13 +174,17 @@ fn parse_format(mut args: impl Iterator<Item = OsString>) -> Result<Action, Stri
     if help {
         return Ok(Action::Help(Some(Command::Fmt)));
     }
-    if paths.iter().any(|p| p.as_os_str() == "-") && paths.len() != 1 {
+    if stdin && !paths.is_empty() {
         return Err("stdin '-' must be used without other paths".into());
     }
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
     }
-    Ok(Action::Format(FmtOptions { paths, check }))
+    Ok(Action::Format(FmtOptions {
+        paths,
+        check,
+        stdin,
+    }))
 }
 
 fn count(value: &str) -> Option<usize> {
