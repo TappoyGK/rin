@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- 同じ入力に対して値・エラー・表示順が一致する条件を、決定性の規則として明文化した。`sin`・`cos`、NaNのビット表現、実際のメモリ確保失敗、ネイティブスタックの保証範囲も定めた（[PR #57](https://github.com/TappoyGK/rin/pull/57)）。
+
 - ソース整形API `rin::fmt::format` と `rin fmt` CLIを追加した。コメント・リテラル・構文の意味を保ちながら書式を揃え、ファイルの書き換え、`--check`、標準入力からの整形に対応する（[PR #54](https://github.com/TappoyGK/rin/pull/54)）。
 
 - ゲームなしでModを検証する `deftest`・`check`・`check_eq`、Rustのテスト実行API、`rin test` CLIを追加した。テストごとの独立した環境、検査失敗の蓄積、ソース付き診断、JSON出力、フィルタと資源上限の指定に対応する。CLIオプションはSuzと同じ形式とし、外部クレートを使わずに実装した（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。

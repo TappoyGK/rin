@@ -8,6 +8,12 @@ Rin 言語の純粋評価器（パーサ・評価器・資源制限）を実装�
 cargo test
 ```
 
+決定性の検証では、仕様例と各ステップ上限での評価結果を別プロセスで比較する。次のコマンドはDebug / Releaseの値・エラー・表示も照合する。CIではmacOSとLinuxの出力も比較する。
+
+```sh
+sh scripts/check-determinism.sh
+```
+
 ## Modのテスト
 
 ```sh

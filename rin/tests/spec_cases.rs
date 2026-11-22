@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rin::{ArenaAllocator, ErrorKind, Limits, eval, eval_with, eval_with_allocator};
+use rin::{ArenaAllocator, Error, ErrorKind, Limits, Value, eval, eval_with, eval_with_allocator};
+
+#[path = "spec_cases/determinism.rs"]
+mod determinism;
 
 #[derive(Debug)]
 struct SpecCase {
@@ -224,7 +227,7 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     }
 }
 
-fn run_case(case: &SpecCase) {
+fn evaluate_case(case: &SpecCase) -> Result<Value, Error> {
     let mut limits = Limits::default();
     let mut arena_bytes = None;
 
@@ -240,14 +243,17 @@ fn run_case(case: &SpecCase) {
         }
     }
 
-    let result = if let Some(cap) = arena_bytes {
+    if let Some(cap) = arena_bytes {
         let mut backing = vec![0u8; cap];
         let mut arena = ArenaAllocator::new(&mut backing);
         eval_with_allocator(&case.source, &[], limits, &mut arena)
     } else {
         eval_with(&case.source, &[], limits)
-    };
+    }
+}
 
+fn run_case(case: &SpecCase) {
+    let result = evaluate_case(case);
     if let Err(err) = &result {
         if let Some(expected) = &case.rendered {
             assert_eq!(

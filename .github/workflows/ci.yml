@@ -22,6 +22,8 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/release')
     runs-on: macos-latest
     timeout-minutes: 10
+    outputs:
+      determinism: ${{ steps.determinism.outputs.digest }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +47,10 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --locked --no-deps
 
+      - name: Compare Debug and Release results
+        id: determinism
+        run: sh scripts/check-determinism.sh
+
       - name: Run tests
         run: cargo test --workspace --locked
 
@@ -56,6 +62,8 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: macos-latest
     timeout-minutes: 15
+    outputs:
+      determinism: ${{ steps.determinism.outputs.digest }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,6 +86,10 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --locked --no-deps
 
+      - name: Compare Debug and Release results
+        id: determinism
+        run: sh scripts/check-determinism.sh
+
       - name: Run tests (debug and release)
         run: |
           cargo test --workspace --locked
@@ -88,3 +100,36 @@ jobs:
           cargo build --release --workspace --locked
           test -f target/release/librin.a
           test -f rin/include/rin.h
+
+  determinism-linux:
+    name: determinism (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      determinism: ${{ steps.determinism.outputs.digest }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check specification examples and separate processes
+        run: cargo test --locked -p rin --test spec_cases
+      - name: Compare Debug and Release results
+        id: determinism
+        run: sh scripts/check-determinism.sh
+
+  determinism-platforms:
+    name: determinism (platform comparison)
+    needs: [work, release, determinism-linux]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Compare macOS and Linux results
+        env:
+          MACOS_DIGEST: ${{ needs.work.outputs.determinism || needs.release.outputs.determinism }}
+          LINUX_DIGEST: ${{ needs.determinism-linux.outputs.determinism }}
+        run: |
+          test -n "$MACOS_DIGEST"
+          test -n "$LINUX_DIGEST"
+          test "$MACOS_DIGEST" = "$LINUX_DIGEST"
