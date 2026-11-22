@@ -106,6 +106,8 @@ impl Error {
 
 `Error::new(rule, kind, at, message)` と `Error::lex/parse/runtime(rule, at, message)` はすべて `&'static str` の規則名を必須とする（空文字は panic）。表示の先頭行は `L:C: message [rule.id]`、モジュール内では `module L:C: message [rule.id]` となり、その後に呼び出し履歴が続く。`message` と `format_backtrace()` の内容には規則名を追加しない。
 
+名前解決に失敗したときは、候補名やフィールド・公開シンボル一覧を `Error.message` に含める。表示順・件数上限・候補の選択規則は [言語仕様の `[eval.hints]`](spec.md) に従う。C FFI の `RinError.message` / `text` にも含まれる。
+
 ### 1.5 深い値の処理
 
 ホスト側のコンテナは `Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。

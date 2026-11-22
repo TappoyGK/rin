@@ -246,3 +246,37 @@ fn ffi_text_matches_rust_display() {
         );
     }
 }
+
+#[test]
+fn hints_are_in_ffi_message_and_text_with_original_rule() {
+    for (source, expected_message, rule) in [
+        (
+            "(defn fail (damage) damge) (fail 1)",
+            "unknown name 'damge'; did you mean 'damage'?",
+            "expr.name",
+        ),
+        (
+            "Point{z: 1, a: 2}.bad",
+            "Point has no field 'bad'; fields: a, z",
+            "expr.field",
+        ),
+    ] {
+        let expected = rin::eval(source).unwrap_err();
+        assert_eq!(expected.message, expected_message);
+        let source = CString::new(source).unwrap();
+        unsafe {
+            let m = Machine::new(rin_limits_default());
+            finish(rin_eval(m.0, source.as_ptr()), false);
+            let e = &*rin_last_error(m.0);
+            assert_eq!(
+                CStr::from_ptr(e.message).to_str().unwrap(),
+                expected_message
+            );
+            assert_eq!(CStr::from_ptr(e.rule).to_str().unwrap(), rule);
+            assert_eq!(
+                CStr::from_ptr(e.text).to_str().unwrap(),
+                expected.to_string()
+            );
+        }
+    }
+}

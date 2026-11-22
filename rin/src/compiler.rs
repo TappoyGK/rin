@@ -2,11 +2,17 @@
 //!
 //! 深い入れ子でもネイティブスタックを消費しないよう、明示的タスクスタックでコンパイルする。
 
+use std::cell::OnceCell;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
-use crate::bytecode::{Capture, Chunk, FnProto, Op, StructDesc, SymTable};
+use crate::bytecode::{
+    Capture, Chunk, FnProto, NameInfo, NameNode, NameSite, NameTable, Op, StructDesc, SymTable,
+};
+use crate::diagnostic::needs_name_candidates;
 use crate::error::{Error, Span};
+use crate::pool::RVal;
 
 const SHALLOW_COMPILE_DEPTH: usize = 6;
 
@@ -15,11 +21,15 @@ pub(crate) fn compile_program(
     exprs: &[Expr],
     module: Option<u32>,
     syms: &mut SymTable,
+    globals: &[Option<RVal>],
 ) -> Result<Chunk, Error> {
     let mut compiler = Compiler {
         scopes: vec![Scope::new(module)],
         module,
         syms,
+        globals,
+        name_table: NameTable::default(),
+        shared_names: None,
     };
     if exprs.is_empty() {
         compiler.chunk().emit(Op::Void, Span::default());
@@ -27,14 +37,22 @@ pub(crate) fn compile_program(
         compiler.compile_body_shallow(exprs, false, 0)?;
         compiler.flush_ticks();
     }
+    if let Some(names) = compiler.shared_names.take() {
+        names
+            .set(compiler.name_table)
+            .expect("name nodes are set once");
+    }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
     Ok(finished.chunk)
 }
 
-struct Scope {
+struct Scope<'a> {
     module: Option<u32>,
-    locals: Vec<(String, u32)>,
+    // AST の名前を借用し、診断に必要になった束縛だけノードの添字 + 1 を記録する。
+    // NonZero により未記録状態も 1 ワードに収める。
+    locals: Vec<(&'a str, u32, Option<NonZeroUsize>)>,
+    outer_local_count: usize,
     next_slot: u32,
     max_slots: u32,
     captures: Vec<(String, Capture)>,
@@ -42,11 +60,12 @@ struct Scope {
     chunk: Chunk,
 }
 
-impl Scope {
+impl<'a> Scope<'a> {
     fn new(module: Option<u32>) -> Self {
         Self {
             module,
             locals: Vec::new(),
+            outer_local_count: 0,
             next_slot: 0,
             max_slots: 0,
             captures: Vec::new(),
@@ -55,7 +74,7 @@ impl Scope {
         }
     }
 
-    fn alloc_slot(&mut self, name: String, span: Span) -> Result<u32, Error> {
+    fn alloc_slot(&mut self, name: &'a str, span: Span) -> Result<u32, Error> {
         let slot = self.next_slot;
         self.next_slot = self
             .next_slot
@@ -64,7 +83,7 @@ impl Scope {
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
-        self.locals.push((name, slot));
+        self.locals.push((name, slot, None));
         Ok(slot)
     }
 
@@ -72,8 +91,8 @@ impl Scope {
         self.locals
             .iter()
             .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, slot)| *slot)
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, slot, _)| *slot)
     }
 
     fn find_or_add_capture(&mut self, name: &str, cap: Capture, span: Span) -> Result<u32, Error> {
@@ -163,7 +182,7 @@ enum Step<'a> {
     },
     FlushTicks,
     BindLocal {
-        name: String,
+        name: &'a str,
         span: Span,
     },
     RestoreLocals {
@@ -197,12 +216,58 @@ pub(crate) fn step_size() -> usize {
 }
 
 struct Compiler<'a> {
-    scopes: Vec<Scope>,
+    scopes: Vec<Scope<'a>>,
     module: Option<u32>,
     syms: &'a mut SymTable,
+    globals: &'a [Option<RVal>],
+    name_table: NameTable,
+    shared_names: Option<Rc<OnceCell<NameTable>>>,
 }
 
 impl<'a> Compiler<'a> {
+    fn new_scope(&self) -> Scope<'a> {
+        let parent = self.scopes.last().unwrap();
+        let mut inner = Scope::new(self.module);
+        inner.outer_local_count = parent.outer_local_count + parent.locals.len();
+        inner
+    }
+
+    // 最後に記録したノードまで戻り、増えた束縛だけを追加する。
+    // 兄弟の関数・クロージャは同じ親ノードを参照する。
+    fn visible_name_head(&mut self) -> Option<usize> {
+        let mut pending_from = None;
+        let mut head = None;
+        'scopes: for (scope_index, scope) in self.scopes.iter().enumerate().rev() {
+            for (local_index, (_, _, saved)) in scope.locals.iter().enumerate().rev() {
+                if let Some(saved) = saved {
+                    head = Some(saved.get() - 1);
+                    break 'scopes;
+                }
+                pending_from = Some((scope_index, local_index));
+            }
+        }
+        if let Some((first_scope, first_local)) = pending_from {
+            for (index, scope) in self.scopes.iter_mut().enumerate().skip(first_scope) {
+                let start = if index == first_scope { first_local } else { 0 };
+                for (name, _, saved) in &mut scope.locals[start..] {
+                    debug_assert!(saved.is_none());
+                    let table = &mut self.name_table;
+                    let index = table.nodes.len();
+                    let start = table.text.len();
+                    table.text.push_str(name);
+                    table.nodes.push(NameNode {
+                        start,
+                        end: table.text.len(),
+                        parent: head,
+                    });
+                    *saved = NonZeroUsize::new(index + 1);
+                    head = Some(index);
+                }
+            }
+        }
+        head
+    }
+
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.scopes.last_mut().unwrap().chunk
     }
@@ -220,7 +285,45 @@ impl<'a> Compiler<'a> {
 
     fn emit(&mut self, op: Op, span: Span) -> usize {
         self.flush_ticks();
-        self.chunk().emit(op, span)
+        let ip = self.chunk().emit(op, span);
+        if let Op::GetGlobal(id) = op
+            && !matches!(self.globals.get(id as usize), Some(Some(_)))
+        {
+            self.record_name_site(id, ip);
+        }
+        ip
+    }
+
+    // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
+    // 再読込で消えるモジュールの束縛は、この判定に含めない。
+    // 通常の emit を小さく保ち、診断記録の処理を分離する。
+    #[cold]
+    fn record_name_site(&mut self, id: u32, ip: usize) {
+        let scope = self.scopes.last().unwrap();
+        // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
+        if scope.outer_local_count == 0 && scope.locals.is_empty() {
+            return;
+        }
+        if !needs_name_candidates(&self.syms.names[id as usize]) {
+            return;
+        }
+        if self.shared_names.is_none() {
+            self.shared_names = Some(Rc::new(OnceCell::new()));
+        }
+        if let Some(head) = self.visible_name_head() {
+            let previous = self.chunk().names.as_ref().map(|names| names.last_site);
+            let site = self.name_table.sites.len();
+            self.name_table.sites.push(NameSite { ip, head, previous });
+            if let Some(names) = &mut self.chunk().names {
+                names.last_site = site;
+            } else {
+                let table = Rc::clone(self.shared_names.as_ref().unwrap());
+                self.chunk().names = Some(NameInfo {
+                    table,
+                    last_site: site,
+                });
+            }
+        }
     }
 
     fn resolve_var(&mut self, name: &str, span: Span) -> Result<Op, Error> {
@@ -472,9 +575,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 self.compile_body_shallow(body, true, depth + 1)?;
@@ -496,9 +599,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 self.compile_body_shallow(body, true, depth + 1)?;
@@ -525,7 +628,7 @@ impl<'a> Compiler<'a> {
                         .scopes
                         .last_mut()
                         .unwrap()
-                        .alloc_slot(name.clone(), val_expr.span)?;
+                        .alloc_slot(name, val_expr.span)?;
                     self.chunk().emit(Op::SetLocal(slot), val_expr.span);
                 }
                 self.compile_body_shallow(body, is_tail, depth + 1)?;
@@ -1045,9 +1148,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Defn { name, params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 steps.push(Step::FinishFn(Box::new(FinishFnStep {
@@ -1061,9 +1164,9 @@ impl<'a> Compiler<'a> {
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
                     .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = Scope::new(self.module);
+                let mut inner = self.new_scope();
                 for p in params {
-                    inner.alloc_slot(p.clone(), span)?;
+                    inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
                 steps.push(Step::FinishFn(Box::new(FinishFnStep {
@@ -1084,7 +1187,7 @@ impl<'a> Compiler<'a> {
                 self.push_body(steps, body, is_tail);
                 for (name, val_expr) in bindings.iter().rev() {
                     steps.push(Step::BindLocal {
-                        name: name.clone(),
+                        name,
                         span: val_expr.span,
                     });
                     steps.push(Step::Expr {
@@ -1188,16 +1291,16 @@ impl<'a> Compiler<'a> {
     }
 }
 
-fn pattern_binding(pat: &Pattern) -> Option<String> {
+fn pattern_binding(pat: &Pattern) -> Option<&str> {
     match pat {
-        Pattern::Var(name) => Some(name.clone()),
+        Pattern::Var(name) => Some(name.as_str()),
         Pattern::Some(Some(name))
         | Pattern::Ok(Some(name))
         | Pattern::Err(Some(name))
         | Pattern::Variant {
             binding: Some(name),
             ..
-        } => Some(name.clone()),
+        } => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1207,14 +1310,122 @@ mod tests {
     use super::*;
     use crate::ErrorKind;
 
+    fn compile(source: &str) -> Chunk {
+        let mut scratch = crate::parser::ParseScratch::new();
+        let exprs = crate::parser::parse_program_with_scratch(source, &mut scratch).unwrap();
+        compile_program(exprs, None, &mut SymTable::default(), &[]).unwrap()
+    }
+
+    #[test]
+    fn sparse_diagnostics_do_not_retain_capacity_for_unrelated_ast() {
+        for width in [0, 20, 2000] {
+            let source = format!("{}(let (damage 1) damge)", "(abs 1) ".repeat(width));
+            let chunk = compile(&source);
+            let table = chunk.names.as_ref().unwrap().table.get().unwrap();
+            let bytes = table.text.capacity()
+                + table.nodes.capacity() * std::mem::size_of::<NameNode>()
+                + table.sites.capacity() * std::mem::size_of::<NameSite>();
+            assert!(bytes <= 512, "width={width}, retained bytes={bytes}");
+            assert_eq!(table.nodes.len(), 1);
+            assert_eq!(table.sites.len(), 1);
+        }
+    }
+
+    #[test]
+    fn names_are_only_kept_at_global_lookups_and_shared_between_closures() {
+        for source in [
+            "(let (damage 7) damage)",
+            "(let (damage 7) (fn () damage))",
+            // `*` は GetGlobal だが、2 文字以下には候補を表示しない。
+            "(let (damage 7) (* damage damage))",
+            "(let (damage 7) (fn (x) (* damage x)))",
+        ] {
+            let chunk = compile(source);
+            assert!(chunk.names.is_none());
+            assert!(chunk.protos.iter().all(|proto| proto.chunk.names.is_none()));
+        }
+        for depth in [0, 12] {
+            let bindings = (0..20).map(|i| format!("local{i} 1 ")).collect::<String>();
+            let children = "(fn (argument) missing) ".repeat(20);
+            let source = format!(
+                "{}(let ({bindings}) {children} 0){}",
+                "(let () ".repeat(depth),
+                ")".repeat(depth)
+            );
+            let chunk = compile(&source);
+            // 親自身に GetGlobal がなくても、子は必要な外側の束縛を参照できる。
+            assert!(chunk.names.is_none());
+            let first = chunk.protos[0].chunk.names.as_ref().unwrap();
+            assert_eq!(first.table.get().unwrap().nodes.len(), 40); // 外側 20 + 各関数の引数 1
+            assert_eq!(chunk.protos.len(), 20);
+            for proto in &chunk.protos {
+                let names = proto.chunk.names.as_ref().unwrap();
+                assert!(Rc::ptr_eq(&names.table, &first.table));
+                let ip = names.table.get().unwrap().sites[names.last_site].ip;
+                assert_eq!(proto.chunk.visible_names(ip).count(), 21);
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_sites_keep_their_own_scope_snapshot() {
+        for depth in [0, 12] {
+            let source = format!(
+                "{}(let (damage 1) known (let (health 2) known)) (let (armor 3) known){}",
+                "(let () ".repeat(depth),
+                ")".repeat(depth)
+            );
+            let chunk = compile(&source);
+            let names = chunk.names.as_ref().unwrap();
+            let table = names.table.get().unwrap();
+            let mut sites = Vec::new();
+            let mut site = Some(names.last_site);
+            while let Some(index) = site {
+                let entry = &table.sites[index];
+                sites.push((entry.ip, entry.head));
+                site = entry.previous;
+            }
+            sites.reverse();
+            assert_eq!(sites.len(), 3);
+            assert_eq!(names.table.get().unwrap().nodes.len(), 3);
+            for ((ip, _), expected) in
+                sites
+                    .into_iter()
+                    .zip([vec!["damage"], vec!["health", "damage"], vec!["armor"]])
+            {
+                assert_eq!(chunk.visible_names(ip).collect::<Vec<_>>(), expected);
+            }
+            assert_eq!(chunk.visible_names(usize::MAX).count(), 0);
+        }
+    }
+
+    #[test]
+    fn nested_name_nodes_grow_linearly() {
+        let depth = 30;
+        let source = format!(
+            "{}0{}",
+            "(fn (a b c d e) missing ".repeat(depth),
+            ")".repeat(depth)
+        );
+        let chunk = compile(&source);
+        let mut current = &chunk;
+        let first = chunk.protos[0].chunk.names.as_ref().unwrap();
+        assert_eq!(first.table.get().unwrap().nodes.len(), depth * 5);
+        for _ in 0..depth {
+            current = &current.protos[0].chunk;
+            let names = current.names.as_ref().unwrap();
+            assert!(Rc::ptr_eq(&names.table, &first.table));
+        }
+    }
+
     #[test]
     fn local_slot_overflow_reports_capacity_rule() {
         // 巨大なソースを確保せず、個数上限の直前の状態から検査する。
         let mut scope = Scope::new(None);
         scope.next_slot = u32::MAX - 1;
         let at = Span::new(3, 5);
-        assert_eq!(scope.alloc_slot("last".into(), at).unwrap(), u32::MAX - 1);
-        let err = scope.alloc_slot("overflow".into(), at).unwrap_err();
+        assert_eq!(scope.alloc_slot("last", at).unwrap(), u32::MAX - 1);
+        let err = scope.alloc_slot("overflow", at).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.rule(), "compile.capacity");
         assert_eq!(err.at, at);

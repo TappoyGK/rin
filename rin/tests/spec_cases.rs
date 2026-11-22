@@ -9,6 +9,7 @@ struct SpecCase {
     id: String,
     rule_id: String,
     error_rule: Option<String>,
+    error_message: Option<String>,
     source: String,
     limit_spec: String,
     expected_kind: String,
@@ -134,6 +135,7 @@ fn rule_references_require_code_and_brackets() {
 fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     let mut rule_id = None;
     let mut error_rule = None;
+    let mut error_message = None;
     let mut source = None;
     let mut table_row = None;
 
@@ -148,6 +150,16 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
             let rule = parse_rule_reference(rest)
                 .unwrap_or_else(|| panic!("{file_label} ({id}): 期待規則 must use `[rule.id]`"));
             error_rule = Some(rule.to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("期待メッセージ：") {
+            error_message = Some(
+                rest.trim()
+                    .strip_prefix('`')
+                    .and_then(|s| s.strip_suffix('`'))
+                    .unwrap_or_else(|| {
+                        panic!("{file_label} ({id}): 期待メッセージ must use backticks")
+                    })
+                    .to_string(),
+            );
         } else if trimmed == "```rin" {
             idx += 1;
             let mut buf = Vec::new();
@@ -185,6 +197,7 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
         id,
         rule_id: rule_id.unwrap_or_else(|| panic!("{file_label}: missing 主根拠")),
         error_rule,
+        error_message,
         source: source.unwrap_or_else(|| panic!("{file_label}: missing ```rin source block")),
         limit_spec,
         expected_kind,
@@ -217,6 +230,13 @@ fn run_case(case: &SpecCase) {
     };
 
     if let Err(err) = &result {
+        if let Some(expected) = &case.error_message {
+            assert_eq!(
+                &err.message, expected,
+                "{}: error message mismatch",
+                case.id
+            );
+        }
         assert_eq!(
             Some(err.rule()),
             case.error_rule.as_deref(),
@@ -309,7 +329,7 @@ fn verify_all_spec_cases() {
             );
             if case.expected_kind == "値" {
                 assert!(
-                    case.error_rule.is_none(),
+                    case.error_rule.is_none() && case.error_message.is_none(),
                     "{}: value case has error rule",
                     case.id
                 );

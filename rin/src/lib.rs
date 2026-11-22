@@ -4,6 +4,7 @@ pub mod alloc;
 mod ast;
 mod bytecode;
 mod compiler;
+mod diagnostic;
 pub mod error;
 mod eval;
 pub mod ffi;

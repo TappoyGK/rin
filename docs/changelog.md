@@ -1,13 +1,15 @@
 # 変更履歴
 
-利用者に関わる変更をバージョンごとに記載する。
+利用者に関わる変更をバージョンごとに記載し、関連する PR のリンクを付ける。イシューへのリンクは記載しない。
 
 ## v0.1.1（未リリース）
 
-- エラーに仕様の規則名を付け、Rust の `Error::rule()` と C の `RinError.rule` から取得できるようにした。表示の先頭行にも `[rule.id]` を付ける。`Error` の各コンストラクタは第 1 引数に規則名を必須とする（[#35](https://github.com/TappoyGK/rin/issues/35)）。
+- 未定義名のエラーに近い名前の候補を、構造体の不存在フィールドやモジュールの不存在公開シンボルに利用可能な名前の一覧を付ける。Rust / C FFI のメッセージと表示文字列に含まれ、規則名・位置・呼び出し履歴も保持する（[PR #39](https://github.com/TappoyGK/rin/pull/39)）。
+
+- エラーに仕様の規則名を付け、Rust の `Error::rule()` と C の `RinError.rule` から取得できるようにした。表示の先頭行にも `[rule.id]` を付ける。`Error` の各コンストラクタは第 1 引数に規則名を必須とする（[PR #38](https://github.com/TappoyGK/rin/pull/38)）。
 
 - **Rust API の破壊的変更**：`Value` の公開ヴァリアントの中身を変更した。`Array` / `Tuple` は `Rc<ValueItems>`、`Struct` の `fields` は `Rc<ValueFields>`、`Some` / `Ok` / `Err` と `Variant` の子は `Rc<ValueChild>` を保持し、最後の所有者で解放する。構築には `Value::array(items)`・`tuple(items)`・`structure(name, fields)`・`variant(name, tag, data)`・`some(v)`・`ok(v)`・`err(v)` を使う。直接構築する場合は `Value::Some(Rc::new(v.into()))` のように所有型へ変換する。`Weak<Value>` も子を指す場合は `Weak<ValueChild>` となる。
-- 深い値の import / export、比較、表示、スキーマ検証、解放でネイティブスタックが溢れる問題を修正した。import の途中失敗時には生成途中の値を回収する（[#31](https://github.com/TappoyGK/rin/issues/31)・[PR #37](https://github.com/TappoyGK/rin/pull/37)）。
+- 深い値の import / export、比較、表示、スキーマ検証、解放でネイティブスタックが溢れる問題を修正した。import の途中失敗時には生成途中の値を回収する（[PR #37](https://github.com/TappoyGK/rin/pull/37)）。
 - `Value` / `ListNode` の `{:#?}` は浅い部分を字下げし、書式化の深さ上限に達した部分木をコンパクトに出力する。リストのセルも深さに含めるため、平らな長いリストも途中で切り替わる。
 - スキーマ検証で、値を消費しない参照循環を検出してエラーを返すようにした。
 

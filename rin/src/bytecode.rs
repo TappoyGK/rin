@@ -1,5 +1,6 @@
 //! バイトコード VM の命令列、定数チャンク、関数プロトタイプ、シンボルテーブルを定義する。
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -224,6 +225,53 @@ pub(crate) struct FnProto {
     pub chunk: Chunk,
 }
 
+/// 名前と親ノードの添字。平坦な配列で共有し、解放も再帰させない。
+#[derive(Debug)]
+pub(crate) struct NameNode {
+    pub start: usize,
+    pub end: usize,
+    pub parent: Option<usize>,
+}
+
+#[derive(Debug)]
+pub(crate) struct NameSite {
+    pub ip: usize,
+    pub head: usize,
+    pub previous: Option<usize>,
+}
+
+/// プログラム全体で文字列・ノード・参照位置を共有する。
+/// バッファは実際に記録する情報に応じて伸長する。
+#[derive(Debug, Default)]
+pub(crate) struct NameTable {
+    pub text: String,
+    pub nodes: Vec<NameNode>,
+    pub sites: Vec<NameSite>,
+}
+
+/// チャンクは共有表への参照と最後の参照位置の添字だけを持つ。
+#[derive(Debug, Clone)]
+pub(crate) struct NameInfo {
+    pub table: Rc<OnceCell<NameTable>>,
+    pub last_site: usize,
+}
+
+struct VisibleNames<'a> {
+    text: &'a str,
+    nodes: &'a [NameNode],
+    head: Option<usize>,
+}
+
+impl<'a> Iterator for VisibleNames<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = &self.nodes[self.head?];
+        self.head = node.parent;
+        Some(&self.text[node.start..node.end])
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Chunk {
     pub local_count: u32,
@@ -237,9 +285,31 @@ pub(crate) struct Chunk {
     pub patterns: Vec<Pattern>,
     pub protos: Vec<Rc<FnProto>>,
     pub export_lists: Vec<Vec<String>>,
+    pub names: Option<NameInfo>,
 }
 
 impl Chunk {
+    pub fn visible_names(&self, ip: usize) -> impl Iterator<Item = &str> {
+        let (text, nodes, head) = self.names.as_ref().map_or(("", &[][..], None), |names| {
+            let table = names.table.get().expect("name table finalized");
+            let mut site = Some(names.last_site);
+            let mut head = None;
+            while let Some(index) = site {
+                let entry = &table.sites[index];
+                if entry.ip == ip {
+                    head = Some(entry.head);
+                    break;
+                }
+                if entry.ip < ip {
+                    break;
+                }
+                site = entry.previous;
+            }
+            (table.text.as_str(), table.nodes.as_slice(), head)
+        });
+        VisibleNames { text, nodes, head }
+    }
+
     pub fn emit(&mut self, op: Op, span: Span) -> usize {
         let idx = self.code.len();
         self.code.push(op);
