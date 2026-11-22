@@ -41,7 +41,7 @@ impl Error {
     /// ソースのない位置・ホストからの入口には、既存の診断と履歴だけを表示する。
     /// 行・列が範囲外、列が UTF-8 文字の途中、または `0:0` の場合も同様。
     /// 列は 1 始まりの UTF-8 バイト位置。タブはソース行の先頭から 4 桁区切りで
-    /// 展開し、その他の文字は Unicode スカラー値1つを1桁として数える。
+    /// 展開し、その他の文字は仕様の範囲表による表示幅を使う。
     pub fn render_with_to<'s>(
         &self,
         out: &mut (impl fmt::Write + ?Sized),
@@ -128,7 +128,7 @@ fn write_line(out: &mut (impl fmt::Write + ?Sized), line: &str) -> Result<usize,
         if c == '\t' || c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
             let segment = &line[start..i];
             out.write_str(segment)?;
-            width += segment.chars().count();
+            width += segment.chars().map(char_width).sum::<usize>();
             if c == '\t' {
                 let spaces = 4 - width % 4;
                 out.write_str(&"    "[..spaces])?;
@@ -144,7 +144,30 @@ fn write_line(out: &mut (impl fmt::Write + ?Sized), line: &str) -> Result<usize,
     }
     let segment = &line[start..];
     out.write_str(segment)?;
-    Ok(width + segment.chars().count())
+    Ok(width + segment.chars().map(char_width).sum::<usize>())
+}
+
+// [eval.snippet] の小さな範囲表。ゼロ幅を先に判定する。
+fn char_width(c: char) -> usize {
+    match c as u32 {
+        0x0300..=0x036f | 0x200b..=0x200f | 0x3099..=0x309a | 0xfe00..=0xfe0f => 0,
+        0x1100..=0x115f
+        | 0x2e80..=0x303e
+        | 0x3041..=0x33ff
+        | 0x3400..=0x4dbf
+        | 0x4e00..=0x9fff
+        | 0xa000..=0xa4cf
+        | 0xac00..=0xd7a3
+        | 0xf900..=0xfaff
+        | 0xfe30..=0xfe4f
+        | 0xff00..=0xff60
+        | 0xffe0..=0xffe6
+        | 0x1f300..=0x1f64f
+        | 0x1f900..=0x1f9ff
+        | 0x20000..=0x2fffd
+        | 0x30000..=0x3fffd => 2,
+        _ => 1,
+    }
 }
 
 struct NullWriter;

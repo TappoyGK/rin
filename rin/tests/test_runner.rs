@@ -212,3 +212,50 @@ fn depth_and_memory_limits_are_errors() {
         ErrorKind::TooMuchMemory
     );
 }
+
+#[test]
+fn test_form_names_can_be_bound_as_ordinary_values() {
+    for source in [
+        r#"(deftest "x" (let (check 1) (check_eq check 1)))"#,
+        r#"(deftest "y" (let (f (fn (check) check)) (check_eq (f 2) 2)))"#,
+        r#"(deftest "capture" (let (check 3 f (fn () check)) (check_eq (f) 3)))"#,
+        r#"(deftest "match" (match some(4) (some(check) (check_eq check 4))))"#,
+        r#"(def check 5) (deftest "global" (check_eq check 5))"#,
+        r#"(deftest "names" (let (deftest 1 check_eq 2) (check (== (+ deftest check_eq) 3))))"#,
+    ] {
+        let report = run(&[("bindings", source)], &[], Limits::default());
+        assert!(report.is_success(), "{source}: {report:?}");
+    }
+    for source in [
+        r#"(deftest "scope" (let (check 1) check) (let (c check) c))"#,
+        r#"(deftest "init" (let (check check) check))"#,
+        r#"(deftest "param" (fn (check) check) (let (c check) c))"#,
+        r#"(deftest "match" (match some(4) (some(check) check)) (let (c check) c))"#,
+    ] {
+        let report = run(&[("scope", source)], &[], Limits::default());
+        assert_eq!(
+            report.errors[0].error.message, "test forms cannot be used as values",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn check_placement_and_arity_have_distinct_diagnostics() {
+    for source in ["(check true)", "(defn f () (check true))", "(check_eq 1 1)"] {
+        let report = run(&[("placement", source)], &[], Limits::default());
+        assert_eq!(
+            report.errors[0].error.message,
+            "checks are only allowed inside deftest"
+        );
+    }
+    for (body, message) in [
+        ("(check)", "check requires 1 argument(s), got 0"),
+        ("(check_eq 1)", "check_eq requires 2 argument(s), got 1"),
+        ("(check true false)", "check requires 1 argument(s), got 2"),
+    ] {
+        let source = format!("(deftest \"arity\" {body})");
+        let report = run(&[("arity", &source)], &[], Limits::default());
+        assert_eq!(report.errors[0].error.message, message);
+    }
+}

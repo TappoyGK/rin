@@ -1,6 +1,6 @@
 //! ゲームを起動せずに、独立した環境で Rin のテストを実行する。
 
-use crate::ast::{Expr, ExprKind};
+use crate::ast::{Expr, ExprKind, Pattern};
 use crate::parser::{ParseScratch, ParseScratchGuard, parse_tests};
 use crate::{Error, HeapAllocator, Limits, Machine, Span, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -142,6 +142,9 @@ fn split_tests(exprs: Vec<Expr>) -> Result<Program, Error> {
         tests: Vec::new(),
     };
     let mut names = BTreeSet::new();
+    let globals = exprs.iter().filter(|e| !matches!(&e.kind,
+        ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Ident(n) if n == "deftest")))
+        .fold(0, |mask, e| mask | declarations(e));
     for mut expr in exprs {
         if let ExprKind::Call { callee, args } = &mut expr.kind
             && matches!(&callee.kind, ExprKind::Ident(name) if name == "deftest")
@@ -165,8 +168,11 @@ fn split_tests(exprs: Vec<Expr>) -> Result<Program, Error> {
                 ));
             }
             let name = name.clone();
+            let bound = args[1..]
+                .iter()
+                .fold(globals, |mask, e| mask | declarations(e));
             for body in &args[1..] {
-                validate(body, true)?;
+                validate(body, true, bound)?;
             }
             let mut body = std::mem::take(args);
             body.remove(0);
@@ -176,16 +182,38 @@ fn split_tests(exprs: Vec<Expr>) -> Result<Program, Error> {
                 body,
             });
         } else {
-            validate(&expr, false)?;
+            validate(&expr, false, globals)?;
             program.setup.push(expr);
         }
     }
     Ok(program)
 }
 
-fn validate(root: &Expr, in_test: bool) -> Result<(), Error> {
+// 特殊形式と同名の値を、字面だけで拒否しないための束縛集合。
+fn test_name(name: &str) -> u8 {
+    match name {
+        "deftest" => 1,
+        "check" => 2,
+        "check_eq" => 4,
+        _ => 0,
+    }
+}
+
+fn declarations(root: &Expr) -> u8 {
+    let mut mask = 0;
     let mut work = vec![root];
     while let Some(expr) = work.pop() {
+        if let ExprKind::Def { name, .. } | ExprKind::Defn { name, .. } = &expr.kind {
+            mask |= test_name(name);
+        }
+        children(expr, &mut work);
+    }
+    mask
+}
+
+fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
+    let mut work = vec![(root, bound)];
+    while let Some((expr, bound)) = work.pop() {
         if let ExprKind::Call { callee, args } = &expr.kind
             && let ExprKind::Ident(name) = &callee.kind
         {
@@ -197,18 +225,29 @@ fn validate(root: &Expr, in_test: bool) -> Result<(), Error> {
                 ));
             }
             if matches!(name.as_str(), "check" | "check_eq") {
-                if !in_test || args.len() != if name == "check" { 1 } else { 2 } {
+                if !in_test {
                     return Err(Error::parse(
                         "test.check",
                         expr.span,
-                        "check requires one argument and check_eq two, inside deftest",
+                        "checks are only allowed inside deftest",
                     ));
                 }
-                work.extend(args);
+                if args.len() != if name == "check" { 1 } else { 2 } {
+                    return Err(Error::parse(
+                        "test.check",
+                        expr.span,
+                        format!(
+                            "{name} requires {} argument(s), got {}",
+                            if name == "check" { 1 } else { 2 },
+                            args.len()
+                        ),
+                    ));
+                }
+                work.extend(args.iter().map(|e| (e, bound)));
                 continue;
             }
         }
-        if matches!(&expr.kind, ExprKind::Ident(name) if matches!(name.as_str(), "deftest" | "check" | "check_eq"))
+        if matches!(&expr.kind, ExprKind::Ident(name) if test_name(name) != 0 && bound & test_name(name) == 0)
         {
             return Err(Error::parse(
                 "test.check",
@@ -216,7 +255,42 @@ fn validate(root: &Expr, in_test: bool) -> Result<(), Error> {
                 "test forms cannot be used as values",
             ));
         }
-        children(expr, &mut work);
+        match &expr.kind {
+            ExprKind::Let { bindings, body } => {
+                let mut scope = bound;
+                for (name, value) in bindings {
+                    work.push((value, scope));
+                    scope |= test_name(name);
+                }
+                work.extend(body.iter().map(|e| (e, scope)));
+            }
+            ExprKind::Fn { params, body } | ExprKind::Defn { params, body, .. } => {
+                let scope = params
+                    .iter()
+                    .fold(bound, |mask, name| mask | test_name(name));
+                work.extend(body.iter().map(|e| (e, scope)));
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                work.push((scrutinee, bound));
+                for arm in arms {
+                    let name = match &arm.pattern {
+                        Pattern::Var(name) => Some(name),
+                        Pattern::Some(name)
+                        | Pattern::Ok(name)
+                        | Pattern::Err(name)
+                        | Pattern::Variant { binding: name, .. } => name.as_ref(),
+                        _ => None,
+                    };
+                    let scope = bound | name.map_or(0, |n| test_name(n));
+                    work.extend(arm.body.iter().map(|e| (e, scope)));
+                }
+            }
+            _ => {
+                let mut nested = Vec::new();
+                children(expr, &mut nested);
+                work.extend(nested.into_iter().map(|e| (e, bound)));
+            }
+        }
     }
     Ok(())
 }

@@ -5,7 +5,7 @@
 ## 未リリース
 
 - ゲームなしでModを検証する `deftest`・`check`・`check_eq`、Rustのテスト実行API、`rin test` CLIを追加した。テストごとの独立した環境、検査失敗の蓄積、ソース付き診断、JSON出力、フィルタと資源上限の指定に対応する。CLIオプションはSuzと同じ形式とし、外部クレートを使わずに実装した（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
-- `unicode-width` への依存を削除した。エラー表示のキャレット位置はSuzと同じくUnicodeスカラー値の個数から求める。全角文字や結合絵文字の表示幅補正は行わない（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
+- `unicode-width` への依存を削除した。エラー表示のキャレット位置は、内部の小さな範囲表で求める表示幅から計算する。主な全角文字・結合文字に対応し、絵文字の連結や国旗などの並びは補正しない（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
 
 - **構文の破壊的変更**：行コメントを `//` から `;` に変更した。文字列・文字リテラル内の `;` はそのまま扱い、`//` は通常の識別子となる（[PR #49](https://github.com/TappoyGK/rin/pull/49)）。
 

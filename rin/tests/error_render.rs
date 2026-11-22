@@ -21,13 +21,15 @@ fn render_keeps_header_and_adds_the_source_line() {
 }
 
 #[test]
-fn byte_columns_become_scalar_columns() {
+fn byte_columns_become_display_columns() {
     let source = "\"猫e\u{301}👨‍👩‍👧‍👦\"\t\"全角\"\tzzz";
     let error = eval(source).unwrap_err();
     assert_eq!(error.at.col, source.find("zzz").unwrap() + 1);
-    assert!(error.render(source).ends_with(
-        "\n  |\n1 | \"猫e\u{301}👨‍👩‍👧‍👦\"    \"全角\"    zzz\n  |                         ^"
-    ));
+    assert!(
+        error.render(source).ends_with(
+            "\n  |\n1 | \"猫e\u{301}👨‍👩‍👧‍👦\"   \"全角\"  zzz\n  |                         ^"
+        )
+    );
     let source = "\t\tzzz";
     assert!(
         eval(source)
@@ -223,4 +225,26 @@ fn gutter_uses_only_visible_lines_and_resolves_each_position_once() {
     });
     gutters(&rendered, 2, 1);
     assert_eq!(rendered, error.render(ma));
+}
+
+#[test]
+fn common_character_widths_and_tabs_align_carets() {
+    for (source, line, width) in [
+        ("\"全角\" zzz", "\"全角\" zzz", 7),
+        ("\"😀\" zzz", "\"😀\" zzz", 5),
+        ("\"e\u{301}\" zzz", "\"e\u{301}\" zzz", 4),
+        ("\"全\"\tzzz", "\"全\"    zzz", 8),
+        ("\"ｱ\" zzz", "\"ｱ\" zzz", 4),
+        ("\"か\u{3099}\" zzz", "\"か\u{3099}\" zzz", 5),
+        ("\"👨‍👩‍👧‍👦\" zzz", "\"👨‍👩‍👧‍👦\" zzz", 11),
+    ] {
+        let error = eval(source).unwrap_err();
+        assert_eq!(error.at.col, source.find("zzz").unwrap() + 1);
+        assert!(
+            error
+                .render(source)
+                .ends_with(&format!("\n  |\n1 | {line}\n  | {}^", " ".repeat(width))),
+            "{source}"
+        );
+    }
 }
