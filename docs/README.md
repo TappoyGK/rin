@@ -7,6 +7,7 @@
 | [言語仕様](spec.md) | Rin の文法・型・値・評価規則・資源制限 |
 | [スキーマ仕様](schema.md) | 値検証用スキーマ言語の文法と規則 |
 | [API 仕様](api.md) | Rust API および C FFI API の仕様 |
+| [テストツール仕様](testing.md) | テスト実行・CLI・JSON出力 |
 | [仕様例集](spec-cases.md) | 言語仕様の具体例と期待結果 |
 
 ## 開発

@@ -411,6 +411,7 @@ pub(crate) enum Op {
     GetIndex,
     MakeClosure(u32),
 
+    Check(bool), // true: check_eq, false: check
     Call(u32),
     TailCall(u32),
     And,

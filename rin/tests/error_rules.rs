@@ -8,7 +8,7 @@ use std::path::Path;
 fn all_implementation_rules_are_documented() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut rules = BTreeSet::new();
-    for doc in ["docs/spec.md", "docs/schema.md"] {
+    for doc in ["docs/spec.md", "docs/schema.md", "docs/testing.md"] {
         for line in fs::read_to_string(root.join(doc)).unwrap().lines() {
             if let Some(rest) = line.trim_start().strip_prefix("**[") {
                 let (id, _) = rest.split_once("]**").expect("closed rule definition");

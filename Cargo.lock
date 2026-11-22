@@ -5,12 +5,10 @@ version = 4
 [[package]]
 name = "rin"
 version = "0.1.1"
-dependencies = [
- "unicode-width",
-]
 
 [[package]]
-name = "unicode-width"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+name = "rin-cli"
+version = "0.1.1"
+dependencies = [
+ "rin",
+]
