@@ -55,6 +55,20 @@ fn tail_calls_keep_captures_and_arguments_alive() {
             vec![],
             rin::eval("[1 1 1]").unwrap(),
         ),
+        // 前の呼び出し先が捕捉しているクロージャへ、さらに末尾呼び出しする。
+        (
+            "(defn t () (let (big [1 2] h (fn (y) (len big)) g (fn (x) (h x))) (g 0)))",
+            "(t)",
+            vec![],
+            Value::Int(2),
+        ),
+        // 保持用のスタック位置を残したまま、通常呼び出しから命令ループへ戻る。
+        (
+            "(defn identity (x) x) (defn t () (let (big [1 2] f (fn (x) (+ (len big) (len (identity big))))) (f 0)))",
+            "(t)",
+            vec![],
+            Value::Int(4),
+        ),
         // 同一のクロージャへ繰り返し末尾呼び出しする。
         (
             "(defn t () (let (big [1 2] f (fn (self n) (if (== n 0) (len big) (self self (- n 1))))) (f f 1000)))",
