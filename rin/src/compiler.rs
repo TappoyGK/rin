@@ -56,7 +56,8 @@ struct Scope<'a> {
     next_slot: u32,
     max_slots: u32,
     captures: Vec<(String, Capture)>,
-    pending_tick_spans: Vec<Span>,
+    // 未発行の Tick が参照する範囲の開始位置。位置情報は最終格納先へ直接書く。
+    pending_tick_start: usize,
     chunk: Chunk,
 }
 
@@ -69,7 +70,7 @@ impl<'a> Scope<'a> {
             next_slot: 0,
             max_slots: 0,
             captures: Vec::new(),
-            pending_tick_spans: Vec::new(),
+            pending_tick_start: 0,
             chunk: Chunk::default(),
         }
     }
@@ -274,12 +275,13 @@ impl<'a> Compiler<'a> {
 
     fn flush_ticks(&mut self) {
         let top = self.scopes.last_mut().unwrap();
-        if !top.pending_tick_spans.is_empty() {
-            let start = top.chunk.tick_spans.len() as u32;
-            let count = top.pending_tick_spans.len() as u32;
-            let first_span = top.pending_tick_spans[0];
-            top.chunk.tick_spans.append(&mut top.pending_tick_spans);
-            top.chunk.emit(Op::Tick(start, count), first_span);
+        let end = top.chunk.tick_spans.len();
+        if top.pending_tick_start != end {
+            let start = top.pending_tick_start;
+            let first_span = top.chunk.tick_spans[start];
+            top.chunk
+                .emit(Op::Tick(start as u32, (end - start) as u32), first_span);
+            top.pending_tick_start = end;
         }
     }
 
@@ -440,11 +442,7 @@ impl<'a> Compiler<'a> {
             return self.compile_expr_iter(expr, is_tail);
         }
         let span = expr.span;
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .pending_tick_spans
-            .push(span);
+        self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
 
         match &expr.kind {
             ExprKind::Int(n) => {
@@ -946,11 +944,7 @@ impl<'a> Compiler<'a> {
         steps: &mut Vec<Step<'a>>,
     ) -> Result<(), Error> {
         let span = expr.span;
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .pending_tick_spans
-            .push(span);
+        self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
 
         match &expr.kind {
             ExprKind::Int(n) => {
