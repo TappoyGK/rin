@@ -1,6 +1,6 @@
 //! ゲームを起動せずに、独立した環境で Rin のテストを実行する。
 
-use crate::ast::{Expr, ExprKind, Pattern};
+use crate::ast::{Expr, ExprKind, Pattern, children};
 use crate::parser::{ParseScratch, ParseScratchGuard, parse_tests};
 use crate::{Error, HeapAllocator, Limits, Machine, Span, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -295,51 +295,6 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
     Ok(())
 }
 
-fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    match &expr.kind {
-        ExprKind::List(xs)
-        | ExprKind::Tuple(xs)
-        | ExprKind::Fn { body: xs, .. }
-        | ExprKind::Defn { body: xs, .. } => out.extend(xs),
-        ExprKind::Struct { fields, .. } => out.extend(fields.iter().map(|(_, e)| e)),
-        ExprKind::Some(x)
-        | ExprKind::Ok(x)
-        | ExprKind::Err(x)
-        | ExprKind::Def { value: x, .. }
-        | ExprKind::Field { target: x, .. } => out.push(x),
-        ExprKind::Variant { data, .. } => out.extend(data.as_deref()),
-        ExprKind::Index { target, index } => out.extend([target.as_ref(), index.as_ref()]),
-        ExprKind::With { target, fields } => {
-            out.push(target);
-            out.extend(fields.iter().map(|(_, e)| e));
-        }
-        ExprKind::Let { bindings, body } => {
-            out.extend(bindings.iter().map(|(_, e)| e));
-            out.extend(body);
-        }
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => out.extend([cond.as_ref(), then_branch.as_ref(), else_branch.as_ref()]),
-        ExprKind::When { cond, body } => {
-            out.push(cond);
-            out.extend(body);
-        }
-        ExprKind::Match { scrutinee, arms } => {
-            out.push(scrutinee);
-            for arm in arms {
-                out.extend(&arm.body);
-            }
-        }
-        ExprKind::Call { callee, args } => {
-            out.push(callee);
-            out.extend(args);
-        }
-        _ => {}
-    }
-}
-
 fn module_order(modules: &[(&str, &str)]) -> Result<Vec<usize>, Box<SourceError>> {
     let mut names = BTreeMap::new();
     let mut dependencies = Vec::new();
@@ -409,4 +364,8 @@ fn module_order(modules: &[(&str, &str)]) -> Result<Vec<usize>, Box<SourceError>
         }
     }
     Ok(order)
+}
+
+pub(crate) fn validate_source(source: &str) -> Result<(), Error> {
+    split_tests(parse_tests(source)?).map(|_| ())
 }

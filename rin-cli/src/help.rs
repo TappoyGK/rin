@@ -1,3 +1,5 @@
 //! CLIの使い方。引数解析とは分けて管理する。
-pub const USAGE: &str = "Usage: rin COMMAND [OPTIONS]\n\nCommands:\n  test [PATH...]   Run Rin tests\n\nInformation:\n  --help          Show help\n  --version       Show version";
+pub const USAGE: &str = "Usage: rin COMMAND [OPTIONS]\n\nCommands:\n  test [PATH...]   Run Rin tests\n  fmt [PATH...]    Format Rin sources\n\nInformation:\n  --help          Show help\n  --version       Show version";
 pub const TEST_USAGE: &str = "Usage: rin test [OPTIONS] [PATH...]\n\nOptions:\n  --module-path DIR  Module directory (repeatable)\n  --filter PATTERN   Match test names by substring\n  --steps COUNT      Step limit (default: 100000)\n  --depth COUNT      Call depth limit (default: 200)\n  --memory SIZE      Memory bytes; K/M/G are binary suffixes (default: 16M)\n  --format FORMAT    text or json (default: text)\n  --help             Show test help\n  --                 Treat remaining arguments as paths\n\nWithout PATH, search the current directory for *_test.rin files.";
+
+pub const FMT_USAGE: &str = "Usage: rin fmt [OPTIONS] [PATH...]\n\nOptions:\n  --check  List files that need formatting without writing\n  --help   Show formatter help\n  --       Treat remaining arguments as paths\n\nWithout PATH, search the current directory for *.rin files.\nUse '-' alone to format stdin and write stdout.";

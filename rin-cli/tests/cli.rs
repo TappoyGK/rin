@@ -108,3 +108,81 @@ fn explicit_files_and_syntax_errors() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("\"rule\":\"test.check\""));
 }
+
+#[test]
+fn formatter_check_write_and_invalid_file_protection() {
+    let f = Fixture::new();
+    f.write("a.rin", "( + 1  2 )");
+    f.write("nested/b_test.rin", "(deftest \"x\"(check true))");
+    f.write("target/ignored.rin", "(");
+    let out = f.run(&["fmt", "--check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("b_test.rin")
+    );
+    assert_eq!(fs::read_to_string(f.0.join("a.rin")).unwrap(), "( + 1  2 )");
+    let out = f.run(&["fmt"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(f.0.join("a.rin")).unwrap(), "(+ 1 2)\n");
+    assert!(f.run(&["fmt", "--check"]).status.success());
+    f.write("a.rin", "( + 1 2 )");
+    f.write("z.rin", "(");
+    let out = f.run(&["fmt"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(fs::read_to_string(f.0.join("a.rin")).unwrap(), "( + 1 2 )");
+    assert_eq!(fs::read_to_string(f.0.join("z.rin")).unwrap(), "(");
+}
+
+#[test]
+fn formatter_stdin_help_and_options() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let f = Fixture::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rin"))
+        .args(["fmt", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"[1  2]").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"[1, 2]\n");
+    assert!(f.run(&["fmt", "--help"]).status.success());
+    for args in [
+        vec!["fmt", "--check", "--check"],
+        vec!["fmt", "--steps", "1"],
+        vec!["fmt", "-", "a.rin"],
+        vec!["fmt", "--check=true"],
+    ] {
+        assert_eq!(f.run(&args).status.code(), Some(2), "{args:?}");
+    }
+    f.write("--name.rin", "[1 2]");
+    assert!(f.run(&["fmt", "--", "--name.rin"]).status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn formatter_preserves_permissions_and_skips_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let f = Fixture::new();
+    f.write("a.rin", "[1 2]");
+    fs::set_permissions(f.0.join("a.rin"), fs::Permissions::from_mode(0o640)).unwrap();
+    symlink(".", f.0.join("loop")).unwrap();
+    assert!(f.run(&["fmt"]).status.success());
+    assert_eq!(
+        fs::metadata(f.0.join("a.rin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+    assert_eq!(fs::read_dir(&f.0).unwrap().count(), 2);
+}

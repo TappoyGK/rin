@@ -1,8 +1,9 @@
 mod arguments;
+mod format;
 mod help;
 mod json;
 
-use arguments::{Action, Format};
+use arguments::{Action, Command, Format};
 use json::{Json, array, object, optional, string};
 use rin::test::{TestReport, TestStatus};
 use rin::{Error, Limits};
@@ -15,8 +16,15 @@ use std::{
 
 fn main() -> ExitCode {
     let options = match arguments::parse(std::env::args_os().skip(1)) {
-        Ok(Action::Help(test)) => {
-            println!("{}", if test { help::TEST_USAGE } else { help::USAGE });
+        Ok(Action::Help(command)) => {
+            println!(
+                "{}",
+                match command {
+                    Some(Command::Test) => help::TEST_USAGE,
+                    Some(Command::Fmt) => help::FMT_USAGE,
+                    None => help::USAGE,
+                }
+            );
             return ExitCode::SUCCESS;
         }
         Ok(Action::Version) => {
@@ -24,6 +32,16 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Ok(Action::Execute(options)) => options,
+        Ok(Action::Format(options)) => {
+            return match format::run(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::from(1),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
         Err(error) => {
             eprintln!("error: {error}");
             return ExitCode::from(2);
@@ -58,10 +76,17 @@ fn main() -> ExitCode {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Discovery {
+    Tests,
+    Modules,
+    All,
+}
+
 // Canonical paths deduplicate overlapping roots. Do not follow directory symlinks.
 fn discover(
     path: &Path,
-    tests: bool,
+    mode: Discovery,
     explicit: bool,
     files: &mut BTreeSet<PathBuf>,
 ) -> Result<(), String> {
@@ -75,14 +100,17 @@ fn discover(
             if matches!(entry.file_name().to_str(), Some(".git" | "target")) {
                 continue;
             }
-            discover(&entry.path(), tests, false, files)?;
+            discover(&entry.path(), mode, false, files)?;
         }
     } else if metadata.is_file() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let accepted = if tests {
-            (explicit && name.ends_with(".rin")) || name.ends_with("_test.rin")
-        } else {
-            name.ends_with(".rin") && !name.ends_with("_test.rin")
+        let rin_source = path.extension().is_some_and(|ext| ext == "rin");
+        let test_source = path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().ends_with(b"_test.rin"));
+        let accepted = match mode {
+            Discovery::Tests => (explicit && rin_source) || test_source,
+            Discovery::Modules => rin_source && !test_source,
+            Discovery::All => rin_source,
         };
         if accepted {
             files.insert(fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?);
@@ -106,7 +134,7 @@ fn execute(
 ) -> Result<bool, String> {
     let mut test_files = BTreeSet::new();
     for path in paths {
-        discover(path, true, true, &mut test_files)?;
+        discover(path, Discovery::Tests, true, &mut test_files)?;
     }
     let sources: Vec<_> = test_files
         .iter()
@@ -120,7 +148,7 @@ fn execute(
                 path.display()
             ));
         }
-        discover(path, false, true, &mut module_files)?;
+        discover(path, Discovery::Modules, true, &mut module_files)?;
     }
     let modules: Vec<_> = module_files
         .iter()

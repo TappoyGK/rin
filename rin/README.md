@@ -15,3 +15,12 @@ cargo run -p rin-cli -- test --module-path ./modules
 ```
 
 テストファイルの書き方とオプションは[テストツール仕様](../docs/testing.md)を参照。
+
+## ソースの整形
+
+```sh
+cargo run -p rin-cli -- fmt --check
+cargo run -p rin-cli -- fmt path/to/source.rin
+```
+
+[フォーマッタ仕様](../docs/fmt.md)を参照。

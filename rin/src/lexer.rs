@@ -49,6 +49,25 @@ pub(crate) fn tokenize_into(input: &str, tokens: &mut Vec<Token>) -> Result<(), 
     Ok(())
 }
 
+/// 整形器向け。通常のTokenを大きくせず、原文の範囲を別に返す。
+pub(crate) fn tokenize_lossless(
+    input: &str,
+) -> Result<Vec<(Token, std::ops::Range<usize>)>, Error> {
+    let mut lines = vec![0];
+    lines.extend(input.match_indices('\n').map(|(i, _)| i + 1));
+    let mut lexer = Lexer::new(input);
+    let mut result = Vec::new();
+    loop {
+        let token = lexer.next_token()?;
+        if token.kind == TokenKind::Eof {
+            break;
+        }
+        let start = lines[token.span.line - 1] + token.span.col - 1;
+        result.push((token, start..lexer.pos));
+    }
+    Ok(result)
+}
+
 struct Lexer<'a> {
     src: &'a [u8],
     pos: usize,
