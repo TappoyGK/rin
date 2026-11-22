@@ -203,6 +203,14 @@ pub fn rin::test::run_filtered(
 
 構文やモジュール依存のエラーは `TestReport.errors` の `SourceError { source, error }` に入る。`is_success()` は全テストが成功し、準備段階のエラーもない場合に真を返す。テストが0件でエラーがない場合も真となる。実行順と上限の適用範囲は[テストツール仕様](testing.md)を参照。
 
+### ソース整形API
+
+```rust
+pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
+```
+
+ソースを共通の書式に整形して返す。コメント・リテラル・構文を保持し、整形前後のASTの同一性を検査する。入力の構文エラー、または整形による構文の変化は `Error` を返す。書式とCLIは[フォーマッタ仕様](fmt.md)を参照。
+
 ## 2. C FFI API
 
 ヘッダ：[rin.h](../rin/include/rin.h)

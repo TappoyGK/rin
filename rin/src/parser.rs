@@ -81,8 +81,12 @@ pub(crate) fn parse_program_with_scratch<'s>(
 }
 
 pub(crate) fn parse_tests(input: &str) -> Result<Vec<Expr>, Error> {
+    parse_owned(input, true)
+}
+
+pub(crate) fn parse_owned(input: &str, test_mode: bool) -> Result<Vec<Expr>, Error> {
     let mut scratch = ParseScratch::new();
-    parse_with_mode(input, &mut scratch, true)?;
+    parse_with_mode(input, &mut scratch, test_mode)?;
     Ok(std::mem::take(&mut scratch.exprs))
 }
 

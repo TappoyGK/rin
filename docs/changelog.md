@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- ソース整形API `rin::fmt::format` と `rin fmt` CLIを追加した。コメント・リテラル・構文の意味を保ちながら書式を揃え、ファイルの書き換え、`--check`、標準入力からの整形に対応する（[PR #54](https://github.com/TappoyGK/rin/pull/54)）。
+
 - ゲームなしでModを検証する `deftest`・`check`・`check_eq`、Rustのテスト実行API、`rin test` CLIを追加した。テストごとの独立した環境、検査失敗の蓄積、ソース付き診断、JSON出力、フィルタと資源上限の指定に対応する。CLIオプションはSuzと同じ形式とし、外部クレートを使わずに実装した（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
 - `unicode-width` への依存を削除した。エラー表示のキャレット位置は、内部の小さな範囲表で求める表示幅から計算する。主な全角文字・結合文字に対応し、絵文字の連結や国旗などの並びは補正しない（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
 

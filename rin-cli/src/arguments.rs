@@ -7,10 +7,17 @@ pub enum Format {
     Text,
     Json,
 }
+#[derive(Clone, Copy)]
+pub enum Command {
+    Test,
+    Fmt,
+}
+
 pub enum Action {
-    Help(bool),
+    Help(Option<Command>),
     Version,
     Execute(Options),
+    Format(FmtOptions),
 }
 pub struct Options {
     pub paths: Vec<PathBuf>,
@@ -30,12 +37,13 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Action, String>
                 return Err("information options must be used alone".into());
             }
             return Ok(if first == "--help" {
-                Action::Help(false)
+                Action::Help(None)
             } else {
                 Action::Version
             });
         }
         Some("test") => {}
+        Some("fmt") => return parse_format(args),
         _ => return Err(format!("unknown command: {}", first.display())),
     }
     let mut options = Options {
@@ -114,12 +122,69 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Action, String>
         options.paths.push(arg.into());
     }
     if help {
-        return Ok(Action::Help(true));
+        return Ok(Action::Help(Some(Command::Test)));
     }
     if options.paths.is_empty() {
         options.paths.push(PathBuf::from("."));
     }
     Ok(Action::Execute(options))
+}
+
+pub struct FmtOptions {
+    pub stdin: bool,
+    pub paths: Vec<PathBuf>,
+    pub check: bool,
+}
+fn parse_format(mut args: impl Iterator<Item = OsString>) -> Result<Action, String> {
+    let mut stdin = false;
+    let mut paths = Vec::new();
+    let mut check = false;
+    let mut help = false;
+    let mut paths_only = false;
+    for arg in args.by_ref() {
+        if !paths_only {
+            match arg.to_str() {
+                Some("--") => {
+                    paths_only = true;
+                    continue;
+                }
+                Some("--help") if !help => {
+                    help = true;
+                    continue;
+                }
+                Some("--check") if !check => {
+                    check = true;
+                    continue;
+                }
+                Some("-") if !stdin => {
+                    stdin = true;
+                    continue;
+                }
+                _ if arg.as_encoded_bytes().starts_with(b"-") => {
+                    return Err(format!("invalid or duplicate option: {}", arg.display()));
+                }
+                _ => {}
+            }
+        }
+        if arg.is_empty() {
+            return Err("expected a nonempty path".into());
+        }
+        paths.push(PathBuf::from(arg));
+    }
+    if help {
+        return Ok(Action::Help(Some(Command::Fmt)));
+    }
+    if stdin && !paths.is_empty() {
+        return Err("stdin '-' must be used without other paths".into());
+    }
+    if paths.is_empty() {
+        paths.push(PathBuf::from("."));
+    }
+    Ok(Action::Format(FmtOptions {
+        paths,
+        check,
+        stdin,
+    }))
 }
 
 fn count(value: &str) -> Option<usize> {
@@ -189,7 +254,7 @@ mod tests {
         assert_eq!(bytes("1G"), Some(1024 * 1024 * 1024));
         assert!(matches!(
             parse_args(&["test", "--help"]).unwrap(),
-            Action::Help(true)
+            Action::Help(Some(Command::Test))
         ));
     }
     #[cfg(unix)]

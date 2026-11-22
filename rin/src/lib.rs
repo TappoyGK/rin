@@ -8,6 +8,7 @@ mod diagnostic;
 pub mod error;
 mod eval;
 pub mod ffi;
+pub mod fmt;
 mod lexer;
 mod parser;
 mod pool;
