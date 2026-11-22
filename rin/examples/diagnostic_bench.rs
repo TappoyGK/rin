@@ -71,6 +71,25 @@ fn main() {
         iterations,
     );
 
+    let large_iterations = (iterations / 20).max(1);
+    eval_case(
+        "repeated lets",
+        &"(let (aa 1 bb 2) (abs aa) (identity bb) (abs aa)) ".repeat(500),
+        large_iterations,
+    );
+    let prefix = "(abs 1) (identity 2) (abs 3) ".repeat(500);
+    eval_case("global prefix", &prefix, large_iterations);
+    eval_case(
+        "sparse local abs",
+        &format!("{prefix}(let (xx 1) (abs xx))"),
+        large_iterations,
+    );
+    eval_case(
+        "sparse unknown closure",
+        &format!("{prefix}(let (xx 1) (fn () xxx))"),
+        large_iterations,
+    );
+
     let mut alloc = HeapAllocator;
     let mut machine = Machine::new(Limits::default(), &mut alloc);
     for i in 0..500 {

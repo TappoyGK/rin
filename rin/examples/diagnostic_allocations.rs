@@ -7,24 +7,26 @@ use std::cell::Cell;
 struct Counting;
 thread_local! {
     static COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+    static BYTES: Cell<usize> = const { Cell::new(0) };
 }
-fn record() {
+fn record(bytes: usize) {
     let _ = COUNT.try_with(|count| {
         if let Some(n) = count.get() {
             count.set(Some(n + 1));
+            BYTES.set(BYTES.get() + bytes);
         }
     });
 }
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record();
+        record(layout.size());
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        record();
+        record(size);
         unsafe { System.realloc(ptr, layout, size) }
     }
 }
@@ -37,10 +39,11 @@ fn measure(label: &str, _: usize, mut run: impl FnMut()) {
     for _ in 0..5 {
         run();
     }
+    BYTES.set(0);
     COUNT.set(Some(0));
     run();
     let count = COUNT.replace(None).unwrap();
-    println!("{label}: {count} allocations");
+    println!("{label}: {count} allocations, {} bytes", BYTES.get());
 }
 
 fn eval_case(label: &str, source: &str, iterations: usize) {
@@ -94,6 +97,25 @@ fn main() {
         "match bindings",
         &format!("(let ({bindings}) {matches} 0)"),
         iterations,
+    );
+
+    let large_iterations = (iterations / 20).max(1);
+    eval_case(
+        "repeated lets",
+        &"(let (aa 1 bb 2) (abs aa) (identity bb) (abs aa)) ".repeat(500),
+        large_iterations,
+    );
+    let prefix = "(abs 1) (identity 2) (abs 3) ".repeat(500);
+    eval_case("global prefix", &prefix, large_iterations);
+    eval_case(
+        "sparse local abs",
+        &format!("{prefix}(let (xx 1) (abs xx))"),
+        large_iterations,
+    );
+    eval_case(
+        "sparse unknown closure",
+        &format!("{prefix}(let (xx 1) (fn () xxx))"),
+        large_iterations,
     );
 
     let mut alloc = HeapAllocator;

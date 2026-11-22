@@ -125,7 +125,7 @@ impl<'a> Machine<'a> {
         let chunk = {
             let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
             let exprs = scratch.parse(source).map_err(with_mod)?;
-            compile_program(exprs, Some(mod_id), &mut self.syms).map_err(with_mod)?
+            compile_program(exprs, Some(mod_id), &mut self.syms, &self.globals).map_err(with_mod)?
         };
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
             .into_iter()
@@ -188,7 +188,7 @@ impl<'a> Machine<'a> {
         let chunk = {
             let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
             let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms)?
+            compile_program(exprs, None, &mut self.syms, &self.globals)?
         };
         let mut runner = self.runner(None);
         let last = runner.run_top_chunk(&chunk)?;

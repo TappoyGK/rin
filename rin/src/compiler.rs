@@ -2,9 +2,8 @@
 //!
 //! 深い入れ子でもネイティブスタックを消費しないよう、明示的タスクスタックでコンパイルする。
 
-mod names;
-
 use std::cell::OnceCell;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
@@ -13,6 +12,7 @@ use crate::bytecode::{
 };
 use crate::diagnostic::needs_name_candidates;
 use crate::error::{Error, Span};
+use crate::pool::RVal;
 
 const SHALLOW_COMPILE_DEPTH: usize = 6;
 
@@ -21,12 +21,13 @@ pub(crate) fn compile_program(
     exprs: &[Expr],
     module: Option<u32>,
     syms: &mut SymTable,
+    globals: &[Option<RVal>],
 ) -> Result<Chunk, Error> {
     let mut compiler = Compiler {
         scopes: vec![Scope::new(module)],
         module,
         syms,
-        exprs,
+        globals,
         name_table: NameTable::default(),
         shared_names: None,
     };
@@ -48,8 +49,9 @@ pub(crate) fn compile_program(
 
 struct Scope<'a> {
     module: Option<u32>,
-    // AST の名前を借用し、診断に必要になった束縛だけノードの添字を記録する。
-    locals: Vec<(&'a str, u32, Option<usize>)>,
+    // AST の名前を借用し、診断に必要になった束縛だけノードの添字 + 1 を記録する。
+    // NonZero により未記録状態も 1 ワードに収める。
+    locals: Vec<(&'a str, u32, Option<NonZeroUsize>)>,
     outer_local_count: usize,
     next_slot: u32,
     max_slots: u32,
@@ -217,7 +219,7 @@ struct Compiler<'a> {
     scopes: Vec<Scope<'a>>,
     module: Option<u32>,
     syms: &'a mut SymTable,
-    exprs: &'a [Expr],
+    globals: &'a [Option<RVal>],
     name_table: NameTable,
     shared_names: Option<Rc<OnceCell<NameTable>>>,
 }
@@ -238,7 +240,7 @@ impl<'a> Compiler<'a> {
         'scopes: for (scope_index, scope) in self.scopes.iter().enumerate().rev() {
             for (local_index, (_, _, saved)) in scope.locals.iter().enumerate().rev() {
                 if let Some(saved) = saved {
-                    head = Some(*saved);
+                    head = Some(saved.get() - 1);
                     break 'scopes;
                 }
                 pending_from = Some((scope_index, local_index));
@@ -250,8 +252,6 @@ impl<'a> Compiler<'a> {
                 for (name, _, saved) in &mut scope.locals[start..] {
                     debug_assert!(saved.is_none());
                     let table = &mut self.name_table;
-                    debug_assert!(table.nodes.len() < table.nodes.capacity());
-                    debug_assert!(table.text.len() + name.len() <= table.text.capacity());
                     let index = table.nodes.len();
                     let start = table.text.len();
                     table.text.push_str(name);
@@ -260,7 +260,7 @@ impl<'a> Compiler<'a> {
                         end: table.text.len(),
                         parent: head,
                     });
-                    *saved = Some(index);
+                    *saved = NonZeroUsize::new(index + 1);
                     head = Some(index);
                 }
             }
@@ -287,6 +287,12 @@ impl<'a> Compiler<'a> {
         self.flush_ticks();
         let ip = self.chunk().emit(op, span);
         if let Op::GetGlobal(id) = op {
+            // 大域の束縛は上書きされても消えない。既存の値があれば、この参照は
+            // 未定義名エラーにならないため、診断用のローカル情報を記録しない。
+            // 再読込で消えるモジュールの束縛は、この判定に含めない。
+            if matches!(self.globals.get(id as usize), Some(Some(_))) {
+                return ip;
+            }
             let scope = self.scopes.last().unwrap();
             // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
             if scope.outer_local_count == 0 && scope.locals.is_empty() {
@@ -296,13 +302,11 @@ impl<'a> Compiler<'a> {
                 return ip;
             }
             if self.shared_names.is_none() {
-                self.name_table = names::prepare(self.exprs);
                 self.shared_names = Some(Rc::new(OnceCell::new()));
             }
             if let Some(head) = self.visible_name_head() {
                 let previous = self.chunk().names.as_ref().map(|names| names.last_site);
                 let site = self.name_table.sites.len();
-                debug_assert!(site < self.name_table.sites.capacity());
                 self.name_table.sites.push(NameSite { ip, head, previous });
                 if let Some(names) = &mut self.chunk().names {
                     names.last_site = site;
@@ -1305,7 +1309,22 @@ mod tests {
     fn compile(source: &str) -> Chunk {
         let mut scratch = crate::parser::ParseScratch::new();
         let exprs = crate::parser::parse_program_with_scratch(source, &mut scratch).unwrap();
-        compile_program(exprs, None, &mut SymTable::default()).unwrap()
+        compile_program(exprs, None, &mut SymTable::default(), &[]).unwrap()
+    }
+
+    #[test]
+    fn sparse_diagnostics_do_not_retain_capacity_for_unrelated_ast() {
+        for width in [0, 20, 2000] {
+            let source = format!("{}(let (damage 1) damge)", "(abs 1) ".repeat(width));
+            let chunk = compile(&source);
+            let table = chunk.names.as_ref().unwrap().table.get().unwrap();
+            let bytes = table.text.capacity()
+                + table.nodes.capacity() * std::mem::size_of::<NameNode>()
+                + table.sites.capacity() * std::mem::size_of::<NameSite>();
+            assert!(bytes <= 512, "width={width}, retained bytes={bytes}");
+            assert_eq!(table.nodes.len(), 1);
+            assert_eq!(table.sites.len(), 1);
+        }
     }
 
     #[test]

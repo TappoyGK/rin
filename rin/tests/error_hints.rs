@@ -178,3 +178,36 @@ fn field_and_export_lists_are_sorted_and_bounded() {
         format!("module 'many' has no export 'bad'; exports: {shown}, ... and 3 more")
     );
 }
+
+#[test]
+fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
+    let mut alloc = HeapAllocator;
+    let mut m = Machine::new(Limits::default(), &mut alloc);
+    // Interning an unexecuted definition does not make it a known global.
+    for _ in 0..3 {
+        let err = m
+            .eval("(if false (def damge 1) 0) (let (damage 2) damge)")
+            .unwrap_err();
+        assert_eq!(err.message, "unknown name 'damge'; did you mean 'damage'?");
+    }
+    // Also compile while the previous module environment still contains damage.
+    for _ in 0..2 {
+        m.load_module(
+            "combat",
+            "(def damage 1) (def saved (let (damge 2) (fn () damage))) (export saved)",
+        )
+        .unwrap();
+    }
+    m.eval("(import combat) (def old combat.saved)").unwrap();
+    assert_eq!(m.call("old", &[]).unwrap(), Value::Int(1));
+    // Old closures survive reloading, but their module's definitions can disappear.
+    m.load_module("combat", "0").unwrap();
+    assert_eq!(
+        m.call("old", &[]).unwrap_err().message,
+        "unknown name 'damage'; did you mean 'damge'?"
+    );
+    m.bind("damage", &Value::Int(3)).unwrap();
+    assert_eq!(m.call("old", &[]).unwrap(), Value::Int(3));
+    m.bind("damage", &Value::Int(4)).unwrap();
+    assert_eq!(m.call("old", &[]).unwrap(), Value::Int(4));
+}

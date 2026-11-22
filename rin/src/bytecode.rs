@@ -240,7 +240,8 @@ pub(crate) struct NameSite {
     pub previous: Option<usize>,
 }
 
-/// プログラム全体で文字列・ノード・参照位置を一括所有する。
+/// プログラム全体で文字列・ノード・参照位置を共有する。
+/// バッファは実際に記録する情報に応じて伸長する。
 #[derive(Debug, Default)]
 pub(crate) struct NameTable {
     pub text: String,
