@@ -11,6 +11,24 @@ use crate::pool::{Obj, RVal};
 
 use super::{CallOrigin, FrameSource, Runner};
 
+#[cfg(debug_assertions)]
+struct Resume {
+    ip: usize,
+    stack_start: usize,
+}
+
+// 関数呼び出しの前に命令ループを抜け、その作業領域を解放する。
+enum FrameExit {
+    Return(RVal),
+    #[cfg(debug_assertions)]
+    Call {
+        arg_start: usize,
+        argc: usize,
+        span: Span,
+        captures: Rc<[RVal]>,
+    },
+}
+
 impl Runner<'_, '_> {
     pub(super) fn exec_frame(
         &mut self,
@@ -21,16 +39,52 @@ impl Runner<'_, '_> {
         origin: Option<CallOrigin<'_>>,
         caller_module: Option<u32>,
     ) -> Result<RVal, Error> {
-        let mut tail_source: Option<FrameSource<'_>> = None;
-        let mut tail_calls = 0usize;
-        let mut res = self.exec_frame_inner(
-            &entry,
-            &mut tail_source,
-            &mut tail_calls,
-            captures,
-            base,
-            local_count,
-        );
+        let mut tail_source = None;
+        let mut tail_calls = 0;
+        #[cfg(debug_assertions)]
+        let mut resume = Resume {
+            ip: 0,
+            stack_start: base + local_count,
+        };
+        #[cfg(not(debug_assertions))]
+        let mut res = self
+            .exec_frame_inner(
+                &entry,
+                &mut tail_source,
+                &mut tail_calls,
+                captures,
+                base,
+                local_count,
+            )
+            .map(|FrameExit::Return(value)| value);
+        #[cfg(debug_assertions)]
+        let mut captures = captures;
+        #[cfg(debug_assertions)]
+        let mut res = loop {
+            match self.exec_frame_inner(
+                &entry,
+                &mut tail_source,
+                &mut tail_calls,
+                captures,
+                base,
+                &mut resume,
+            ) {
+                Ok(FrameExit::Return(value)) => break Ok(value),
+                Ok(FrameExit::Call {
+                    arg_start,
+                    argc,
+                    span,
+                    captures: next_captures,
+                }) => {
+                    captures = next_captures;
+                    match self.call_from_stack(arg_start, argc, span) {
+                        Ok(value) => self.stack.push(value),
+                        Err(error) => break Err(error),
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
         if let Err(ref mut err) = res {
             self.record_unwind_frame(
                 err,
@@ -96,7 +150,10 @@ impl Runner<'_, '_> {
         });
     }
 
-    #[inline(always)]
+    // Debug では大きな命令ループの作業領域を再帰中に保持しない。
+    // Release では最適化で作業領域が小さくなるため、直接呼び出してよい。
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn exec_frame_inner(
         &mut self,
         entry: &FrameSource<'_>,
@@ -104,10 +161,13 @@ impl Runner<'_, '_> {
         tail_calls: &mut usize,
         mut captures: Rc<[RVal]>,
         base: usize,
-        local_count: usize,
-    ) -> Result<RVal, Error> {
-        let mut ip = 0usize;
-        let mut frame_stack_start = base + local_count;
+        #[cfg(not(debug_assertions))] local_count: usize,
+        #[cfg(debug_assertions)] resume: &mut Resume,
+    ) -> Result<FrameExit, Error> {
+        #[cfg(not(debug_assertions))]
+        let (mut ip, mut frame_stack_start) = (0, base + local_count);
+        #[cfg(debug_assertions)]
+        let (mut ip, mut frame_stack_start) = (resume.ip, resume.stack_start);
         'frame: loop {
             let chunk = tail_source.as_ref().unwrap_or(entry).chunk();
             while ip < chunk.code.len() {
@@ -449,67 +509,40 @@ impl Runner<'_, '_> {
                         let span = chunk.spans[ip - 1];
                         let argc = argc as usize;
                         let arg_start = self.stack.len() - argc;
-                        let callee = self.stack[arg_start - 1];
-                        match callee {
-                            RVal::Builtin(b) => {
-                                let res = self.call_builtin_from_stack(b, arg_start, argc, span);
-                                self.stack.push(res?);
-                            }
-                            RVal::Obj(id) => {
-                                let (proto, cap) = match self.pool.get(id) {
-                                    Obj::Closure { proto, captures } => {
-                                        (Rc::clone(proto), Rc::clone(captures))
-                                    }
-                                    _ => {
-                                        return Err(Error::runtime(
-                                            "expr.call",
-                                            span,
-                                            format!(
-                                                "cannot call value of type {}",
-                                                callee.type_name(self.pool)
-                                            ),
-                                        ));
-                                    }
-                                };
-                                if proto.arity as usize != argc {
-                                    return Err(Error::runtime(
-                                        "expr.call",
-                                        span,
-                                        format!("expected {} arguments, got {}", proto.arity, argc),
-                                    ));
-                                }
-                                self.enter_depth(span)?;
-                                // 呼び出し対象を arg_start - 1 に残し、引数の memmove を避ける。
-                                let child_base = arg_start;
-                                let child_locals = proto.local_count as usize;
-                                self.stack.resize(child_base + child_locals, RVal::Void);
-                                let prev_mod =
-                                    std::mem::replace(&mut self.active_module, proto.module);
-                                let res = self.exec_frame(
-                                    FrameSource::Proto(proto),
-                                    cap,
-                                    child_base,
-                                    child_locals,
-                                    Some(CallOrigin::Rin(span)),
-                                    prev_mod,
-                                );
-                                self.active_module = prev_mod;
-                                self.leave_depth();
-                                self.release_stack_from(arg_start - 1);
-                                self.stack.push(res?);
-                            }
-                            other => {
-                                return Err(Error::runtime(
-                                    "expr.call",
+                        if let RVal::Builtin(b) = self.stack[arg_start - 1] {
+                            #[cfg(debug_assertions)]
+                            if b.has_callback() {
+                                resume.ip = ip;
+                                resume.stack_start = frame_stack_start;
+                                return Ok(FrameExit::Call {
+                                    arg_start,
+                                    argc,
                                     span,
-                                    format!(
-                                        "cannot call value of type {}",
-                                        other.type_name(self.pool)
-                                    ),
-                                ));
+                                    captures,
+                                });
+                            }
+                            let value = self.call_builtin_from_stack(b, arg_start, argc, span)?;
+                            self.stack.push(value);
+                        } else {
+                            #[cfg(debug_assertions)]
+                            {
+                                resume.ip = ip;
+                                resume.stack_start = frame_stack_start;
+                                return Ok(FrameExit::Call {
+                                    arg_start,
+                                    argc,
+                                    span,
+                                    captures,
+                                });
+                            }
+                            #[cfg(not(debug_assertions))]
+                            {
+                                let value = self.call_from_stack(arg_start, argc, span)?;
+                                self.stack.push(value);
                             }
                         }
                     }
+
                     Op::TailCall(argc) => {
                         let span = chunk.spans[ip - 1];
                         let argc = argc as usize;
@@ -565,8 +598,20 @@ impl Runner<'_, '_> {
                                 continue 'frame;
                             }
                             RVal::Builtin(b) => {
-                                let res = self.call_builtin_from_stack(b, arg_start, argc, span);
-                                self.stack.push(res?);
+                                #[cfg(debug_assertions)]
+                                if b.has_callback() {
+                                    resume.ip = ip;
+                                    resume.stack_start = frame_stack_start;
+                                    return Ok(FrameExit::Call {
+                                        arg_start,
+                                        argc,
+                                        span,
+                                        captures,
+                                    });
+                                }
+                                let value =
+                                    self.call_builtin_from_stack(b, arg_start, argc, span)?;
+                                self.stack.push(value);
                             }
                             _ => {
                                 // クロージャ以外の呼び出し対象に対するエラー経路。
@@ -715,10 +760,67 @@ impl Runner<'_, '_> {
             break;
         }
         debug_assert_eq!(self.stack.len(), frame_stack_start + 1);
-        Ok(self.stack.pop().unwrap_or(RVal::Void))
+        Ok(FrameExit::Return(self.stack.pop().unwrap_or(RVal::Void)))
     }
 
-    #[inline(always)]
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn call_from_stack(
+        &mut self,
+        arg_start: usize,
+        argc: usize,
+        span: Span,
+    ) -> Result<RVal, Error> {
+        let callee = self.stack[arg_start - 1];
+        match callee {
+            RVal::Builtin(b) => self.call_builtin_from_stack(b, arg_start, argc, span),
+            RVal::Obj(id) => {
+                let (proto, cap) = match self.pool.get(id) {
+                    Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
+                    _ => {
+                        return Err(Error::runtime(
+                            "expr.call",
+                            span,
+                            format!("cannot call value of type {}", callee.type_name(self.pool)),
+                        ));
+                    }
+                };
+                if proto.arity as usize != argc {
+                    return Err(Error::runtime(
+                        "expr.call",
+                        span,
+                        format!("expected {} arguments, got {}", proto.arity, argc),
+                    ));
+                }
+                self.enter_depth(span)?;
+                // 呼び出し対象を arg_start - 1 に残し、引数の memmove を避ける。
+                let child_base = arg_start;
+                let child_locals = proto.local_count as usize;
+                self.stack.resize(child_base + child_locals, RVal::Void);
+                let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
+                let res = self.exec_frame(
+                    FrameSource::Proto(proto),
+                    cap,
+                    child_base,
+                    child_locals,
+                    Some(CallOrigin::Rin(span)),
+                    prev_mod,
+                );
+                self.active_module = prev_mod;
+                self.leave_depth();
+                self.release_stack_from(arg_start - 1);
+                res
+            }
+            other => Err(Error::runtime(
+                "expr.call",
+                span,
+                format!("cannot call value of type {}", other.type_name(self.pool)),
+            )),
+        }
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub(super) fn call_builtin_from_stack(
         &mut self,
         b: BuiltinId,
