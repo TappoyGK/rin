@@ -199,7 +199,7 @@ Point{z: 1, a: 2}.bad
   | ^
 ```
 
-### eval-011 バイト列位置を全角文字の表示幅へ変換する
+### eval-011 バイト列位置をUnicodeスカラー値の個数へ変換する
 
 主根拠：`[eval.snippet]`
 
@@ -223,7 +223,7 @@ Point{z: 1, a: 2}.bad
 1:7: unknown name 'zzz' [expr.name]
   |
 1 | "猫" zzz
-  |      ^
+  |     ^
 ```
 
 ### eval-012 発生位置と複数の呼び出し位置の行番号欄を揃える

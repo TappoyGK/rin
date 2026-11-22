@@ -1,81 +1,56 @@
-use clap::{Parser, Subcommand, ValueEnum};
+mod arguments;
+mod help;
+mod json;
+
+use arguments::{Action, Format};
+use json::{Json, array, object, optional, string};
 use rin::test::{TestReport, TestStatus};
 use rin::{Error, Limits};
-use serde_json::{Value, json};
-use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-
-#[derive(Parser)]
-#[command(name = "rin", version, about = "Rin development tools")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Discover and run *_test.rin files.
-    Test {
-        paths: Vec<PathBuf>,
-        #[arg(long, value_name = "DIR")]
-        module_path: Vec<PathBuf>,
-        /// Run tests whose names contain PATTERN (case-sensitive).
-        #[arg(long, value_name = "PATTERN")]
-        filter: Option<String>,
-        #[arg(long, default_value_t = Limits::default().steps)]
-        steps: usize,
-        #[arg(long, default_value_t = Limits::default().depth)]
-        depth: usize,
-        #[arg(long, default_value_t = Limits::default().memory_bytes)]
-        memory: usize,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-    },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Format {
-    Text,
-    Json,
-}
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 fn main() -> ExitCode {
-    let Cli {
-        command:
-            Command::Test {
-                mut paths,
-                module_path,
-                filter,
-                steps,
-                depth,
-                memory,
-                format,
-            },
-    } = Cli::parse();
-    if paths.is_empty() {
-        paths.push(PathBuf::from("."));
-    }
+    let options = match arguments::parse(std::env::args_os().skip(1)) {
+        Ok(Action::Help(test)) => {
+            println!("{}", if test { help::TEST_USAGE } else { help::USAGE });
+            return ExitCode::SUCCESS;
+        }
+        Ok(Action::Version) => {
+            println!("rin {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Ok(Action::Execute(options)) => options,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
     match execute(
-        &paths,
-        &module_path,
-        filter.as_deref(),
-        Limits {
-            steps,
-            depth,
-            memory_bytes: memory,
-        },
-        format,
+        &options.paths,
+        &options.module_paths,
+        options.filter.as_deref(),
+        options.limits,
+        options.format,
     ) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(error) => {
-            match format {
+            match options.format {
                 Format::Text => eprintln!("error: {error}"),
                 Format::Json => println!(
                     "{}",
-                    json!({"success": false, "tests": [], "errors": [{"message": error}]})
+                    object([
+                        ("success", Json::Bool(false)),
+                        ("tests", array(std::iter::empty())),
+                        (
+                            "errors",
+                            array(std::iter::once(object([("message", string(error))])))
+                        ),
+                    ])
                 ),
             }
             ExitCode::from(2)
@@ -245,26 +220,73 @@ fn status(status: TestStatus) -> &'static str {
     }
 }
 
-fn error_json(error: &Error) -> Value {
-    json!({"kind": format!("{:?}", error.kind), "rule": error.rule(), "message": error.message,
-        "line": error.at.line, "column": error.at.col, "module": error.module(),
-        "display": error.to_string(), "backtrace": error.backtrace().iter().map(|frame| json!({
-            "module": frame.module, "name": frame.name, "caller_module": frame.caller_module,
-            "line": frame.at.line, "column": frame.at.col,
-            "display": frame.to_string()
-        })).collect::<Vec<_>>()})
+fn error_json(error: &Error) -> Json {
+    object([
+        ("kind", string(format!("{:?}", error.kind))),
+        ("rule", string(error.rule())),
+        ("message", string(&error.message)),
+        ("line", Json::Number(error.at.line)),
+        ("column", Json::Number(error.at.col)),
+        ("module", optional(error.module())),
+        ("display", string(error)),
+        (
+            "backtrace",
+            array(error.backtrace().iter().map(|frame| {
+                object([
+                    ("module", optional(frame.module.as_deref())),
+                    ("name", optional(frame.name.as_deref())),
+                    ("caller_module", optional(frame.caller_module.as_deref())),
+                    ("line", Json::Number(frame.at.line)),
+                    ("column", Json::Number(frame.at.col)),
+                    ("display", string(frame)),
+                ])
+            })),
+        ),
+    ])
 }
 
-fn report_json(report: &TestReport) -> Value {
-    json!({"success": report.is_success(),
-        "tests": report.tests.iter().map(|test| json!({
-            "source": test.source, "name": test.name, "line": test.at.line, "column": test.at.col,
-            "status": status(test.status),
-            "failures": test.failures.iter().map(|f| json!({
-                "line": f.at.line, "column": f.at.col, "check": if f.equality { "check_eq" } else { "check" },
-                "actual": f.actual.to_string(), "expected": f.expected.to_string()
-            })).collect::<Vec<_>>(),
-            "error": test.error.as_ref().map(error_json)
-        })).collect::<Vec<_>>(),
-        "errors": report.errors.iter().map(|e| json!({"source": e.source, "error": error_json(&e.error)})).collect::<Vec<_>>()})
+fn report_json(report: &TestReport) -> Json {
+    object([
+        ("success", Json::Bool(report.is_success())),
+        (
+            "tests",
+            array(report.tests.iter().map(|test| {
+                object([
+                    ("source", string(&test.source)),
+                    ("name", string(&test.name)),
+                    ("line", Json::Number(test.at.line)),
+                    ("column", Json::Number(test.at.col)),
+                    ("status", string(status(test.status))),
+                    (
+                        "failures",
+                        array(test.failures.iter().map(|f| {
+                            object([
+                                ("line", Json::Number(f.at.line)),
+                                ("column", Json::Number(f.at.col)),
+                                (
+                                    "check",
+                                    string(if f.equality { "check_eq" } else { "check" }),
+                                ),
+                                ("actual", string(&f.actual)),
+                                ("expected", string(&f.expected)),
+                            ])
+                        })),
+                    ),
+                    (
+                        "error",
+                        test.error.as_ref().map(error_json).unwrap_or(Json::Null),
+                    ),
+                ])
+            })),
+        ),
+        (
+            "errors",
+            array(report.errors.iter().map(|e| {
+                object([
+                    ("source", string(&e.source)),
+                    ("error", error_json(&e.error)),
+                ])
+            })),
+        ),
+    ])
 }

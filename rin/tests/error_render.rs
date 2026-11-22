@@ -21,15 +21,13 @@ fn render_keeps_header_and_adds_the_source_line() {
 }
 
 #[test]
-fn byte_columns_become_display_columns() {
+fn byte_columns_become_scalar_columns() {
     let source = "\"猫e\u{301}👨‍👩‍👧‍👦\"\t\"全角\"\tzzz";
     let error = eval(source).unwrap_err();
     assert_eq!(error.at.col, source.find("zzz").unwrap() + 1);
-    assert!(
-        error
-            .render(source)
-            .ends_with("\n  |\n1 | \"猫e\u{301}👨‍👩‍👧‍👦\" \"全角\"  zzz\n  |                 ^")
-    );
+    assert!(error.render(source).ends_with(
+        "\n  |\n1 | \"猫e\u{301}👨‍👩‍👧‍👦\"    \"全角\"    zzz\n  |                         ^"
+    ));
     let source = "\t\tzzz";
     assert!(
         eval(source)

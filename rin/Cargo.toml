@@ -5,6 +5,3 @@ edition = "2024"
 
 [lib]
 crate-type = ["rlib", "staticlib"]
-
-[dependencies]
-unicode-width = { version = "0.2", default-features = false }

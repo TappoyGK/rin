@@ -2,7 +2,6 @@
 
 use super::{Error, MAX_BACKTRACE_SIDE, Span};
 use std::fmt;
-use unicode_width::UnicodeWidthStr;
 
 impl Error {
     /// エラーの発生元のソースを添えて表示する。
@@ -42,7 +41,7 @@ impl Error {
     /// ソースのない位置・ホストからの入口には、既存の診断と履歴だけを表示する。
     /// 行・列が範囲外、列が UTF-8 文字の途中、または `0:0` の場合も同様。
     /// 列は 1 始まりの UTF-8 バイト位置。タブはソース行の先頭から 4 桁区切りで
-    /// 展開し、その他の文字列は `unicode-width` の非 CJK 表示幅を使う。
+    /// 展開し、その他の文字は Unicode スカラー値1つを1桁として数える。
     pub fn render_with_to<'s>(
         &self,
         out: &mut (impl fmt::Write + ?Sized),
@@ -129,7 +128,7 @@ fn write_line(out: &mut (impl fmt::Write + ?Sized), line: &str) -> Result<usize,
         if c == '\t' || c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
             let segment = &line[start..i];
             out.write_str(segment)?;
-            width += segment.width();
+            width += segment.chars().count();
             if c == '\t' {
                 let spaces = 4 - width % 4;
                 out.write_str(&"    "[..spaces])?;
@@ -145,7 +144,7 @@ fn write_line(out: &mut (impl fmt::Write + ?Sized), line: &str) -> Result<usize,
     }
     let segment = &line[start..];
     out.write_str(segment)?;
-    Ok(width + segment.width())
+    Ok(width + segment.chars().count())
 }
 
 struct NullWriter;

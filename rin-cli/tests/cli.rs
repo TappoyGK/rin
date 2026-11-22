@@ -1,4 +1,3 @@
-use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -62,14 +61,14 @@ fn discovery_filter_module_loading_and_json() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
-    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["tests"].as_array().unwrap().len(), 1);
-    assert_eq!(value["tests"][0]["name"], "日本語 good");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.matches("\"status\":").count(), 1);
+    assert!(text.contains("\"name\":\"日本語 good\""));
     let out = f.run(&["test", "--module-path", "modules", "--format", "json"]);
     assert_eq!(out.status.code(), Some(1));
-    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["tests"][1]["status"], "FAIL");
-    assert_eq!(value["tests"][1]["failures"][0]["actual"], "false");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("\"status\":\"FAIL\""));
+    assert!(text.contains("\"actual\":\"false\""));
 }
 
 #[test]
@@ -86,13 +85,14 @@ fn limits_diagnostics_and_exit_codes() {
         "test", "--steps", "0", "--depth", "3", "--memory", "1024", "--format", "json",
     ]);
     assert_eq!(out.status.code(), Some(1));
-    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["tests"][0]["error"]["kind"], "TooManySteps");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("\"kind\":\"TooManySteps\""));
     let out = f.run(&["test", "missing.rin", "--format", "json"]);
     assert_eq!(out.status.code(), Some(2));
-    assert_eq!(
-        serde_json::from_slice::<Value>(&out.stdout).unwrap()["success"],
-        false
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .starts_with("{\"success\":false,")
     );
     assert_eq!(f.run(&["test", "--steps", "no"]).status.code(), Some(2));
 }
@@ -105,6 +105,6 @@ fn explicit_files_and_syntax_errors() {
     f.write("bad_test.rin", "(deftest \"bad\" (check))");
     let out = f.run(&["test", "--format", "json"]);
     assert_eq!(out.status.code(), Some(1));
-    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["errors"][0]["error"]["rule"], "test.check");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("\"rule\":\"test.check\""));
 }
