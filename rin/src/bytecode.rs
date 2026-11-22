@@ -228,20 +228,35 @@ pub(crate) struct FnProto {
 /// 名前と親ノードの添字。平坦な配列で共有し、解放も再帰させない。
 #[derive(Debug)]
 pub(crate) struct NameNode {
-    pub name: Box<str>,
+    pub start: usize,
+    pub end: usize,
     pub parent: Option<usize>,
 }
 
-/// コンパイル終了時に一度だけ確定する共有配列と、GetGlobal ごとの先頭。
+#[derive(Debug)]
+pub(crate) struct NameSite {
+    pub ip: usize,
+    pub head: usize,
+    pub previous: Option<usize>,
+}
+
+/// プログラム全体で文字列・ノード・参照位置を一括所有する。
+#[derive(Debug, Default)]
+pub(crate) struct NameTable {
+    pub text: String,
+    pub nodes: Vec<NameNode>,
+    pub sites: Vec<NameSite>,
+}
+
+/// チャンクは共有表への参照と最後の参照位置の添字だけを持つ。
 #[derive(Debug, Clone)]
 pub(crate) struct NameInfo {
-    pub nodes: Rc<OnceCell<Vec<NameNode>>>,
-    // 参照位置が 1 個なら追加の Vec バッファを確保しない。
-    pub first_site: (usize, usize),
-    pub other_sites: Vec<(usize, usize)>,
+    pub table: Rc<OnceCell<NameTable>>,
+    pub last_site: usize,
 }
 
 struct VisibleNames<'a> {
+    text: &'a str,
     nodes: &'a [NameNode],
     head: Option<usize>,
 }
@@ -252,7 +267,7 @@ impl<'a> Iterator for VisibleNames<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let node = &self.nodes[self.head?];
         self.head = node.parent;
-        Some(&node.name)
+        Some(&self.text[node.start..node.end])
     }
 }
 
@@ -269,27 +284,29 @@ pub(crate) struct Chunk {
     pub patterns: Vec<Pattern>,
     pub protos: Vec<Rc<FnProto>>,
     pub export_lists: Vec<Vec<String>>,
-    pub names: Option<Box<NameInfo>>,
+    pub names: Option<NameInfo>,
 }
 
 impl Chunk {
     pub fn visible_names(&self, ip: usize) -> impl Iterator<Item = &str> {
-        let (nodes, head) = self.names.as_deref().map_or((&[][..], None), |names| {
-            let head = if ip == names.first_site.0 {
-                Some(names.first_site.1)
-            } else {
-                names
-                    .other_sites
-                    .binary_search_by_key(&ip, |(site, _)| *site)
-                    .ok()
-                    .map(|index| names.other_sites[index].1)
-            };
-            (
-                names.nodes.get().expect("name nodes finalized").as_slice(),
-                head,
-            )
+        let (text, nodes, head) = self.names.as_ref().map_or(("", &[][..], None), |names| {
+            let table = names.table.get().expect("name table finalized");
+            let mut site = Some(names.last_site);
+            let mut head = None;
+            while let Some(index) = site {
+                let entry = &table.sites[index];
+                if entry.ip == ip {
+                    head = Some(entry.head);
+                    break;
+                }
+                if entry.ip < ip {
+                    break;
+                }
+                site = entry.previous;
+            }
+            (table.text.as_str(), table.nodes.as_slice(), head)
         });
-        VisibleNames { nodes, head }
+        VisibleNames { text, nodes, head }
     }
 
     pub fn emit(&mut self, op: Op, span: Span) -> usize {

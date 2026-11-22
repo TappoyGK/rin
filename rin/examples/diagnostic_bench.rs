@@ -47,6 +47,12 @@ fn main() {
         &format!("(let ({bindings}) {closures} 0)"),
         iterations,
     );
+    eval_case(
+        "local abs",
+        &format!("(let ({bindings}) {} 0)", "(abs local0) ".repeat(20)),
+        iterations,
+    );
+    eval_case("top abs", &"(abs 1) ".repeat(20), iterations);
     let nested = format!(
         "{}0{} 0",
         "(fn (a b c d e) (identity a) ".repeat(10),

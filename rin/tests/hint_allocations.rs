@@ -50,3 +50,49 @@ fn distant_candidates_do_not_allocate_dp_rows() {
     }
     assert_eq!(measure(&mut machine), empty);
 }
+
+fn eval_allocations(source: &str) -> usize {
+    let mut alloc = HeapAllocator;
+    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    for _ in 0..5 {
+        machine.eval(source).unwrap();
+    }
+    COUNT.set(Some(0));
+    let result = machine.eval(source);
+    let count = COUNT.replace(None).unwrap();
+    result.unwrap();
+    count
+}
+
+#[test]
+fn successful_hint_metadata_has_constant_allocation_count() {
+    for width in [20, 200, 2000] {
+        let bindings = (0..width)
+            .map(|i| format!("local{i} {i} "))
+            .collect::<String>();
+        for closures in [false, true] {
+            let body = if closures {
+                "(fn () (CALLEE local0)) "
+            } else {
+                "(CALLEE local0) "
+            }
+            .repeat(width);
+            let source = format!("(let ({bindings}) {body} 0)");
+            let short = eval_allocations(&source.replace("CALLEE", "-"));
+            let long = eval_allocations(&source.replace("CALLEE", "abs"));
+            assert!(
+                long <= short + 5,
+                "width={width}, closures={closures}: {short} -> {long}"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_locals_need_no_hint_allocations() {
+    let body = "(CALLEE 1) ".repeat(200);
+    assert_eq!(
+        eval_allocations(&body.replace("CALLEE", "abs")),
+        eval_allocations(&body.replace("CALLEE", "-"))
+    );
+}

@@ -29,7 +29,11 @@ pub(crate) fn available<'a>(
 
 /// 2 文字以下には候補を出さないため、コンパイラも名前情報を記録しなくてよい。
 pub(crate) fn needs_name_candidates(name: &str) -> bool {
-    name.chars().take(3).count() == 3
+    match name.len() {
+        0..=2 => false,
+        12.. => true, // 1 scalar は最大 4 バイトなので、少なくとも 3 文字ある。
+        _ => name.chars().nth(2).is_some(),
+    }
 }
 
 pub(crate) fn suggest<'a>(
@@ -133,6 +137,16 @@ fn distance(query: &[char], candidate: &str, limit: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn candidate_length_fast_path_preserves_unicode_boundaries() {
+        for name in ["", "ab", "é", "猫猫", "😀😀"] {
+            assert!(!super::needs_name_candidates(name), "{name}");
+        }
+        for name in ["abc", "猫猫猫", "😀😀a", "😀😀😀", "abcdefghijkl"] {
+            assert!(super::needs_name_candidates(name), "{name}");
+        }
+    }
+
     use super::*;
 
     #[test]
