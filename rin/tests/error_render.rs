@@ -87,8 +87,8 @@ fn controls_are_escaped_using_the_same_width_for_the_caret() {
 
 #[test]
 fn module_sources_follow_caller_locations() {
-    let ma = "// ma\n(defn fail () (/ 1 0))";
-    let mb = "// mb\n(import ma)\n(defn run () (+ 1 (ma.fail)))";
+    let ma = ";; ma\n(defn fail () (/ 1 0))";
+    let mb = ";; mb\n(import ma)\n(defn run () (+ 1 (ma.fail)))";
     let root = "(import mb)\n(mb.run)";
     let mut alloc = HeapAllocator;
     let mut machine = Machine::new(Limits::default(), &mut alloc);

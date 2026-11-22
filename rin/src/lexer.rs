@@ -101,7 +101,7 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-            if self.peek() == Some(b'/') && self.peek_at(1) == Some(b'/') {
+            if self.peek() == Some(b';') {
                 skipped = true;
                 while let Some(b) = self.bump() {
                     if b == b'\n' {
