@@ -508,6 +508,28 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    pub(super) fn call_type_error(&self, callee: RVal, span: Span) -> Error {
+        Error::runtime(
+            "expr.call",
+            span,
+            format!("cannot call value of type {}", callee.type_name(self.pool)),
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    pub(super) fn call_arity_error(&self, expected: u32, actual: usize, span: Span) -> Error {
+        Error::runtime(
+            "expr.call",
+            span,
+            format!("expected {expected} arguments, got {actual}"),
+        )
+    }
+
     pub(super) fn apply(
         &mut self,
         callee: RVal,
@@ -520,6 +542,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 let (proto, captures) = match self.pool.get(id) {
                     Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
                     _ => {
+                        #[cfg(debug_assertions)]
+                        return Err(self.call_type_error(callee, span));
+                        #[cfg(not(debug_assertions))]
                         return Err(Error::runtime(
                             "expr.call",
                             span,
@@ -528,6 +553,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                     }
                 };
                 if proto.arity as usize != args.len() {
+                    #[cfg(debug_assertions)]
+                    return Err(self.call_arity_error(proto.arity, args.len(), span));
+                    #[cfg(not(debug_assertions))]
                     return Err(Error::runtime(
                         "expr.call",
                         span,
@@ -566,6 +594,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 }
             }
             RVal::Builtin(b) => self.dispatch_builtin(b, args, span),
+            #[cfg(debug_assertions)]
+            other => Err(self.call_type_error(other, span)),
+            #[cfg(not(debug_assertions))]
             other => Err(Error::runtime(
                 "expr.call",
                 span,

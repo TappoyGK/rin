@@ -9,6 +9,7 @@ use super::{CallOrigin, Runner};
 #[cfg(debug_assertions)]
 impl BuiltinId {
     /// Rin の関数を呼び戻す組み込み関数。Debug では命令ループを抜けてから実行する。
+    #[inline(always)]
     pub(super) fn has_callback(self) -> bool {
         matches!(
             self,
@@ -27,8 +28,7 @@ impl BuiltinId {
 impl Runner<'_, '_> {
     // Debug では高階関数の再入時に通常の組み込み命令の作業領域を残さない。
     // Release は apply_builtin への単純な委譲。大きな本体は VM にインライン化しない。
-    #[cfg_attr(debug_assertions, inline(never))]
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    #[inline(always)]
     pub(super) fn dispatch_builtin(
         &mut self,
         b: BuiltinId,

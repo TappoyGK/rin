@@ -38,6 +38,9 @@ macro_rules! call_closure {
         let (proto, cap) = match $runner.pool.get($id) {
             Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
             _ => {
+                #[cfg(debug_assertions)]
+                return Err($runner.call_type_error($callee, $span));
+                #[cfg(not(debug_assertions))]
                 return Err(Error::runtime(
                     "expr.call",
                     $span,
@@ -49,6 +52,9 @@ macro_rules! call_closure {
             }
         };
         if proto.arity as usize != $argc {
+            #[cfg(debug_assertions)]
+            return Err($runner.call_arity_error(proto.arity, $argc, $span));
+            #[cfg(not(debug_assertions))]
             return Err(Error::runtime(
                 "expr.call",
                 $span,
@@ -848,14 +854,50 @@ impl Runner<'_, '_> {
     ) -> Result<RVal, Error> {
         let callee = self.stack[arg_start - 1];
         match callee {
-            RVal::Builtin(b) => self.call_builtin_from_stack(b, arg_start, argc, span),
+            RVal::Builtin(b) => self.call_callback_from_stack(b, arg_start, argc, span),
             RVal::Obj(id) => call_closure!(self, id, callee, arg_start, argc, span, res => res),
-            other => Err(Error::runtime(
-                "expr.call",
-                span,
-                format!("cannot call value of type {}", other.type_name(self.pool)),
-            )),
+            other => Err(self.call_type_error(other, span)),
         }
+    }
+
+    // コールバック呼び出しは命令ループを抜けてから行う。通常の演算用の
+    // 引数処理をここに展開せず、少数の引数だけを保持する。
+    #[cfg(debug_assertions)]
+    #[inline(never)]
+    fn call_callback_from_stack(
+        &mut self,
+        b: BuiltinId,
+        arg_start: usize,
+        argc: usize,
+        span: Span,
+    ) -> Result<RVal, Error> {
+        if argc > 3 {
+            return self.call_callback_with_extra_args(b, arg_start, span);
+        }
+        let mut args = [RVal::Void; 3];
+        args[..argc].copy_from_slice(&self.stack[arg_start..]);
+        self.stack.truncate(arg_start - 1);
+        let result = self.dispatch_builtin(b, &args[..argc], span);
+        for value in &args[..argc] {
+            self.pool.release_val(*value);
+        }
+        result
+    }
+
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    fn call_callback_with_extra_args(
+        &mut self,
+        b: BuiltinId,
+        arg_start: usize,
+        span: Span,
+    ) -> Result<RVal, Error> {
+        let args: Vec<_> = self.stack.drain(arg_start..).collect();
+        self.stack.pop();
+        let result = self.dispatch_builtin(b, &args, span);
+        self.release_all(args);
+        result
     }
 
     #[cfg_attr(debug_assertions, inline(never))]

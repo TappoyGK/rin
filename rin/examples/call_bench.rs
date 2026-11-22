@@ -24,26 +24,42 @@ fn main() {
         (defn fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
         (def xs (range 0 100))
         (defn mapped () (len (map identity xs)))
+        (defn cb_filter () (len (filter (fn (x) (< x 50)) xs)))
+        (defn cb_any () (any (fn (x) (== x 99)) xs))
+        (defn cb_all () (all (fn (x) (< x 1000)) xs))
+        (defn cb_find () (find (fn (x) (== x 99)) xs))
+        (defn cb_sort_by () (len (sort_by (fn (x) (- 100 x)) xs)))
+        (defn cb_flat_map () (len (flat_map (fn (x) [x]) xs)))
         (defn folded () (fold (fn (acc x) (+ acc x)) 0 xs))
     "#,
         )
         .unwrap();
     for (name, args, expected) in [
-        ("identity", vec![Value::Int(7)], 7),
-        ("direct", vec![Value::Int(7)], 8),
-        ("recur", vec![Value::Int(100)], 100),
-        ("deep", vec![Value::Int(199)], 199),
-        ("closure_mapped", vec![Value::Int(7)], 100),
-        ("tail", vec![Value::Int(100), Value::Int(0)], 100),
-        ("fib", vec![Value::Int(10)], 55),
-        ("mapped", vec![], 100),
-        ("folded", vec![], 4950),
+        ("identity", vec![Value::Int(7)], Value::Int(7)),
+        ("direct", vec![Value::Int(7)], Value::Int(8)),
+        ("recur", vec![Value::Int(100)], Value::Int(100)),
+        ("deep", vec![Value::Int(199)], Value::Int(199)),
+        ("closure_mapped", vec![Value::Int(7)], Value::Int(100)),
+        (
+            "tail",
+            vec![Value::Int(100), Value::Int(0)],
+            Value::Int(100),
+        ),
+        ("fib", vec![Value::Int(10)], Value::Int(55)),
+        ("mapped", vec![], Value::Int(100)),
+        ("folded", vec![], Value::Int(4950)),
+        ("cb_filter", vec![], Value::Int(50)),
+        ("cb_any", vec![], Value::Bool(true)),
+        ("cb_all", vec![], Value::Bool(true)),
+        ("cb_find", vec![], Value::some(Value::Int(99))),
+        ("cb_sort_by", vec![], Value::Int(100)),
+        ("cb_flat_map", vec![], Value::Int(100)),
     ] {
         if selected.as_ref().is_some_and(|wanted| wanted != name) {
             continue;
         }
         for _ in 0..1000 {
-            assert_eq!(machine.call(name, &args).unwrap(), Value::Int(expected));
+            assert_eq!(machine.call(name, &args).unwrap(), expected);
         }
         let start = Instant::now();
         for _ in 0..iterations {

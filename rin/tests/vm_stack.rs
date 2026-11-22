@@ -138,3 +138,26 @@ fn default_depth_is_safe_on_two_mib_stack() {
         }
     }
 }
+
+#[test]
+fn callback_arity_errors_release_owned_arguments() {
+    for builtin in [
+        "map", "filter", "flat_map", "fold", "find", "any", "all", "sort_by",
+    ] {
+        let arity = if builtin == "fold" { 3 } else { 2 };
+        for argc in 0..=5 {
+            if argc == arity {
+                continue;
+            }
+            let mut alloc = HeapAllocator;
+            let mut machine = Machine::new(Limits::default(), &mut alloc);
+            let live_before = machine.live_bytes();
+            let args = " [\"owned\"]".repeat(argc);
+            let error = machine.eval(&format!("({builtin}{args})")).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Runtime, "{builtin}/{argc}");
+            assert_eq!(error.rule(), "fn.list", "{builtin}/{argc}");
+            assert_eq!(machine.live_bytes(), live_before, "{builtin}/{argc}");
+            assert_eq!(machine.eval("(+ 1 2)").unwrap(), rin::Value::Int(3));
+        }
+    }
+}
