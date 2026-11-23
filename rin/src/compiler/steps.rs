@@ -128,7 +128,7 @@ impl<'a> Compiler<'a> {
                     saved_next_slot,
                 } => {
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
+                    scope.truncate_locals(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                 }
                 Step::FinishStruct(fs) => {
@@ -252,7 +252,7 @@ impl<'a> Compiler<'a> {
                 Step::MatchAfterArm(mut ma) => {
                     let arm = &ma.arms[ma.idx];
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(ma.saved_locals_len);
+                    scope.truncate_locals(ma.saved_locals_len);
                     scope.next_slot = ma.saved_next_slot;
                     ma.end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();

@@ -228,7 +228,7 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_body_shallow(body, is_tail, depth + 1)?;
                 let scope = self.scopes.last_mut().unwrap();
-                scope.locals.truncate(saved_locals_len);
+                scope.truncate_locals(saved_locals_len);
                 scope.next_slot = saved_next_slot;
             }
             ExprKind::If {
@@ -281,7 +281,7 @@ impl<'a> Compiler<'a> {
                     self.chunk().emit(Op::Pop, arm.span);
                     self.compile_body_shallow(&arm.body, is_tail, depth + 1)?;
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
+                    scope.truncate_locals(saved_locals_len);
                     scope.next_slot = saved_next_slot;
                     end_jumps.push(self.emit(Op::Jump(0), arm.span));
                     let fail_ip = self.chunk().code.len();
