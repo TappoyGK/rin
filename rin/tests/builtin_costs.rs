@@ -311,3 +311,52 @@ fn unique_batches_only_scalar_comparisons_within_the_remaining_budget() {
         ]),
     );
 }
+
+#[test]
+fn struct_comparison_keeps_key_then_value_budget_order() {
+    use std::collections::BTreeMap;
+    for n in [0, 1, 17] {
+        let fields: BTreeMap<_, _> = (0..n)
+            .map(|i| (format!("k{i:02}"), Value::Int(i)))
+            .collect();
+        let a = Value::structure("S", fields.clone());
+        let cost = 3 + 5 * n as usize;
+        check("==", &[a.clone(), a.clone()], cost, Value::Bool(true));
+        // 外側の比較スタックに残るリストの末尾も比較する。
+        check(
+            "==",
+            &[
+                Value::list(vec![a.clone(), Value::Int(1)]),
+                Value::list(vec![a.clone(), Value::Int(1)]),
+            ],
+            cost + 4,
+            Value::Bool(true),
+        );
+        for i in 0..n {
+            let mut other = fields.clone();
+            other.insert(format!("k{i:02}"), Value::Int(-1));
+            check(
+                "==",
+                &[a.clone(), Value::structure("S", other)],
+                3 + 4 * n as usize + i as usize + 1,
+                Value::Bool(false),
+            );
+        }
+        if n > 0 {
+            let mut other = fields.clone();
+            other.remove("k00");
+            other.insert("j00".into(), Value::Int(-1));
+            check(
+                "==",
+                &[a.clone(), Value::structure("S", other)],
+                3 + 4 * n as usize,
+                Value::Bool(false),
+            );
+            // オブジェクトに遭遇したら通常の比較へ戻り、二重計上しない。
+            let mut nested = fields.clone();
+            nested.insert("k00".into(), Value::some(Value::Int(0)));
+            let value = Value::structure("S", nested);
+            check("==", &[value.clone(), value], cost + 1, Value::Bool(true));
+        }
+    }
+}

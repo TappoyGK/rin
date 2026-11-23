@@ -130,8 +130,13 @@ fn objects_equal(
                         if n1 != n2 || f1.len() != f2.len() {
                             return Some(false);
                         }
+                        match scalar_fields_equal(remaining, f1, f2) {
+                            ScalarFields::Equal => continue,
+                            ScalarFields::Different => return Some(false),
+                            ScalarFields::OutOfSteps => return None,
+                            ScalarFields::NeedsObjects => {}
+                        }
                         for ((k1, v1), (k2, v2)) in f1.iter().zip(f2.iter()).rev() {
-                            // str の長さは isize::MAX 以下なので +1 は桁あふれしない。
                             if !try_charge_steps(remaining, 1 + k1.len().min(k2.len())) {
                                 return None;
                             }
@@ -187,4 +192,48 @@ fn objects_equal(
         }
     }
     Some(true)
+}
+
+// スカラーだけの構造体は作業スタックへの出し入れを省く。
+// キーの検査に使える残量を守り、値の計上は全キーの検査後に行う。
+// 中身を見る必要のあるオブジェクトを見つけたら、残量を変更せず通常の比較へ戻す。
+enum ScalarFields {
+    Equal,
+    Different,
+    OutOfSteps,
+    NeedsObjects,
+}
+
+#[inline(never)]
+fn scalar_fields_equal(
+    remaining: &mut usize,
+    a: &std::collections::BTreeMap<std::rc::Rc<str>, RVal>,
+    b: &std::collections::BTreeMap<std::rc::Rc<str>, RVal>,
+) -> ScalarFields {
+    let mut left = *remaining;
+    let mut mismatch = None;
+    for (index, ((ka, va), (kb, vb))) in a.iter().zip(b.iter()).enumerate().rev() {
+        if !try_charge_steps(&mut left, 1 + ka.len().min(kb.len())) {
+            return ScalarFields::OutOfSteps;
+        }
+        if ka != kb {
+            *remaining = left;
+            return ScalarFields::Different;
+        }
+        if matches!((*va, *vb), (RVal::Obj(x), RVal::Obj(y)) if x != y) {
+            return ScalarFields::NeedsObjects;
+        }
+        if !Runner::scalars_equal(*va, *vb) {
+            mismatch = Some(index + 1);
+        }
+    }
+    if !try_charge_steps(&mut left, mismatch.unwrap_or(a.len())) {
+        return ScalarFields::OutOfSteps;
+    }
+    *remaining = left;
+    if mismatch.is_some() {
+        ScalarFields::Different
+    } else {
+        ScalarFields::Equal
+    }
 }

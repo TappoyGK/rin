@@ -56,8 +56,9 @@ impl Runner<'_, '_> {
         result
     }
 
-    // 整数の速い経路を含め、VM本体のフレームと命令サイズを増やさない。
-    #[inline(never)]
+    // 整数の速い経路だけをVMへ展開し、汎用の引数処理は外に置く。
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub(in crate::eval) fn call_builtin_from_stack(
         &mut self,
         b: BuiltinId,
@@ -68,7 +69,6 @@ impl Runner<'_, '_> {
         if argc == 2 {
             let lhs = self.stack[arg_start];
             let rhs = self.stack[arg_start + 1];
-            self.stack.truncate(arg_start - 1);
             if let (RVal::Int(x), RVal::Int(y)) = (lhs, rhs) {
                 let (value, cost) = match b {
                     BuiltinId::Add => (x.checked_add(y).map(RVal::Int), 1),
@@ -80,9 +80,9 @@ impl Runner<'_, '_> {
                     BuiltinId::Ge => (Some(RVal::Bool(x >= y)), 1),
                     BuiltinId::Eq => (Some(RVal::Bool(x == y)), 2),
                     BuiltinId::Ne => (Some(RVal::Bool(x != y)), 2),
-                    // 整数は所有オブジェクトを持たないので解放は不要。
-                    _ => return self.dispatch_builtin(b, &[lhs, rhs], span),
+                    _ => return self.call_builtin_slow(b, arg_start, argc, span),
                 };
+                self.stack.truncate(arg_start - 1);
                 if !self.try_charge(cost) {
                     return self.step_limit_result(span);
                 }
@@ -91,6 +91,22 @@ impl Runner<'_, '_> {
                     None => Self::integer_overflow(span),
                 };
             }
+        }
+        self.call_builtin_slow(b, arg_start, argc, span)
+    }
+
+    #[inline(never)]
+    fn call_builtin_slow(
+        &mut self,
+        b: BuiltinId,
+        arg_start: usize,
+        argc: usize,
+        span: Span,
+    ) -> Result<RVal, Error> {
+        if argc == 2 {
+            let lhs = self.stack[arg_start];
+            let rhs = self.stack[arg_start + 1];
+            self.stack.truncate(arg_start - 1);
             let res = self.dispatch_builtin(b, &[lhs, rhs], span);
             self.pool.release_val(lhs);
             self.pool.release_val(rhs);
