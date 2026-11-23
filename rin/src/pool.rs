@@ -9,6 +9,8 @@ use crate::error::{Error, ErrorKind, Span};
 use crate::value::Value;
 
 mod convert;
+#[cfg(test)]
+mod release_tests;
 mod shallow;
 
 const CHUNK_SLOTS: usize = 256;
@@ -176,6 +178,8 @@ pub(crate) struct Pool<'a> {
     live_bytes: usize,
     max_bytes: usize,
     release_worklist: Vec<ObjId>,
+    #[cfg(test)]
+    release_counts: release_tests::Counts,
 }
 
 impl<'a> Pool<'a> {
@@ -188,6 +192,8 @@ impl<'a> Pool<'a> {
             live_bytes: 0,
             max_bytes,
             release_worklist: Vec::new(),
+            #[cfg(test)]
+            release_counts: release_tests::Counts::default(),
         }
     }
 
@@ -245,6 +251,10 @@ impl<'a> Pool<'a> {
     }
 
     pub fn release(&mut self, root: ObjId) {
+        #[cfg(test)]
+        {
+            self.release_counts.references += 1;
+        }
         let should_free_root = match self.slot_mut(root) {
             Slot::Live { rc, .. } => {
                 *rc -= 1;
@@ -263,6 +273,10 @@ impl<'a> Pool<'a> {
                 first = false;
                 true
             } else {
+                #[cfg(test)]
+                {
+                    self.release_counts.references += 1;
+                }
                 match self.slot_mut(id) {
                     Slot::Live { rc, .. } => {
                         *rc -= 1;
@@ -277,6 +291,8 @@ impl<'a> Pool<'a> {
                 self.free_head = Some(id.0);
                 if let Slot::Live { bytes, obj, .. } = prev {
                     self.live_bytes = self.live_bytes.saturating_sub(bytes);
+                    #[cfg(test)]
+                    self.release_counts.freed(&obj);
                     obj.push_children(&mut worklist);
                 }
             }
