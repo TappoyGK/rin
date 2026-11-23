@@ -56,8 +56,8 @@ impl Runner<'_, '_> {
         result
     }
 
-    #[cfg_attr(debug_assertions, inline(never))]
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    // 整数の速い経路を含め、VM本体のフレームと命令サイズを増やさない。
+    #[inline(never)]
     pub(in crate::eval) fn call_builtin_from_stack(
         &mut self,
         b: BuiltinId,
@@ -70,50 +70,26 @@ impl Runner<'_, '_> {
             let rhs = self.stack[arg_start + 1];
             self.stack.truncate(arg_start - 1);
             if let (RVal::Int(x), RVal::Int(y)) = (lhs, rhs) {
-                if matches!(
-                    b,
-                    BuiltinId::Add
-                        | BuiltinId::Sub
-                        | BuiltinId::Mul
-                        | BuiltinId::Lt
-                        | BuiltinId::Le
-                        | BuiltinId::Gt
-                        | BuiltinId::Ge
-                        | BuiltinId::Eq
-                        | BuiltinId::Ne
-                ) {
-                    self.charge(1, span)?;
-                    if matches!(b, BuiltinId::Eq | BuiltinId::Ne) {
-                        self.charge(1, span)?;
-                    }
+                let (value, cost) = match b {
+                    BuiltinId::Add => (x.checked_add(y).map(RVal::Int), 1),
+                    BuiltinId::Sub => (x.checked_sub(y).map(RVal::Int), 1),
+                    BuiltinId::Mul => (x.checked_mul(y).map(RVal::Int), 1),
+                    BuiltinId::Lt => (Some(RVal::Bool(x < y)), 1),
+                    BuiltinId::Le => (Some(RVal::Bool(x <= y)), 1),
+                    BuiltinId::Gt => (Some(RVal::Bool(x > y)), 1),
+                    BuiltinId::Ge => (Some(RVal::Bool(x >= y)), 1),
+                    BuiltinId::Eq => (Some(RVal::Bool(x == y)), 2),
+                    BuiltinId::Ne => (Some(RVal::Bool(x != y)), 2),
+                    // 整数は所有オブジェクトを持たないので解放は不要。
+                    _ => return self.dispatch_builtin(b, &[lhs, rhs], span),
+                };
+                if !self.try_charge(cost) {
+                    return self.step_limit_result(span);
                 }
-                match b {
-                    BuiltinId::Add => {
-                        return x
-                            .checked_add(y)
-                            .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"));
-                    }
-                    BuiltinId::Sub => {
-                        return x
-                            .checked_sub(y)
-                            .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"));
-                    }
-                    BuiltinId::Mul => {
-                        return x
-                            .checked_mul(y)
-                            .map(RVal::Int)
-                            .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"));
-                    }
-                    BuiltinId::Lt => return Ok(RVal::Bool(x < y)),
-                    BuiltinId::Le => return Ok(RVal::Bool(x <= y)),
-                    BuiltinId::Gt => return Ok(RVal::Bool(x > y)),
-                    BuiltinId::Ge => return Ok(RVal::Bool(x >= y)),
-                    BuiltinId::Eq => return Ok(RVal::Bool(x == y)),
-                    BuiltinId::Ne => return Ok(RVal::Bool(x != y)),
-                    _ => {}
-                }
+                return match value {
+                    Some(value) => Ok(value),
+                    None => Self::integer_overflow(span),
+                };
             }
             let res = self.dispatch_builtin(b, &[lhs, rhs], span);
             self.pool.release_val(lhs);
@@ -151,5 +127,13 @@ impl Runner<'_, '_> {
                 res
             }
         }
+    }
+}
+
+impl Runner<'_, '_> {
+    #[cold]
+    #[inline(never)]
+    fn integer_overflow(span: Span) -> Result<RVal, Error> {
+        Err(Error::runtime("op.arith", span, "i64 overflow"))
     }
 }

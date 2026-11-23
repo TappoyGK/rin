@@ -13,12 +13,9 @@ impl Runner<'_, '_> {
             match self.pool.get(*id) {
                 Obj::Array(arr) => return Ok(RVal::Int(arr.len() as i64)),
                 Obj::Str(s) => {
-                    super::super::runner::charge_steps(
-                        &mut self.steps,
-                        self.limits.steps,
-                        s.len(),
-                        span,
-                    )?;
+                    if !super::super::runner::try_charge_steps(&mut self.steps_left, s.len()) {
+                        return self.step_limit_result(span);
+                    }
                     return Ok(RVal::Int(s.chars().count() as i64));
                 }
                 _ => {}
@@ -91,7 +88,9 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_last(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("last", args, span)?;
-        let items = self.list_to_vec(xs, span)?;
+        let Some(items) = self.list_to_vec(xs) else {
+            return self.step_limit_result(span);
+        };
         match items.last().copied() {
             Some(v) => {
                 self.pool.retain_val(v);
@@ -122,28 +121,40 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("push", *list_v, span)?;
-        let mut items = self.list_to_vec(*list_v, span)?;
+        let Some(mut items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         items.push(*item);
         self.build_list_from_borrowed(&items, span)
     }
 
     pub(super) fn builtin_append(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
-        self.charge(args.len(), span)?;
+        if !self.try_charge(args.len()) {
+            return self.step_limit_result(span);
+        }
         let mut items = Vec::new();
         for &arg in args {
             self.expect_list("append", arg, span)?;
-            items.extend(self.list_to_vec(arg, span)?);
+            let Some(subitems) = self.list_to_vec(arg) else {
+                return self.step_limit_result(span);
+            };
+            items.extend(subitems);
         }
         self.build_list_from_borrowed(&items, span)
     }
 
     pub(super) fn builtin_flatten(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("flatten", args, span)?;
-        let outer = self.list_to_vec(xs, span)?;
+        let Some(outer) = self.list_to_vec(xs) else {
+            return self.step_limit_result(span);
+        };
         let mut items = Vec::new();
         for sub in outer {
             self.expect_list("flatten", sub, span)?;
-            items.extend(self.list_to_vec(sub, span)?);
+            let Some(subitems) = self.list_to_vec(sub) else {
+                return self.step_limit_result(span);
+            };
+            items.extend(subitems);
         }
         self.build_list_from_borrowed(&items, span)
     }
@@ -167,7 +178,9 @@ impl Runner<'_, '_> {
                 format!("slice range {start}..{end} out of range (length {len})"),
             ));
         }
-        let items = self.list_to_vec(*list_v, span)?;
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         self.build_list_from_borrowed(&items[start as usize..end as usize], span)
     }
 
@@ -188,7 +201,9 @@ impl Runner<'_, '_> {
                 "'take' count cannot be negative",
             ));
         }
-        let items = self.list_to_vec(*list_v, span)?;
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         let end = (n as usize).min(items.len());
         self.build_list_from_borrowed(&items[..end], span)
     }
@@ -210,7 +225,9 @@ impl Runner<'_, '_> {
                 "'drop' count cannot be negative",
             ));
         }
-        self.charge((n as usize).min(self.pool.list_len(*list_v)), span)?;
+        if !self.try_charge((n as usize).min(self.pool.list_len(*list_v))) {
+            return self.step_limit_result(span);
+        }
         let mut cur = *list_v;
         while n > 0 && self.pool.list_len(cur) > 0 {
             cur = self.list_tail(cur);
@@ -222,7 +239,9 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_reverse(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("reverse", args, span)?;
-        self.charge(self.pool.list_len(xs), span)?;
+        if !self.try_charge(self.pool.list_len(xs)) {
+            return self.step_limit_result(span);
+        }
         let mut acc = RVal::EmptyList;
         let mut cur = xs;
         while let Some(head) = self.list_head(cur) {
@@ -256,7 +275,9 @@ impl Runner<'_, '_> {
         }
         let count = usize::try_from(i128::from(end) - i128::from(start))
             .map_err(|_| self.step_limit_err(span))?;
-        self.charge(count, span)?;
+        if !self.try_charge(count) {
+            return self.step_limit_result(span);
+        }
         let mut acc = RVal::EmptyList;
         for n in (start..end).rev() {
             match self.pool.alloc_cons(RVal::Int(n), acc, span) {
@@ -282,7 +303,9 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("contains", *list_v, span)?;
-        let items = self.list_to_vec(*list_v, span)?;
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         for x in items {
             if x.type_name(self.pool) != target.type_name(self.pool) {
                 return Err(Error::runtime(
@@ -295,7 +318,10 @@ impl Runner<'_, '_> {
                     ),
                 ));
             }
-            if self.values_equal(x, *target, span)? {
+            let Some(equal) = self.values_equal(x, *target) else {
+                return self.step_limit_result(span);
+            };
+            if equal {
                 return Ok(RVal::Bool(true));
             }
         }
@@ -312,8 +338,12 @@ impl Runner<'_, '_> {
         };
         self.expect_list("zip", *a_v, span)?;
         self.expect_list("zip", *b_v, span)?;
-        let a = self.list_to_vec(*a_v, span)?;
-        let b = self.list_to_vec(*b_v, span)?;
+        let Some(a) = self.list_to_vec(*a_v) else {
+            return self.step_limit_result(span);
+        };
+        let Some(b) = self.list_to_vec(*b_v) else {
+            return self.step_limit_result(span);
+        };
         let mut out = Vec::with_capacity(a.len().min(b.len()));
         for (x, y) in a.into_iter().zip(b) {
             self.pool.retain_val(x);
@@ -331,7 +361,9 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_enumerate(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("enumerate", args, span)?;
-        let items = self.list_to_vec(xs, span)?;
+        let Some(items) = self.list_to_vec(xs) else {
+            return self.step_limit_result(span);
+        };
         let mut out = Vec::with_capacity(items.len());
         for (i, x) in items.into_iter().enumerate() {
             self.pool.retain_val(x);
@@ -351,8 +383,12 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_sort(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("sort", args, span)?;
-        let mut items = self.list_to_vec(xs, span)?;
-        self.charge_sort(items.iter().copied(), items.len(), span)?;
+        let Some(mut items) = self.list_to_vec(xs) else {
+            return self.step_limit_result(span);
+        };
+        if !self.charge_sort(items.iter().copied(), items.len()) {
+            return self.step_limit_result(span);
+        }
         let mut sort_err = None;
         items.sort_by(|&a, &b| match self.compare_vals(a, b, span) {
             Ok(ord) => ord,
@@ -371,12 +407,34 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_unique(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("unique", args, span)?;
-        let items = self.list_to_vec(xs, span)?;
+        let Some(items) = self.list_to_vec(xs) else {
+            return self.step_limit_result(span);
+        };
         let mut out: Vec<RVal> = Vec::new();
         for x in items {
+            // スカラー比較は1組1ステップ。残量を走査の上限にして、
+            // 実際に比較した数だけをまとめて計上する。
+            if !matches!(x, RVal::Obj(_)) {
+                let allowed = out.len().min(self.steps_left);
+                let found = out[..allowed]
+                    .iter()
+                    .position(|&v| Self::scalars_equal(v, x));
+                self.steps_left -= found.map_or(allowed, |i| i + 1);
+                if found.is_some() {
+                    continue;
+                }
+                if allowed < out.len() {
+                    return self.step_limit_result(span);
+                }
+                out.push(x);
+                continue;
+            }
             let mut found = false;
             for &seen in &out {
-                if self.values_equal(seen, x, span)? {
+                let Some(equal) = self.values_equal(seen, x) else {
+                    return self.step_limit_result(span);
+                };
+                if equal {
                     found = true;
                     break;
                 }
@@ -394,7 +452,9 @@ impl Runner<'_, '_> {
         span: Span,
     ) -> Result<RVal, Error> {
         let xs = self.expect_one_list("list->array", args, span)?;
-        let items = self.list_to_vec(xs, span)?;
+        let Some(items) = self.list_to_vec(xs) else {
+            return self.step_limit_result(span);
+        };
         for &item in &items {
             self.pool.retain_val(item);
         }
@@ -416,12 +476,9 @@ impl Runner<'_, '_> {
         let items = match v {
             RVal::Obj(id) => match self.pool.get(*id) {
                 Obj::Array(arr) => {
-                    super::super::runner::charge_steps(
-                        &mut self.steps,
-                        self.limits.steps,
-                        arr.len(),
-                        span,
-                    )?;
+                    if !super::super::runner::try_charge_steps(&mut self.steps_left, arr.len()) {
+                        return self.step_limit_result(span);
+                    }
                     arr.clone()
                 }
                 _ => {

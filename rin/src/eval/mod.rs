@@ -82,7 +82,7 @@ pub(super) enum CallOrigin<'a> {
 
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
-    pub(super) steps: usize,
+    pub(super) steps_left: usize,
     pub(super) depth: usize,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,

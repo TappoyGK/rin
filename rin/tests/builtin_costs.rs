@@ -279,3 +279,35 @@ fn huge_range_rejects_overflow_before_allocating() {
     );
     assert_eq!(m.live_bytes(), 0);
 }
+
+#[test]
+fn unique_batches_only_scalar_comparisons_within_the_remaining_budget() {
+    for n in [0, 1, 17] {
+        let output = if n == 0 { vec![] } else { vec![Value::Int(7)] };
+        check(
+            "unique",
+            &[Value::list(vec![Value::Int(7); n])],
+            1 + 2 * n,
+            Value::list(output),
+        );
+    }
+    // 型の違うスカラーとオブジェクトを混ぜても、比較順・費用を保つ。
+    // 走査5、比較1+1+2+3、生成3、呼び出し1 = 16。
+    let xs = vec![
+        Value::Int(1),
+        Value::some(Value::Int(1)),
+        Value::Int(1),
+        Value::Bool(false),
+        Value::some(Value::Int(1)),
+    ];
+    check(
+        "unique",
+        &[Value::list(xs)],
+        16,
+        Value::list(vec![
+            Value::Int(1),
+            Value::some(Value::Int(1)),
+            Value::Bool(false),
+        ]),
+    );
+}

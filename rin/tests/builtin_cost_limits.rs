@@ -68,3 +68,54 @@ fn fast_integer_calls_and_callback_calls_charge_the_same_internal_work() {
         }
     }
 }
+
+#[test]
+fn with_charges_original_fields_before_copying() {
+    use std::collections::BTreeMap;
+    for n in [0usize, 1, 100] {
+        let fields: BTreeMap<_, _> = (0..n)
+            .map(|i| (format!("f{i}"), Value::some(Value::Int(i as i64))))
+            .collect();
+        let original = Value::structure("S", fields.clone());
+        for update in [false, true] {
+            if update && n == 0 {
+                continue;
+            }
+            let (source, cost) = if update {
+                ("(with s { f0: 7 })", n + 3)
+            } else {
+                ("(with s {})", n + 2)
+            };
+            let mut expected = fields.clone();
+            if update {
+                expected.insert("f0".into(), Value::Int(7));
+            }
+            let expected = Value::structure("S", expected);
+            for steps in 0..=cost {
+                let mut alloc = HeapAllocator;
+                let mut m = Machine::new(
+                    Limits {
+                        steps,
+                        ..Limits::default()
+                    },
+                    &mut alloc,
+                );
+                m.bind("s", &original).unwrap();
+                let baseline = m.live_bytes();
+                for _ in 0..3 {
+                    let result = m.eval(source);
+                    if steps < cost {
+                        let error = result.unwrap_err();
+                        assert_eq!(error.kind, ErrorKind::TooManySteps);
+                        if steps >= cost - n {
+                            assert_eq!((error.at.line, error.at.col), (1, 1));
+                        }
+                    } else {
+                        assert_eq!(result.unwrap(), expected);
+                    }
+                    assert_eq!(m.live_bytes(), baseline);
+                }
+            }
+        }
+    }
+}

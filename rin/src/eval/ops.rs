@@ -42,7 +42,9 @@ impl Runner<'_, '_> {
         mut idx: usize,
         span: Span,
     ) -> Result<Option<RVal>, Error> {
-        self.charge(idx.saturating_add(1).min(self.pool.list_len(v)), span)?;
+        if !self.try_charge(idx.saturating_add(1).min(self.pool.list_len(v))) {
+            return self.step_limit_result(span);
+        }
         while let RVal::Obj(id) = v {
             let Obj::Cons { head, tail, .. } = self.pool.get(id) else {
                 break;
@@ -56,8 +58,11 @@ impl Runner<'_, '_> {
         Ok(None)
     }
 
-    pub(super) fn list_to_vec(&mut self, mut v: RVal, span: Span) -> Result<Vec<RVal>, Error> {
-        self.charge(self.pool.list_len(v), span)?;
+    // None はステップ残量不足。Error の生成は呼び出し側の失敗経路だけで行う。
+    pub(super) fn list_to_vec(&mut self, mut v: RVal) -> Option<Vec<RVal>> {
+        if !self.try_charge(self.pool.list_len(v)) {
+            return None;
+        }
         let mut out = Vec::with_capacity(self.pool.list_len(v));
         while let RVal::Obj(id) = v {
             let Obj::Cons { head, tail, .. } = self.pool.get(id) else {
@@ -66,7 +71,7 @@ impl Runner<'_, '_> {
             out.push(*head);
             v = *tail;
         }
-        Ok(out)
+        Some(out)
     }
 
     pub(super) fn build_list_from_owned(
@@ -74,9 +79,9 @@ impl Runner<'_, '_> {
         items: Vec<RVal>,
         span: Span,
     ) -> Result<RVal, Error> {
-        if let Err(e) = self.charge(items.len(), span) {
+        if !self.try_charge(items.len()) {
             self.release_all(items);
-            return Err(e);
+            return self.step_limit_result(span);
         }
         let mut acc = RVal::EmptyList;
         for (idx, item) in items.iter().enumerate().rev() {
@@ -105,9 +110,9 @@ impl Runner<'_, '_> {
     ) -> Result<RVal, Error> {
         let mut acc = RVal::EmptyList;
         let end = self.stack.len();
-        if let Err(e) = self.charge(end - start, span) {
+        if !self.try_charge(end - start) {
             self.release_stack_from(start);
-            return Err(e);
+            return self.step_limit_result(span);
         }
         for idx in (start..end).rev() {
             let item = self.stack[idx];
@@ -133,7 +138,9 @@ impl Runner<'_, '_> {
         items: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
-        self.charge(items.len(), span)?;
+        if !self.try_charge(items.len()) {
+            return self.step_limit_result(span);
+        }
         let mut acc = RVal::EmptyList;
         for &item in items.iter().rev() {
             match self.pool.alloc_cons(item, acc, span) {
@@ -191,14 +198,9 @@ impl Runner<'_, '_> {
     }
 
     // 標準ソートの比較回数には依存せず、最悪時のオーダーで前払いする。
-    pub(super) fn charge_sort(
-        &mut self,
-        keys: impl Iterator<Item = RVal>,
-        n: usize,
-        span: Span,
-    ) -> Result<(), Error> {
+    pub(super) fn charge_sort(&mut self, keys: impl Iterator<Item = RVal>, n: usize) -> bool {
         if n < 2 {
-            return Ok(());
+            return true;
         }
         let bytes = keys
             .map(|key| match key {
@@ -211,11 +213,13 @@ impl Runner<'_, '_> {
             .max()
             .unwrap_or(0);
         let log = (usize::BITS - (n - 1).leading_zeros()) as usize;
-        let cost = bytes
+        let Some(cost) = bytes
             .checked_add(1)
             .and_then(|width| n.checked_mul(log)?.checked_mul(width))
-            .ok_or_else(|| self.step_limit_err(span))?;
-        self.charge(cost, span)
+        else {
+            return false;
+        };
+        self.try_charge(cost)
     }
 
     pub(super) fn compare_vals(
@@ -275,7 +279,9 @@ impl Runner<'_, '_> {
             };
         }
         if (op == BuiltinId::Add || op == BuiltinId::Mul) && args.len() >= 2 {
-            self.charge(args.len() - 2, span)?;
+            if !self.try_charge(args.len() - 2) {
+                return self.step_limit_result(span);
+            }
             let mut acc = args[0];
             for &rhs in &args[1..] {
                 acc = self.arith_bin(op, acc, rhs, span)?;
@@ -367,7 +373,9 @@ impl Runner<'_, '_> {
                 ),
             ));
         }
-        let eq = self.values_equal(*a, *b, span)?;
+        let Some(eq) = self.values_equal(*a, *b) else {
+            return self.step_limit_result(span);
+        };
         Ok(RVal::Bool(if want_eq { eq } else { !eq }))
     }
 

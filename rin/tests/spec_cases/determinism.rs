@@ -47,6 +47,7 @@ fn snapshot() -> String {
         "(sort_by (fn (x) (- 0 x)) [1 4 2 3])",
         "(let (answer 1) anwser)",
         "(reverse [1 2 3])",
+        "(with S { a: [1] b: 2 } { a: [3] })",
         "(unique [1 2 1 3 2])",
         r#"(sort ["あいう" "あいあ" "a"])"#,
         "(flat_map (fn (x) (range 0 x)) [1 2 3])",

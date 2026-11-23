@@ -134,7 +134,7 @@ impl<'a> Machine<'a> {
     pub(super) fn runner(&mut self, active_module: Option<u32>) -> Runner<'_, 'a> {
         Runner {
             limits: self.limits,
-            steps: 0,
+            steps_left: self.limits.steps,
             depth: 0,
             pool: &mut self.pool,
             syms: &self.syms,
