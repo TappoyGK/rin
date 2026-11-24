@@ -237,7 +237,7 @@ fn rem_pio2(x: f64) -> (i32, f64, f64) {
         }
     }
 
-    // 経路 2: 3*pi/4 <= |x| <= 2^19 * pi/2（Cody-Waite 3 段縮約）
+    // 経路 2: 3*pi/4 <= |x| <= 2^20 * pi/2（Cody-Waite 3 段縮約）
     if ix <= 0x4139_21fb {
         let t = x.abs();
         let n = (t * INV_PIO2 + 0.5) as i32;
@@ -268,15 +268,15 @@ fn rem_pio2(x: f64) -> (i32, f64, f64) {
         return (n, y0, y1);
     }
 
-    // 経路 3: |x| > 2^19 * pi/2（整数 Payne-Hanek 縮約）
+    // 経路 3: |x| > 2^20 * pi/2（整数 Payne-Hanek 縮約）
     rem_pio2_large(x)
 }
 
-/// 任意の大きい有限 `x`（`|x| > 2^19 * pi/2`）を固定長整数演算で縮約する。
+/// 任意の大きい有限 `x`（`|x| > 2^20 * pi/2`）を固定長整数演算で縮約する。
 fn rem_pio2_large(x: f64) -> (i32, f64, f64) {
     let bits = x.to_bits();
     let neg = (bits >> 63) != 0;
-    let e = (((bits >> 52) & 0x7ff) as i32) - 1023; // 19 <= e <= 1023
+    let e = (((bits >> 52) & 0x7ff) as i32) - 1023; // 20 <= e <= 1023
     let m = (bits & 0x000f_ffff_ffff_ffff) | 0x0010_0000_0000_0000; // 53 bit
 
     let idx = (e / 32) as usize;
@@ -363,12 +363,12 @@ fn rem_pio2_large(x: f64) -> (i32, f64, f64) {
     let sig = prod_hi << lz2;
     let exp = -shift - (lz2 as i32);
 
-    // sig（128 bit, bit 127 = 1）から上位 f64（y0）と下位 f64（y1）を構築する。
-    let (y0_abs, y1_abs) = split_u128_to_f64_pair(sig, exp);
+    // sig（128 bit, bit 127 = 1）から上位 f64（y0）と符号付き下位 f64（y1）を構築する。
+    let (y0_abs, y1_signed) = split_u128_to_f64_pair(sig, exp);
 
     let y_neg = neg ^ frac_neg;
     let y0 = if y_neg { -y0_abs } else { y0_abs };
-    let y1 = if y_neg { -y1_abs } else { y1_abs };
+    let y1 = if y_neg { -y1_signed } else { y1_signed };
     let final_q = if neg { (-q) & 3 } else { q };
     (final_q, y0, y1)
 }
@@ -393,7 +393,7 @@ fn mul_u128_wide(a: u128, b: u128) -> (u128, u128) {
 }
 
 /// 正規化 128-bit 仮数 `sig`（bit 127 = 1）と 2 進指数 `exp`（値 = `sig * 2^(exp - 127)`）を、
-/// `y0 + y1` の 2 つの非負 `f64` に分解する（`|y1| <= 0.5 ulp(y0)` となる最近接丸め）。
+/// 非負の `y0` と符号付きの `y1` に分解する（`y0` は最近接・偶数丸め、`|y1| <= 0.5 ulp(y0)`）。
 #[inline]
 fn split_u128_to_f64_pair(sig: u128, exp: i32) -> (f64, f64) {
     // 上位 53 bit を取り出す（bit 127..75）。丸めビットは bit 74。

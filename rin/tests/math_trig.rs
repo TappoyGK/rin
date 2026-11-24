@@ -5,8 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use rin::ffi::{
-    RinAllocator, RinErrorKind, RinMathFma, rin_eval, rin_free, rin_last_error, rin_limits_default,
-    rin_math_fma, rin_new, rin_res_free, rin_set_math_fma,
+    RinAllocator, RinErrorKind, RinMathFma, rin_as_float, rin_bind, rin_drop, rin_eval, rin_float,
+    rin_free, rin_last_error, rin_limits_default, rin_math_fma, rin_new, rin_res_free,
+    rin_set_math_fma,
 };
 use rin::math::{self, MathFma};
 use rin::{HeapAllocator, Limits, Machine, Value};
@@ -109,9 +110,9 @@ fn user_arithmetic_is_never_fused_even_in_fused_mode() {
     // 非融合 (a * b) + c = 1.0 + (-1.0) = 0.0
     // FMA fma(a, b, c)   = -2^-104 != 0.0
     let a = f64::from_bits(0x3ff0_0000_0000_0001);
-    let b = f64::from_bits(0x3fef_ffff_ffff_ffff);
+    let b = f64::from_bits(0x3fef_ffff_ffff_fffe);
     let c = -1.0_f64;
-    assert_ne!(a.mul_add(b, c), 0.0);
+    assert_eq!(a.mul_add(b, c), -2.0_f64.powi(-104));
 
     for mode in [MathFma::Strict, MathFma::Fused] {
         let mut alloc = HeapAllocator;
@@ -153,12 +154,27 @@ fn c_ffi_math_fma_api() {
         assert_eq!((*err).kind, RinErrorKind::Host);
         assert_eq!(rin_math_fma(m), RinMathFma::Fused);
 
-        // 正常操作でエラーがクリアされ、Fused モードで評価できる。
-        let res = rin_eval(m, c"(sin 0.5)".as_ptr());
-        assert!(res.ok);
+        // Strict と Fused で結果が 1 bit 分かれる入力を bind して、設定が評価に効くことを確かめる。
+        let input = rin_float(f64::from_bits(0x3fcb_a7ce_3783_fd35));
+        assert!(rin_bind(m, c"x".as_ptr(), input));
+        rin_drop(input);
+
+        let mut res_fused = rin_eval(m, c"(sin x)".as_ptr());
+        assert!(res_fused.ok);
         assert!(rin_last_error(m).is_null());
-        let mut res = res;
-        rin_res_free(&mut res);
+        let mut out_fused = 0.0;
+        assert!(rin_as_float(res_fused.value, &mut out_fused));
+        assert_eq!(out_fused.to_bits(), 0x3fcb_70d9_ff96_56af);
+        rin_res_free(&mut res_fused);
+
+        assert!(rin_set_math_fma(m, RinMathFma::Strict as i32));
+        assert_eq!(rin_math_fma(m), RinMathFma::Strict);
+        let mut res_strict = rin_eval(m, c"(sin x)".as_ptr());
+        assert!(res_strict.ok);
+        let mut out_strict = 0.0;
+        assert!(rin_as_float(res_strict.value, &mut out_strict));
+        assert_eq!(out_strict.to_bits(), 0x3fcb_70d9_ff96_56ae);
+        rin_res_free(&mut res_strict);
 
         rin_free(m);
     }

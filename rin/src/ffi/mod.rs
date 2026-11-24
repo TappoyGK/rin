@@ -401,7 +401,7 @@ pub unsafe extern "C" fn rin_call_in(
 }
 
 /// 直近の対象操作のエラーを借用する。エラーなし、または NULL machine なら NULL。
-/// 次の rin_eval / rin_load / rin_call / rin_call_in / rin_bind、または rin_free まで有効。
+/// 次の rin_eval / rin_load / rin_call / rin_call_in / rin_bind / rin_set_math_fma、または rin_free まで有効。
 /// この取得関数や rin_res_free はエラーを無効化しない。ホストは解放しない。
 ///
 /// # Safety

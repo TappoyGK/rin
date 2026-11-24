@@ -52,10 +52,14 @@ sin	0x4024000000000000	0xbfe1689ef5f34f52	0xbfe1689ef5f34f52	10.0
 cos	0x4024000000000000	0xbfead9ac890c6b1f	0xbfead9ac890c6b1f	10.0
 sin	0x4059000000000000	0xbfe03425b78c4db8	0xbfe03425b78c4db8	100.0
 cos	0x4059000000000000	0x3feb981dbf665fdf	0x3feb981dbf665fdf	100.0
-sin	0x412921fa00000000	0xbfe3bc41ec71c06d	0xbfe3bc41ec71c06d	near 2^19 * pi/2 (Cody-Waite upper)
-cos	0x412921fa00000000	0x3fe930880dddf826	0x3fe930880dddf826	near 2^19 * pi/2 (Cody-Waite upper)
-sin	0x412921fc00000000	0x3fd51102efad6266	0x3fd51102efad6266	above 2^19 * pi/2 (Payne-Hanek entry)
-cos	0x412921fc00000000	0x3fee377c09c4cce7	0x3fee377c09c4cce7	above 2^19 * pi/2 (Payne-Hanek entry)
+sin	0x412921fa00000000	0xbfe3bc41ec71c06d	0xbfe3bc41ec71c06d	near 2^19 * pi/2 (Cody-Waite)
+cos	0x412921fa00000000	0x3fe930880dddf826	0x3fe930880dddf826	near 2^19 * pi/2 (Cody-Waite)
+sin	0x412921fc00000000	0x3fd51102efad6266	0x3fd51102efad6266	above 2^19 * pi/2 (Cody-Waite)
+cos	0x412921fc00000000	0x3fee377c09c4cce7	0x3fee377c09c4cce7	above 2^19 * pi/2 (Cody-Waite)
+sin	0x413921fb54442d18	0xbdd1a62633145c07	0xbdd1a62633145c07	2^20 * pi/2 (Cody-Waite upper)
+cos	0x413921fb54442d18	0x3ff0000000000000	0x3ff0000000000000	2^20 * pi/2 (Cody-Waite upper)
+sin	0x413921fc00000000	0x3fe3e479a61836eb	0x3fe3e479a61836eb	above 2^20 * pi/2 (Payne-Hanek entry)
+cos	0x413921fc00000000	0x3fe910d18d26c0d4	0x3fe910d18d26c0d4	above 2^20 * pi/2 (Payne-Hanek entry)
 sin	0x416312d000000000	0x3fdaea414a8a3352	0x3fdaea414a8a3352	1e7
 cos	0x416312d000000000	0xbfed085be7a8f4a1	0xbfed085be7a8f4a1	1e7
 sin	0x4415af1d78b58c40	0xbfe4a5e605fd6450	0xbfe4a5e605fd6450	1e20
@@ -84,3 +88,7 @@ sin	0x3fcba7ce3783fd35	0x3fcb70d9ff9656ae	0x3fcb70d9ff9656af	strict vs fused dif
 sin	0x3fce5d3044dec582	0x3fce147d7edf986e	0x3fce147d7edf986f	strict vs fused difference (sin)
 cos	0x3fe8d70d58caacff	0x3fe6d55be3d686f2	0x3fe6d55be3d686f3	strict vs fused difference (cos)
 cos	0x3fe92929cce644b7	0x3fe69b89d5d345f7	0x3fe69b89d5d345f6	strict vs fused difference (cos)
+cos	0x4031c9cd802aa726	0x3fdf379baee3a74d	0x3fdf379baee3a74c	kernel_sin iy=true (fused final step)
+sin	0x765ae9657b89b240	0x3fe65fccc12d618e	0x3fe65fccc12d618e	Payne-Hanek y0 rounding
+cos	0x41049decbc1d9720	0x3d2d5428f9cd07d3	0x3d2d5428f9cd07d3	Cody-Waite third stage
+cos	0x40433b65d291d986	0x3fe715f1b55c21a5	0x3fe715f1b55c21a4	kernel_cos with y != 0 (fused corr)
