@@ -79,6 +79,7 @@ typedef struct RinEvalResult {
 RinLimits rin_limits_default(void);
 RinMachine *rin_new(RinLimits limits, RinAllocator alloc);
 void rin_free(RinMachine *machine);
+bool rin_freeze(RinMachine *machine);
 bool rin_set_math_fma(RinMachine *machine, RinMathFma mode);
 RinMathFma rin_math_fma(const RinMachine *machine);
 bool rin_bind(RinMachine *machine, const char *name, const RinValue *val);
@@ -88,7 +89,7 @@ RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue 
 RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
 /* 直近の対象操作のエラー。エラーなし、または machine == NULL なら NULL。
  * ポインタと文字列は同じ machine の次の rin_eval / rin_load / rin_call /
- * rin_call_in / rin_bind / rin_set_math_fma、または rin_free まで有効。
+ * rin_call_in / rin_bind / rin_freeze / rin_set_math_fma、または rin_free まで有効。
  * 対象操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
  * rin_last_error や rin_res_free は無効化しない。
  * NULL machine には記録できない。それ以外の引数エラーは RIN_ERR_HOST、位置は 0。

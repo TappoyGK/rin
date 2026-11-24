@@ -24,18 +24,27 @@ pub fn eval_with_allocator(
 - `eval`：`Limits::default()`・`HeapAllocator` で式列を評価する。
 - `eval_with`：初期束縛 `bindings` と資源上限 `limits` を指定して評価する。
 - `eval_with_allocator`：呼び出し元が指定した `Allocator` 上で評価する。
-- これら 3 つの簡易評価関数は、数学関数の FMA 設定として常に `MathFma::Strict` を使う。`MathFma::Fused` を使う場合は `Machine::set_math_fma` を利用する。
+- これら 3 つの簡易評価関数は、読み込み段階の環境で 1 回評価し、数学関数の FMA 設定として常に `MathFma::Strict` を使う。凍結した実行環境や `MathFma::Fused` を使う場合は `Builder` と `Machine` を利用する。
 
-### 1.2 常駐環境 `Machine<'a>`
+### 1.2 読み込み環境 `Builder<'a>` と凍結環境 `Machine<'a>`
 
-複数回 `eval` を呼び出し、`def` / `defn` による定義を保持する実行環境である。
+大域環境とモジュールの構築（読み込みの段階）は `Builder<'a>` で行い、`freeze` によって実行専用の `Machine<'a>`（実行の段階）へ移行する。
 
 ```rust
-impl<'a> Machine<'a> {
+impl<'a> Builder<'a> {
     pub fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self
     pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error>
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error>
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
+    pub fn set_math_fma(&mut self, mode: MathFma)
+    pub fn math_fma(&self) -> MathFma
+    pub fn live_bytes(&self) -> usize
+    pub fn freeze(self) -> Result<Machine<'a>, Error>
+}
+
+impl<'a> Machine<'a> {
+    pub fn eval(&mut self, source: &str) -> Result<Value, Error>
+    pub fn eval_with(&mut self, source: &str, bindings: &[(&str, Value)]) -> Result<Value, Error>
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error>
     pub fn call_in(&mut self, mod_name: &str, fn_name: &str, args: &[Value]) -> Result<Value, Error>
     pub fn set_math_fma(&mut self, mode: MathFma)
@@ -44,8 +53,11 @@ impl<'a> Machine<'a> {
 }
 ```
 
-- `bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
-- `eval`：ソースを評価し、結果を独立した `Value` として返す。評価中に生成された一時オブジェクトは内部の参照カウントとフリーリストによって回収・再利用される。
+- `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
+- `Builder::load_module`：名前付きモジュールを読み込んで評価する。
+- `Builder::eval`：読み込み段階でソースを評価する（`def`・`defn`・`import` 等を許可する）。
+- `Builder::freeze`：大域環境と読み込み済みモジュールを凍結し、実行段階の `Machine` を返す。
+- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings` はその 1 回の評価にだけ有効で、評価終了時に解放する。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。
 - `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
 - `live_bytes`：現在内部プール上で生存しているオブジェクトの概算バイト数を返す。
 
@@ -254,11 +266,12 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
 | `RinMachine *rin_new(RinLimits limits, RinAllocator alloc)` | マシンを生成する |
 | `void rin_free(RinMachine *machine)` | マシンを破棄し内部プールを解放する（`NULL` 可） |
+| `bool rin_freeze(RinMachine *machine)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(RinMachine *machine, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
 | `RinMathFma rin_math_fma(const RinMachine *machine)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
-| `bool rin_bind(RinMachine *machine, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない） |
-| `RinEvalResult rin_eval(RinMachine *machine, const char *source)` | ソースを評価し結果を返す |
-| `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む |
+| `bool rin_bind(RinMachine *machine, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `[env.frozen]` エラー） |
+| `RinEvalResult rin_eval(RinMachine *machine, const char *source)` | ソースを評価し結果を返す（凍結後は `[env.frozen]`・`[env.modules]` を適用） |
+| `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `[env.frozen]` エラー） |
 | `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す |
 | `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す |
 | `const RinError *rin_last_error(const RinMachine *machine)` | 直近の対象操作のエラーを借用する（エラーなし・NULL machine は NULL） |
@@ -291,7 +304,7 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 対象操作は `rin_eval` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_set_math_fma` の 6 関数である。同じ machine への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ machine の対象操作・解放と並行して参照してはならない。
+- 対象操作は `rin_eval` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 7 関数である。同じ machine への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ machine の対象操作・解放と並行して参照してはならない。
 - 対象操作は引数検査の前に前回の情報をクリアする。有効な machine への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。machine 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時にはホストが所有する値であり、`rin_res_free` で解放する。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。

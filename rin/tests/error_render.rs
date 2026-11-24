@@ -1,4 +1,4 @@
-use rin::{Error, HeapAllocator, Limits, Machine, Span, Value, eval};
+use rin::{Builder, Error, HeapAllocator, Limits, Span, Value, eval};
 use std::fmt;
 
 #[test]
@@ -91,7 +91,7 @@ fn module_sources_follow_caller_locations() {
     let mb = ";; mb\n(import ma)\n(defn run () (+ 1 (ma.fail)))";
     let root = "(import mb)\n(mb.run)";
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     machine.load_module("ma", ma).unwrap();
     machine.load_module("mb", mb).unwrap();
     let error = machine.eval(root).unwrap_err();
@@ -123,9 +123,10 @@ fn module_sources_follow_caller_locations() {
 #[test]
 fn host_tail_builtin_and_compressed_frames_keep_their_meaning() {
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     let source = "(defn fail (x) (/ x 0))\n(defn tail (x) (fail x))";
     machine.load_module("ma", source).unwrap();
+    let mut machine = machine.freeze().unwrap();
     let error = machine.call_in("ma", "tail", &[Value::Int(1)]).unwrap_err();
     let mut requests = 0;
     let rendered = error.render_with(|module| {
@@ -183,7 +184,7 @@ fn gutter_uses_only_visible_lines_and_resolves_each_position_once() {
     );
     let root = format!("(import mb)\n{}(mb.run)", "\n".repeat(98));
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     machine.load_module("ma", ma).unwrap();
     machine.load_module("mb", &mb).unwrap();
     let error = machine.eval(&root).unwrap_err();

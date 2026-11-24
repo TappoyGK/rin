@@ -1,10 +1,10 @@
 //! ステップ上限を各実行位置で超えさせ、コンパイル後も正確な位置が残ることを確認する。
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 
 fn check_every_limit(source: &str, positions: &[(usize, usize)], expected: Value) {
     for limit in 0..=positions.len() {
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(
+        let mut machine = Builder::new(
             Limits {
                 steps: limit,
                 ..Limits::default()

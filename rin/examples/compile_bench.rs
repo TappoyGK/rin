@@ -2,7 +2,7 @@
 //! Cases: small, local, defs12000, defs40000, defs:N, prepare:N, locals:N.
 //! prepare/locals stop at steps=0 after parsing/compilation; timing includes cleanup.
 //! Large cases use a fresh Machine each time; peak is extra live heap bytes during eval.
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 use std::{hint::black_box, time::Instant};
 mod compile_memory;
 
@@ -26,7 +26,7 @@ fn main() {
         .max(1);
     if count == 0 {
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(Limits::default(), &mut alloc);
+        let mut machine = Builder::new(Limits::default(), &mut alloc);
         machine.eval("(defn sq (x) (* x x))").unwrap();
         let source = if case == "small" {
             "(sq 7)"
@@ -66,7 +66,7 @@ fn main() {
         let mut peak = 0;
         let mut run = || {
             let mut alloc = HeapAllocator;
-            let mut machine = Machine::new(
+            let mut machine = Builder::new(
                 Limits {
                     steps: if prepare { 0 } else { usize::MAX },
                     memory_bytes: 64 * 1024 * 1024,

@@ -1,6 +1,6 @@
 //! cargo run --release --example call_bench -- 10000
 //! 第2引数にケース名を指定できる。eval_fib 以外は読み込み済み関数を呼ぶ。
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 use std::{hint::black_box, time::Instant};
 
 fn main() {
@@ -11,7 +11,7 @@ fn main() {
         .max(1);
     let selected = std::env::args().nth(2);
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     machine
         .eval(
             r#"
@@ -34,6 +34,7 @@ fn main() {
     "#,
         )
         .unwrap();
+    let mut machine = machine.freeze().unwrap();
     for (name, args, expected) in [
         ("identity", vec![Value::Int(7)], Value::Int(7)),
         ("direct", vec![Value::Int(7)], Value::Int(8)),

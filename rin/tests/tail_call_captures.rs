@@ -1,5 +1,5 @@
 //! 末尾呼び出しのフレーム置換でも、呼び出し先と引数の所有権を保つ。
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 
 #[test]
 fn tail_calls_keep_captures_and_arguments_alive() {
@@ -87,7 +87,7 @@ fn tail_calls_keep_captures_and_arguments_alive() {
     for (definitions, call, args, expected) in cases {
         for from_host in [false, true] {
             let mut alloc = HeapAllocator;
-            let mut machine = Machine::new(
+            let mut machine = Builder::new(
                 Limits {
                     memory_bytes: 64 * 1024,
                     ..Limits::default()
@@ -95,6 +95,7 @@ fn tail_calls_keep_captures_and_arguments_alive() {
                 &mut alloc,
             );
             machine.eval(definitions).unwrap();
+            let mut machine = machine.freeze().unwrap();
             let before = machine.live_bytes();
             for _ in 0..3 {
                 let value = if from_host {
@@ -130,7 +131,7 @@ fn tail_call_errors_release_captures() {
     ] {
         for from_host in [false, true] {
             let mut alloc = HeapAllocator;
-            let mut machine = Machine::new(
+            let mut machine = Builder::new(
                 Limits {
                     steps: if kind == ErrorKind::TooMuchMemory {
                         200_000
@@ -147,6 +148,7 @@ fn tail_call_errors_release_captures() {
                     "(defn loop (x) (loop x)) (defn t () (let (big [1] f (fn (x) {body})) (f 0)))"
                 ))
                 .unwrap();
+            let mut machine = machine.freeze().unwrap();
             let before = machine.live_bytes();
             let error = if from_host {
                 machine.call("t", &[])

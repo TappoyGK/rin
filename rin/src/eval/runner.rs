@@ -61,13 +61,24 @@ impl<'a, 'p> Runner<'a, 'p> {
         ip: usize,
     ) -> Result<RVal, Error> {
         let idx = id as usize;
-        if let Some(mod_id) = self.active_module
-            && let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied()
-        {
+        if let Some(mod_id) = self.active_module {
+            if let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied() {
+                self.pool.retain_val(v);
+                return Ok(v);
+            }
+        } else if let Some(&v) = self.eval_bindings.get(&id) {
             self.pool.retain_val(v);
             return Ok(v);
         }
         if let Some(Some(v)) = self.globals.get(idx).copied() {
+            self.pool.retain_val(v);
+            return Ok(v);
+        }
+        if self.frozen
+            && self.active_module.is_none()
+            && let Some(name) = self.syms.names.get(idx)
+            && let Some(&v) = self.modules.get(name.as_ref())
+        {
             self.pool.retain_val(v);
             return Ok(v);
         }
@@ -82,6 +93,16 @@ impl<'a, 'p> Runner<'a, 'p> {
             .get(id as usize)
             .map(|s| s.as_ref())
             .unwrap_or("?");
+        let eval_names = self
+            .active_module
+            .is_none()
+            .then(|| self.eval_binding_names.iter().map(String::as_str))
+            .into_iter()
+            .flatten();
+        let frozen_mod_names = (self.frozen && self.active_module.is_none())
+            .then(|| self.modules.keys().map(String::as_str))
+            .into_iter()
+            .flatten();
         Error::runtime(
             "expr.name",
             span,
@@ -90,7 +111,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 name,
                 chunk
                     .visible_names(ip)
+                    .chain(eval_names)
                     .chain(bound_names(self.syms, self.globals))
+                    .chain(frozen_mod_names)
                     .chain(
                         self.active_module
                             .into_iter()

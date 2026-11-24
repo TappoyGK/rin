@@ -1,5 +1,5 @@
 //! 名前表の切替・シャドーイングの復元・捕捉番号の順序を検証する。
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 
 #[test]
 fn shadowed_names_are_restored_after_let_and_match() {
@@ -12,7 +12,7 @@ fn shadowed_names_are_restored_after_let_and_match() {
                 ")".repeat(depth),
             );
             let mut alloc = HeapAllocator;
-            let mut m = Machine::new(Limits::default(), &mut alloc);
+            let mut m = Builder::new(Limits::default(), &mut alloc);
             assert_eq!(
                 m.eval(&source).unwrap(),
                 Value::list(vec![
@@ -43,7 +43,7 @@ fn nested_captures_keep_first_use_order_and_outer_bindings() {
             let mut expected = (0..width).rev().map(Value::Int).collect::<Vec<_>>();
             expected.push(Value::Int(0));
             let mut alloc = HeapAllocator;
-            let mut m = Machine::new(Limits::default(), &mut alloc);
+            let mut m = Builder::new(Limits::default(), &mut alloc);
             assert_eq!(m.eval(&source).unwrap(), Value::list(expected));
         }
     }
@@ -52,7 +52,7 @@ fn nested_captures_keep_first_use_order_and_outer_bindings() {
 #[test]
 fn many_globals_and_repeated_string_constants_keep_their_numbers() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     let definitions = (0..100)
         .map(|i| format!("(def global{i} {i}) "))
         .collect::<String>();
@@ -84,15 +84,15 @@ fn many_globals_and_repeated_string_constants_keep_their_numbers() {
 #[test]
 fn cached_symbol_numbers_follow_redefinitions_and_new_names() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(defn first () 1) (defn second () 2)").unwrap();
     for _ in 0..2 {
-        assert_eq!(m.call("first", &[]).unwrap(), Value::Int(1));
-        assert_eq!(m.call("second", &[]).unwrap(), Value::Int(2));
+        assert_eq!(m.eval("(first)").unwrap(), Value::Int(1));
+        assert_eq!(m.eval("(second)").unwrap(), Value::Int(2));
     }
     m.eval("(defn second () 3)").unwrap();
-    assert_eq!(m.call("second", &[]).unwrap(), Value::Int(3));
-    assert!(m.call("later", &[]).is_err());
+    assert_eq!(m.eval("(second)").unwrap(), Value::Int(3));
+    assert!(m.eval("(later)").is_err());
     m.eval("(defn later () 4)").unwrap();
-    assert_eq!(m.call("later", &[]).unwrap(), Value::Int(4));
+    assert_eq!(m.eval("(later)").unwrap(), Value::Int(4));
 }

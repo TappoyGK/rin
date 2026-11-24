@@ -1,4 +1,4 @@
-use crate::{ErrorKind, HeapAllocator, Limits, Machine, Span, StackFrame, Value, eval, eval_with};
+use crate::{Builder, ErrorKind, HeapAllocator, Limits, Span, StackFrame, Value, eval, eval_with};
 
 #[test]
 fn runtime_and_limit_errors_record_call_backtrace() {
@@ -61,7 +61,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
 
     // 2 & 3. モジュール名、モジュールをまたぐ末尾呼び出し、ホスト入口フレーム。
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module("ma", "(defn f (x) (/ x 0))").unwrap();
     m.load_module(
         "mb",

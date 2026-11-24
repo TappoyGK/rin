@@ -1,4 +1,4 @@
-//! バイトコード VM の実行環境 `Machine` と `Runner` を定義する。
+//! バイトコード VM の実行環境 `Builder`・`Machine` と `Runner` を定義する。
 
 mod builtins;
 mod machine;
@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::alloc::{Allocator, HeapAllocator};
+use crate::ast::{Expr, ExprKind, children};
 use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
 use crate::compiler::{compile_program, compile_program_parts};
 use crate::diagnostic::{available, suggest};
@@ -21,30 +22,46 @@ use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
 /// 既定の `HeapAllocator` を用いて Rin ソースを評価する。
+///
+/// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
 pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
 }
 
 /// 呼び出し側が指定した `Allocator` を用いて Rin ソースを評価する。
+///
+/// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
 pub fn eval_with_allocator(
     source: &str,
     bindings: &[(&str, Value)],
     limits: Limits,
     alloc: &mut dyn Allocator,
 ) -> Result<Value, Error> {
-    let mut machine = Machine::new(limits, alloc);
+    let mut builder = Builder::new(limits, alloc);
     for (k, v) in bindings {
-        machine.bind(k, v)?;
+        builder.bind(k, v)?;
     }
-    machine.eval(source)
+    builder.eval(source)
 }
 
-/// 呼び出し側の `Allocator` 上で動作する永続的な Rin 実行環境。
+/// 読み込み段階の Rin 環境。
 ///
-/// トップレベル定義（`def` / `defn`）は `eval` 呼び出しをまたいで保持され、
-/// 評価中に作られた一時値は参照カウントとフリーリストで即座に再利用する。
+/// `bind`・`load_module`・`eval` で大域環境とモジュールを構築し、
+/// [`Builder::freeze`] で実行専用の [`Machine`] へ移行する。
+pub struct Builder<'a> {
+    inner: EnvState<'a>,
+}
+
+/// 凍結された実行段階の Rin 環境。
+///
+/// 大域環境と読み込み済みモジュールを変更せず、各評価は互いに独立して実行される。
+/// 読み込み済みのすべてのモジュールは `import` なしで `mod_name.symbol` として参照できる。
 pub struct Machine<'a> {
+    inner: EnvState<'a>,
+}
+
+pub(super) struct EnvState<'a> {
     limits: Limits,
     math_fma: MathFma,
     pool: Pool<'a>,
@@ -75,6 +92,50 @@ fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
     slots[idx].replace(val)
 }
 
+/// 凍結後の実行段階で禁止された宣言・モジュール操作が含まれていないか、
+/// 明示的スタックで評価前に AST 全体を検査する（`[env.frozen]`）。
+fn validate_frozen_ast(exprs: &[Expr]) -> Result<(), Error> {
+    let mut stack: Vec<&Expr> = exprs.iter().rev().collect();
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExprKind::Def { .. } => {
+                return Err(Error::parse(
+                    "env.frozen",
+                    expr.span,
+                    "'def' is not allowed in a frozen environment",
+                ));
+            }
+            ExprKind::Defn { .. } => {
+                return Err(Error::parse(
+                    "env.frozen",
+                    expr.span,
+                    "'defn' is not allowed in a frozen environment",
+                ));
+            }
+            ExprKind::Import { .. } => {
+                return Err(Error::parse(
+                    "env.frozen",
+                    expr.span,
+                    "'import' is not allowed in a frozen environment",
+                ));
+            }
+            ExprKind::Export { .. } => {
+                return Err(Error::parse(
+                    "env.frozen",
+                    expr.span,
+                    "'export' is not allowed in a frozen environment",
+                ));
+            }
+            _ => {
+                let start = stack.len();
+                children(expr, &mut stack);
+                stack[start..].reverse();
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum CallOrigin<'a> {
     Rin(Span),
@@ -87,6 +148,9 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) math_fma: MathFma,
     pub(super) steps_left: usize,
     pub(super) depth: usize,
+    pub(super) frozen: bool,
+    pub(super) eval_bindings: BTreeMap<u32, RVal>,
+    pub(super) eval_binding_names: Vec<String>,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,
     pub(super) globals: &'a mut Vec<Option<RVal>>,

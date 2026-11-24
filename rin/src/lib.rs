@@ -20,7 +20,7 @@ mod work;
 
 pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
 pub use error::{Error, ErrorKind, Limits, Span, StackFrame};
-pub use eval::{Machine, eval_with, eval_with_allocator};
+pub use eval::{Builder, Machine, eval_with, eval_with_allocator};
 pub use math::MathFma;
 pub use schema::Schema;
 pub use value::Value;

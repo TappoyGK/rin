@@ -1,4 +1,4 @@
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 
 #[test]
 fn every_limit_releases_temporaries_and_preserves_bound_values() {
@@ -21,7 +21,7 @@ fn every_limit_releases_temporaries_and_preserves_bound_values() {
         let expected = rin::eval_with(source, &[("xs", xs.clone())], Limits::default()).unwrap();
         for steps in 0..=100 {
             let mut alloc = HeapAllocator;
-            let mut m = Machine::new(
+            let mut m = Builder::new(
                 Limits {
                     steps,
                     ..Limits::default()
@@ -93,7 +93,7 @@ fn with_charges_original_fields_before_copying() {
             let expected = Value::structure("S", expected);
             for steps in 0..=cost {
                 let mut alloc = HeapAllocator;
-                let mut m = Machine::new(
+                let mut m = Builder::new(
                     Limits {
                         steps,
                         ..Limits::default()
