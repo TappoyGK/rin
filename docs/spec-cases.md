@@ -9,7 +9,7 @@
 | 字句 | [lex.md](spec-cases/lex.md) | `lex` | 6 |
 | 式と構文 | [expr.md](spec-cases/expr.md) | `expr` | 9 |
 | リストと配列 | [list.md](spec-cases/list.md) | `list` | 6 |
-| 演算・制限・エラー | [eval.md](spec-cases/eval.md) | `eval` | 17 |
+| 演算・制限・エラー | [eval.md](spec-cases/eval.md) | `eval` | 18 |
 
 ## 書式
 

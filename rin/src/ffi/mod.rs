@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 use crate::alloc::{Allocator, HeapAllocator};
 use crate::error::{Error, Limits};
 use crate::eval::Machine;
+use crate::math::MathFma;
 use crate::value::Value;
 
 mod error;
@@ -36,6 +37,13 @@ pub enum RinTag {
     Ok = 13,
     Err = 14,
     Fn = 15,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RinMathFma {
+    Strict = 0,
+    Fused = 1,
 }
 
 #[repr(C)]
@@ -164,6 +172,44 @@ pub unsafe extern "C" fn rin_free(machine: *mut RinMachine) {
     if !machine.is_null() {
         // SAFETY: `machine` は `Box::into_raw` で生成したポインタ。
         unsafe { drop(Box::from_raw(machine)) };
+    }
+}
+
+/// 組み込み数学関数の FMA 設定を変更する。
+///
+/// # Safety
+/// `machine` は NULL または排他的に利用できる有効なポインタでなければならない。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_set_math_fma(machine: *mut RinMachine, mode: i32) -> bool {
+    // SAFETY: 呼び出し側が machine の有効性と排他的アクセスを保証する。
+    let Some(m) = (unsafe { begin_operation(machine) }) else {
+        return false;
+    };
+    let parsed = match mode {
+        0 => MathFma::Strict,
+        1 => MathFma::Fused,
+        _ => {
+            host_error(m, "invalid math fma mode");
+            return false;
+        }
+    };
+    m.machine.set_math_fma(parsed);
+    true
+}
+
+/// 現在の組み込み数学関数の FMA 設定を返す。`machine` が NULL なら `Strict` を返す。
+///
+/// # Safety
+/// `machine` は NULL または有効なポインタでなければならない。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_math_fma(machine: *const RinMachine) -> RinMathFma {
+    // SAFETY: 呼び出し側が NULL または有効なポインタを保証する。
+    let Some(m) = (unsafe { machine.as_ref() }) else {
+        return RinMathFma::Strict;
+    };
+    match m.machine.math_fma() {
+        MathFma::Strict => RinMathFma::Strict,
+        MathFma::Fused => RinMathFma::Fused,
     }
 }
 

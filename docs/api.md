@@ -37,12 +37,15 @@ impl<'a> Machine<'a> {
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error>
     pub fn call_in(&mut self, mod_name: &str, fn_name: &str, args: &[Value]) -> Result<Value, Error>
+    pub fn set_math_fma(&mut self, mode: MathFma)
+    pub fn math_fma(&self) -> MathFma
     pub fn live_bytes(&self) -> usize
 }
 ```
 
 - `bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
 - `eval`：ソースを評価し、結果を独立した `Value` として返す。評価中に生成された一時オブジェクトは内部の参照カウントとフリーリストによって回収・再利用される。
+- `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
 - `live_bytes`：現在内部プール上で生存しているオブジェクトの概算バイト数を返す。
 
 ### 1.3 カスタムアロケータ `Allocator`
@@ -219,6 +222,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 
 - `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_STR`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`
 - `RinLimits`：`{ size_t steps; size_t depth; size_t memory_bytes; }`
+- `RinMathFma`：`RIN_MATH_FMA_STRICT = 0`, `RIN_MATH_FMA_FUSED = 1`
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
   - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
 - `RinMachine` / `RinValue`：不透明ハンドル型。
@@ -231,6 +235,8 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
 | `RinMachine *rin_new(RinLimits limits, RinAllocator alloc)` | マシンを生成する |
 | `void rin_free(RinMachine *machine)` | マシンを破棄し内部プールを解放する（`NULL` 可） |
+| `bool rin_set_math_fma(RinMachine *machine, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
+| `RinMathFma rin_math_fma(const RinMachine *machine)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
 | `bool rin_bind(RinMachine *machine, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない） |
 | `RinEvalResult rin_eval(RinMachine *machine, const char *source)` | ソースを評価し結果を返す |
 | `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む |

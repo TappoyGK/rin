@@ -109,8 +109,34 @@ fn snapshot() -> String {
     // NaNの符号・ペイロードは保証対象外。表示はNaNとして比較する。
     let numeric = "[(+ 0.1 0.2), -0.0, (/ 1.0 0.0), (/ 0.0 0.0), (sqrt 4.0), (floor 1.5), (ceil -1.5), (abs -2.0)]";
     record(&mut out, "numeric", numeric, eval(numeric));
+    trig_modes(&mut out);
     stateful(&mut out);
     out
+}
+
+fn trig_modes(out: &mut String) {
+    let source = "[(sin 0.0), (sin -0.0), (cos 0.0), (sin 0.5), (cos 0.5), (sin (/ pi 6.0)), (cos (/ pi 4.0)), (sin (/ pi 2.0)), (cos pi), (sin 100.0), (cos 100.0), (sin 1.0e20), (cos 1.0e20), (sin 1.0e300), (cos 1.0e300), (sin inf), (cos nan)]";
+    for (label, mode) in [
+        ("trig-strict", rin::MathFma::Strict),
+        ("trig-fused", rin::MathFma::Fused),
+    ] {
+        let mut alloc = HeapAllocator;
+        let mut machine = Machine::new(Limits::default(), &mut alloc);
+        machine.set_math_fma(mode);
+        let result = machine.eval(source);
+        if let Ok(Value::List(list)) = &result {
+            let bits: Vec<String> = list
+                .iter()
+                .map(|v| match v {
+                    Value::Float(x) if x.is_nan() => "NaN".to_string(),
+                    Value::Float(x) => format!("0x{:016x}", x.to_bits()),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            writeln!(out, "{label}-bits: [{}]", bits.join(", ")).unwrap();
+        }
+        record(out, label, source, result);
+    }
 }
 
 fn stateful(out: &mut String) {

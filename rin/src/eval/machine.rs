@@ -13,6 +13,7 @@ impl<'a> Machine<'a> {
         set_slot(&mut globals, pi_id, RVal::Float(std::f64::consts::PI));
         Self {
             limits,
+            math_fma: MathFma::default(),
             pool: Pool::new(alloc, limits.memory_bytes),
             syms,
             globals,
@@ -35,6 +36,16 @@ impl<'a> Machine<'a> {
 
     pub fn live_bytes(&self) -> usize {
         self.pool.live_bytes()
+    }
+
+    /// 組み込み数学関数で積和融合（FMA）を使うかを設定する。既定は [`MathFma::Strict`]。
+    pub fn set_math_fma(&mut self, mode: MathFma) {
+        self.math_fma = mode;
+    }
+
+    /// 現在の組み込み数学関数の FMA 設定を返す。
+    pub fn math_fma(&self) -> MathFma {
+        self.math_fma
     }
 
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
@@ -134,6 +145,7 @@ impl<'a> Machine<'a> {
     pub(super) fn runner(&mut self, active_module: Option<u32>) -> Runner<'_, 'a> {
         Runner {
             limits: self.limits,
+            math_fma: self.math_fma,
             steps_left: self.limits.steps,
             depth: 0,
             pool: &mut self.pool,

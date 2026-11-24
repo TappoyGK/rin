@@ -9,6 +9,7 @@
 | [API 仕様](api.md) | Rust API および C FFI API の仕様 |
 | [フォーマッタ仕様](fmt.md) | 整形規則・CLI・ASTの保存 |
 | [テストツール仕様](testing.md) | テスト実行・CLI・JSON出力 |
+| [数学関数の決定的な計算手順](math-spec.md) | `sin`・`cos` の手順・定数・テスト値（Suz との共有正本） |
 | [仕様例集](spec-cases.md) | 言語仕様の具体例と期待結果 |
 
 ## 開発

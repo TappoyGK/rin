@@ -34,6 +34,11 @@ typedef struct RinLimits {
     size_t memory_bytes;
 } RinLimits;
 
+typedef enum RinMathFma {
+    RIN_MATH_FMA_STRICT = 0,
+    RIN_MATH_FMA_FUSED = 1
+} RinMathFma;
+
 typedef struct RinAllocator {
     void *ctx;
     uint8_t *(*alloc)(void *ctx, size_t size, size_t align);
@@ -74,6 +79,8 @@ typedef struct RinEvalResult {
 RinLimits rin_limits_default(void);
 RinMachine *rin_new(RinLimits limits, RinAllocator alloc);
 void rin_free(RinMachine *machine);
+bool rin_set_math_fma(RinMachine *machine, RinMathFma mode);
+RinMathFma rin_math_fma(const RinMachine *machine);
 bool rin_bind(RinMachine *machine, const char *name, const RinValue *val);
 RinEvalResult rin_eval(RinMachine *machine, const char *source);
 RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source);
