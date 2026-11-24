@@ -447,8 +447,8 @@ impl Runner<'_, '_> {
             ));
         };
         let res = match b {
-            BuiltinId::Sin => x.sin(),
-            BuiltinId::Cos => x.cos(),
+            BuiltinId::Sin => crate::math::sin(*x, self.math_fma),
+            BuiltinId::Cos => crate::math::cos(*x, self.math_fma),
             BuiltinId::Sqrt => x.sqrt(),
             BuiltinId::Floor => x.floor(),
             BuiltinId::Ceil => x.ceil(),

@@ -15,6 +15,7 @@ use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
 use crate::compiler::{compile_program, compile_program_parts};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, ErrorKind, Limits, Span};
+use crate::math::MathFma;
 use crate::parser::{ParseScratch, ParseScratchGuard};
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
@@ -45,6 +46,7 @@ pub fn eval_with_allocator(
 /// 評価中に作られた一時値は参照カウントとフリーリストで即座に再利用する。
 pub struct Machine<'a> {
     limits: Limits,
+    math_fma: MathFma,
     pool: Pool<'a>,
     syms: SymTable,
     globals: Vec<Option<RVal>>,
@@ -82,6 +84,7 @@ pub(super) enum CallOrigin<'a> {
 
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
+    pub(super) math_fma: MathFma,
     pub(super) steps_left: usize,
     pub(super) depth: usize,
     pub(super) pool: &'a mut Pool<'p>,

@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- `sin`・`cos` を環境によらずビット一致する自前の実装に置き換え、`[eval.determinism]` の例外を廃止した。`MathFma`（`Strict` / `Fused`、既定は `Strict`）設定と、Suz と共有する手順書（`docs/math-spec.md`）およびテスト値（`docs/math-vectors/sin-cos.tsv`）を追加した（[PR #62](https://github.com/TappoyGK/rin/pull/62)）。
+
 - 組み込み関数の走査・比較・生成と、`with` による構造体の複製を、要素数・文字列長・フィールド数に応じてステップ数へ計上するようにした。同じ `steps` 上限でも、従来より早く `TooManySteps` になる場合がある。関数ごとの計上式に加え、ステップに数えないコンパイル・解放・診断の処理量と制御方法を仕様に定めた（[PR #58](https://github.com/TappoyGK/rin/pull/58)）。
 
 - 同じ入力に対して値・エラー・表示順が一致する条件を、決定性の規則として明文化した。`sin`・`cos`、NaNのビット表現、実際のメモリ確保失敗、ネイティブスタックの保証範囲も定めた（[PR #57](https://github.com/TappoyGK/rin/pull/57)）。

@@ -10,6 +10,7 @@ mod eval;
 pub mod ffi;
 pub mod fmt;
 mod lexer;
+pub mod math;
 mod parser;
 mod pool;
 pub mod schema;
@@ -20,6 +21,7 @@ mod work;
 pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
 pub use error::{Error, ErrorKind, Limits, Span, StackFrame};
 pub use eval::{Machine, eval_with, eval_with_allocator};
+pub use math::MathFma;
 pub use schema::Schema;
 pub use value::Value;
 
