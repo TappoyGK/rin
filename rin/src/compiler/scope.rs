@@ -1,15 +1,26 @@
 //! 束縛・キャプチャの解決と名前診断の記録。
 use super::*;
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
+
+// 少数の束縛では確保を避ける。線形走査は常にこの定数以内に限る。
+const INLINE_NAMES: usize = 8;
 
 pub(super) struct Scope<'a> {
     pub(super) module: Option<u32>,
     // AST の名前を借用し、診断に必要になった束縛だけノードの添字 + 1 を記録する。
     // NonZero により未記録状態も 1 ワードに収める。
-    pub(super) locals: Vec<(&'a str, u32, Option<NonZeroUsize>)>,
+    pub(super) locals: Vec<(&'a str, u32, Option<NonZeroUsize>, Option<NonZeroU32>)>,
+    // Scope自体を小さく保ち、小さい関数のコンパイルで表の管理領域を持ち回らない。
+    // Boxの確保は固定個数を超えたスコープだけで行う。
+    #[allow(clippy::box_collection)]
+    local_names: Option<Box<BTreeMap<&'a str, usize>>>,
+    #[allow(clippy::box_collection)]
+    capture_names: Option<Box<BTreeMap<Rc<str>, u32>>>,
     pub(super) outer_local_count: usize,
     pub(super) next_slot: u32,
     pub(super) max_slots: u32,
-    pub(super) captures: Vec<(String, Capture)>,
+    pub(super) captures: Vec<(Rc<str>, Capture)>,
     // 未発行の Tick が参照する範囲の開始位置。位置情報は最終格納先へ直接書く。
     pub(super) pending_tick_start: usize,
     pub(super) chunk: Chunk,
@@ -20,6 +31,8 @@ impl<'a> Scope<'a> {
         Self {
             module,
             locals: Vec::new(),
+            local_names: None,
+            capture_names: None,
             outer_local_count: 0,
             next_slot: 0,
             max_slots: 0,
@@ -38,25 +51,77 @@ impl<'a> Scope<'a> {
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
-        self.locals.push((name, slot, None));
+        let index = self.locals.len();
+        let previous = if let Some(names) = &mut self.local_names {
+            names.insert(name, index)
+        } else {
+            self.locals.iter().rposition(|(n, _, _, _)| *n == name)
+        };
+        // 局所スロット数はu32以内。添字+1を使い、未記録を含め4バイトに収める。
+        let previous = previous.and_then(|i| NonZeroU32::new(i as u32 + 1));
+        self.locals.push((name, slot, None, previous));
+        if self.local_names.is_none() && self.locals.len() > INLINE_NAMES {
+            let mut names = BTreeMap::new();
+            for (i, (name, _, _, _)) in self.locals.iter().enumerate() {
+                names.insert(*name, i);
+            }
+            self.local_names = Some(Box::new(names));
+        }
         Ok(slot)
     }
 
+    pub(super) fn truncate_locals(&mut self, len: usize) {
+        while self.locals.len() > len {
+            let (name, _, _, previous) = self.locals.pop().unwrap();
+            if let Some(names) = &mut self.local_names {
+                if let Some(previous) = previous {
+                    names.insert(name, previous.get() as usize - 1);
+                } else {
+                    names.remove(name);
+                }
+            }
+        }
+    }
+
     fn find_local(&self, name: &str) -> Option<u32> {
-        self.locals
-            .iter()
-            .rev()
-            .find(|(n, _, _)| *n == name)
-            .map(|(_, slot, _)| *slot)
+        if let Some(names) = &self.local_names {
+            names.get(name).map(|&i| self.locals[i].1)
+        } else {
+            self.locals
+                .iter()
+                .rev()
+                .find(|(n, _, _, _)| *n == name)
+                .map(|(_, slot, _, _)| *slot)
+        }
     }
 
     fn find_or_add_capture(&mut self, name: &str, cap: Capture, span: Span) -> Result<u32, Error> {
-        if let Some(pos) = self.captures.iter().position(|(n, _)| n == name) {
-            return Ok(pos as u32);
+        let found = if let Some(names) = &self.capture_names {
+            names.get(name).copied()
+        } else {
+            self.captures
+                .iter()
+                .position(|(n, _)| n.as_ref() == name)
+                .map(|i| i as u32)
+        };
+        if let Some(index) = found {
+            return Ok(index);
         }
         let idx = u32::try_from(self.captures.len())
             .map_err(|_| Error::parse("compile.capacity", span, "too many captured variables"))?;
-        self.captures.push((name.to_string(), cap));
+        let name: Rc<str> = Rc::from(name);
+        self.captures.push((Rc::clone(&name), cap));
+        if let Some(names) = &mut self.capture_names {
+            names.insert(name, idx);
+        } else if self.captures.len() > INLINE_NAMES {
+            self.capture_names = Some(Box::new(
+                self.captures
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, _))| (Rc::clone(name), i as u32))
+                    .collect(),
+            ));
+        }
         Ok(idx)
     }
 }
@@ -75,7 +140,7 @@ impl<'a> Compiler<'a> {
         let mut pending_from = None;
         let mut head = None;
         'scopes: for (scope_index, scope) in self.scopes.iter().enumerate().rev() {
-            for (local_index, (_, _, saved)) in scope.locals.iter().enumerate().rev() {
+            for (local_index, (_, _, saved, _)) in scope.locals.iter().enumerate().rev() {
                 if let Some(saved) = saved {
                     head = Some(saved.get() - 1);
                     break 'scopes;
@@ -86,7 +151,7 @@ impl<'a> Compiler<'a> {
         if let Some((first_scope, first_local)) = pending_from {
             for (index, scope) in self.scopes.iter_mut().enumerate().skip(first_scope) {
                 let start = if index == first_scope { first_local } else { 0 };
-                for (name, _, saved) in &mut scope.locals[start..] {
+                for (name, _, saved, _) in &mut scope.locals[start..] {
                     debug_assert!(saved.is_none());
                     let table = &mut self.name_table;
                     let index = table.nodes.len();

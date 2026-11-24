@@ -8,14 +8,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::Find;
 
         let [f, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'find' takes 2 arguments (fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'find' takes 2 arguments (fn, list)");
         };
         self.expect_list("find", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         for x in items {
             let res = self.apply(
                 *f,
@@ -52,14 +50,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::Any;
 
         let [f, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'any' takes 2 arguments (fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'any' takes 2 arguments (fn, list)");
         };
         self.expect_list("any", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         for x in items {
             let res = self.apply(
                 *f,
@@ -93,14 +89,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::All;
 
         let [f, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'all' takes 2 arguments (fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'all' takes 2 arguments (fn, list)");
         };
         self.expect_list("all", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         for x in items {
             let res = self.apply(
                 *f,
@@ -134,14 +128,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::Map;
 
         let [f, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'map' takes 2 arguments (fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'map' takes 2 arguments (fn, list)");
         };
         self.expect_list("map", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         let mut out = Vec::with_capacity(items.len());
         for x in items {
             match self.apply(
@@ -169,14 +161,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::Filter;
 
         let [f, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'filter' takes 2 arguments (fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'filter' takes 2 arguments (fn, list)");
         };
         self.expect_list("filter", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         let mut out = Vec::new();
         for x in items {
             let res = match self.apply(
@@ -221,14 +211,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::FlatMap;
 
         let [f, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'flat_map' takes 2 arguments (fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'flat_map' takes 2 arguments (fn, list)");
         };
         self.expect_list("flat_map", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         let mut out = Vec::new();
         for x in items {
             let mapped = match self.apply(
@@ -251,7 +239,15 @@ impl Runner<'_, '_> {
                 self.release_all(out);
                 return Err(e);
             }
-            for sub in self.list_to_vec(mapped) {
+            let subs = match self.list_to_vec(mapped) {
+                Some(subs) => subs,
+                None => {
+                    self.pool.release_val(mapped);
+                    self.release_all(out);
+                    return self.step_limit_result(span);
+                }
+            };
+            for sub in subs {
                 self.pool.retain_val(sub);
                 out.push(sub);
             }
@@ -266,14 +262,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::Fold;
 
         let [f, init, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'fold' takes 3 arguments (fn, init, list)",
-            ));
+            return Self::callback_arity_error(span, "'fold' takes 3 arguments (fn, init, list)");
         };
         self.expect_list("fold", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         let mut acc = *init;
         self.pool.retain_val(acc);
         for x in items {
@@ -305,14 +299,12 @@ impl Runner<'_, '_> {
         let b = BuiltinId::SortBy;
 
         let [key_fn, list_v] = args else {
-            return Err(Error::runtime(
-                "fn.list",
-                span,
-                "'sort_by' takes 2 arguments (key_fn, list)",
-            ));
+            return Self::callback_arity_error(span, "'sort_by' takes 2 arguments (key_fn, list)");
         };
         self.expect_list("sort_by", *list_v, span)?;
-        let items = self.list_to_vec(*list_v);
+        let Some(items) = self.list_to_vec(*list_v) else {
+            return self.step_limit_result(span);
+        };
         let mut keyed = Vec::with_capacity(items.len());
         for x in items {
             match self.apply(
@@ -333,6 +325,12 @@ impl Runner<'_, '_> {
                 }
             }
         }
+        if !self.charge_sort(keyed.iter().map(|(k, _)| *k), keyed.len()) {
+            for (k, _) in keyed {
+                self.pool.release_val(k);
+            }
+            return self.step_limit_result(span);
+        }
         let mut sort_err = None;
         keyed.sort_by(|(ka, _), (kb, _)| match self.compare_vals(*ka, *kb, span) {
             Ok(ord) => ord,
@@ -351,5 +349,14 @@ impl Runner<'_, '_> {
             return Err(e);
         }
         self.build_list_from_borrowed(&sorted, span)
+    }
+}
+
+impl Runner<'_, '_> {
+    // 再帰中に残る高階関数のフレームから、引数エラーの整形を外す。
+    #[cold]
+    #[inline(never)]
+    fn callback_arity_error(span: Span, message: &'static str) -> Result<RVal, Error> {
+        Err(Error::runtime("fn.list", span, message))
     }
 }

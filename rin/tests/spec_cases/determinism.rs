@@ -46,6 +46,13 @@ fn snapshot() -> String {
         "(defn inner (x) (/ x 0)) (defn outer (x) (+ 1 (inner x))) (outer 5)",
         "(sort_by (fn (x) (- 0 x)) [1 4 2 3])",
         "(let (answer 1) anwser)",
+        "(reverse [1 2 3])",
+        "(with S { a: [1] b: 2 } { a: [3] })",
+        "(unique [1 2 1 3 2])",
+        r#"(sort ["あいう" "あいあ" "a"])"#,
+        "(flat_map (fn (x) (range 0 x)) [1 2 3])",
+        "(== LongName { field: [1 2] } LongName { field: [1 2] })",
+        "(== [some([1 2]) 3] [some([1 2]) 4])",
         &nested,
     ];
     for (index, source) in programs.iter().enumerate() {

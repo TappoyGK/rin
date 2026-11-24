@@ -1,7 +1,7 @@
 //! バイトコード VM の命令列、定数チャンク、関数プロトタイプ、シンボルテーブルを定義する。
 
-use std::cell::OnceCell;
-use std::collections::HashMap;
+use std::cell::{Cell, OnceCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::ast::Pattern;
@@ -184,22 +184,45 @@ impl BuiltinId {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SymTable {
     pub names: Vec<Rc<str>>,
-    ids: HashMap<String, u32>,
+    ids: BTreeMap<Rc<str>, u32>,
+    // 頻出する名前の再参照では木を引かない。検査数は常に4以下。
+    recent: [Option<u32>; 4],
+    lookup: Cell<Option<u32>>,
 }
 
 impl SymTable {
     pub fn intern(&mut self, name: &str) -> u32 {
-        if let Some(&id) = self.ids.get(name) {
-            return id;
+        for index in 0..self.recent.len() {
+            if let Some(id) = self.recent[index]
+                && self.names[id as usize].as_ref() == name
+            {
+                self.recent.swap(0, index);
+                return id;
+            }
         }
-        let id = self.names.len() as u32;
-        self.names.push(Rc::from(name));
-        self.ids.insert(name.to_string(), id);
+        let id = match self.ids.entry(Rc::from(name)) {
+            std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let id = self.names.len() as u32;
+                self.names.push(Rc::clone(entry.key()));
+                entry.insert(id);
+                id
+            }
+        };
+        self.recent.rotate_right(1);
+        self.recent[0] = Some(id);
         id
     }
 
     pub fn get(&self, name: &str) -> Option<u32> {
-        self.ids.get(name).copied()
+        if let Some(id) = self.lookup.get()
+            && self.names[id as usize].as_ref() == name
+        {
+            return Some(id);
+        }
+        let id = self.ids.get(name).copied();
+        self.lookup.set(id);
+        id
     }
 }
 
@@ -279,7 +302,7 @@ pub(crate) struct Chunk {
     pub spans: Vec<Span>,
     pub tick_spans: Vec<Span>,
     pub strings: Vec<Rc<str>>,
-    string_map: Option<HashMap<Rc<str>, u32>>,
+    string_map: Option<BTreeMap<Rc<str>, u32>>,
     pub floats: Vec<f64>,
     pub structs: Vec<StructDesc>,
     pub patterns: Vec<Pattern>,
@@ -333,7 +356,7 @@ impl Chunk {
         if let Some(map) = &mut self.string_map {
             map.insert(rc, idx);
         } else if self.strings.len() > 16 {
-            let mut map = HashMap::with_capacity(self.strings.len() * 2);
+            let mut map = BTreeMap::new();
             for (i, st) in self.strings.iter().enumerate() {
                 map.insert(Rc::clone(st), i as u32);
             }

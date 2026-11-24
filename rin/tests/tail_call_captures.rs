@@ -132,7 +132,11 @@ fn tail_call_errors_release_captures() {
             let mut alloc = HeapAllocator;
             let mut machine = Machine::new(
                 Limits {
-                    steps: 2000,
+                    steps: if kind == ErrorKind::TooMuchMemory {
+                        200_000
+                    } else {
+                        2000
+                    },
                     memory_bytes: 64 * 1024,
                     ..Limits::default()
                 },

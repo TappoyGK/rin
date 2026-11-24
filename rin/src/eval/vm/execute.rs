@@ -197,6 +197,12 @@ impl Runner<'_, '_> {
                         let Obj::Struct { name, fields } = self.pool.get(id) else {
                             unreachable!();
                         };
+                        if !super::super::runner::try_charge_steps(
+                            &mut self.steps_left,
+                            fields.len(),
+                        ) {
+                            return self.step_limit_result(span);
+                        }
                         let name = name.clone();
                         let mut updated = fields.clone();
                         for &v in updated.values() {
@@ -368,12 +374,13 @@ impl Runner<'_, '_> {
                                 ),
                             ))
                         } else {
-                            match self.list_get(list_val, idx as usize) {
-                                Some(v) => {
+                            match self.list_get(list_val, idx as usize, span) {
+                                Err(e) => Err(e),
+                                Ok(Some(v)) => {
                                     self.pool.retain_val(v);
                                     Ok(v)
                                 }
-                                None => Err(Error::runtime(
+                                Ok(None) => Err(Error::runtime(
                                     "expr.index",
                                     span,
                                     format!(

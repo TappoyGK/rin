@@ -38,6 +38,9 @@ impl Runner<'_, '_> {
         args: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
+        if !self.try_charge(1) {
+            return self.step_limit_result(span);
+        }
         #[cfg(not(debug_assertions))]
         return self.apply_builtin(b, args, span);
         #[cfg(debug_assertions)]
@@ -72,6 +75,9 @@ impl Runner<'_, '_> {
                     ));
                 }
                 for v in args {
+                    if !self.try_charge(1) {
+                        return self.step_limit_result(span);
+                    }
                     match v {
                         RVal::Bool(true) => {}
                         RVal::Bool(false) => return Ok(RVal::Bool(false)),
@@ -95,6 +101,9 @@ impl Runner<'_, '_> {
                     ));
                 }
                 for v in args {
+                    if !self.try_charge(1) {
+                        return self.step_limit_result(span);
+                    }
                     match v {
                         RVal::Bool(true) => return Ok(RVal::Bool(true)),
                         RVal::Bool(false) => {}

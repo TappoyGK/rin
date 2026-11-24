@@ -41,6 +41,7 @@ fn deep_roundtrips() {
     let mut alloc = HeapAllocator;
     let mut m = Machine::new(
         Limits {
+            steps: 1_000_000, // 深い構造体の名前・フィールド比較も計上する。
             memory_bytes: 128 * 1024 * 1024,
             ..Limits::default()
         },

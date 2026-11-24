@@ -4,25 +4,31 @@ use super::*;
 impl<'a, 'p> Runner<'a, 'p> {
     #[inline(always)]
     pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
-        let next = self.steps + count as usize;
-        if next > self.limits.steps {
-            let over = self.limits.steps.saturating_sub(self.steps);
-            let span = chunk.tick_spans[start as usize + over];
-            self.steps = next;
-            return Err(self.step_limit_err(span));
+        let remaining = self.steps_left;
+        if count as usize > remaining {
+            let span = chunk.tick_spans[start as usize + remaining];
+            return self.step_limit_result(span);
         }
-        self.steps = next;
+        self.steps_left -= count as usize;
         Ok(())
+    }
+
+    #[cfg_attr(debug_assertions, inline(never))]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub(super) fn try_charge(&mut self, amount: usize) -> bool {
+        try_charge_steps(&mut self.steps_left, amount)
     }
 
     #[cold]
     pub(super) fn step_limit_err(&self, span: Span) -> Error {
-        Error::new(
-            "eval.limits",
-            ErrorKind::TooManySteps,
-            span,
-            format!("step limit exceeded ({})", self.limits.steps),
-        )
+        step_limit_error(self.limits.steps, span)
+    }
+
+    // 大きな Error の一時値を呼び出し側の通常フレームへ置かない。
+    #[cold]
+    #[inline(never)]
+    pub(super) fn step_limit_result<T>(&self, span: Span) -> Result<T, Error> {
+        Err(step_limit_error(self.limits.steps, span))
     }
 
     pub(super) fn enter_depth(&mut self, span: Span) -> Result<(), Error> {
@@ -268,4 +274,25 @@ impl<'a, 'p> Runner<'a, 'p> {
             )),
         }
     }
+}
+
+// 残量を先に検査してから減算する。usize::MAX でも桁あふれしない。
+#[inline(always)]
+pub(super) fn try_charge_steps(remaining: &mut usize, amount: usize) -> bool {
+    if amount > *remaining {
+        return false;
+    }
+    *remaining -= amount;
+    true
+}
+
+#[cold]
+#[inline(never)]
+fn step_limit_error(limit: usize, span: Span) -> Error {
+    Error::new(
+        "eval.limits",
+        ErrorKind::TooManySteps,
+        span,
+        format!("step limit exceeded ({limit})"),
+    )
 }
