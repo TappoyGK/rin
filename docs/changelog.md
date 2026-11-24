@@ -4,7 +4,7 @@
 
 ## 未リリース
 
-- **破壊的変更**: 大域環境の凍結（読み込みの段階と実行の段階の分離）を導入した。Rust API では `Machine::new`・`bind`・`load_module` を `Builder` へ移し、`Builder::freeze()` で実行専用の `Machine`（`eval`・`eval_with`・`call`・`call_in`）へ移行する形とした。C FFI には `rin_freeze` を追加した。凍結後は `def`・`defn`・`import`・`export` を評価前に `[env.frozen]` の構文エラーとし、読み込み済みモジュールを `import` なしで `mod_name.symbol` として参照できる（移行手順：`Machine::new` → `Builder::new`、読み込み完了後に `.freeze()?` で `Machine` を取得する）。
+- **破壊的変更**: 大域環境の凍結（読み込みの段階と実行の段階の分離）を導入した。Rust API では `Machine::new`・`bind`・`load_module` を `Builder` へ移し、`Builder::freeze()` で実行専用の `Machine`（`eval`・`eval_with`・`call`・`call_in`）へ移行する形とした。C FFI には `rin_freeze` を追加した。凍結後は `def`・`defn`・`import`・`export` を評価前に `[env.frozen]` の構文エラーとし、読み込み済みモジュールを `import` なしで `mod_name.symbol` として参照できる（移行手順：`Machine::new` → `Builder::new`、読み込み完了後に `.freeze()?` で `Machine` を取得する）（[PR #63](https://github.com/TappoyGK/rin/pull/63)）。
 
 - `sin`・`cos` を環境によらずビット一致する自前の実装に置き換え、`[eval.determinism]` の例外を廃止した。`MathFma`（`Strict` / `Fused`、既定は `Strict`）設定と、Suz と共有する手順書（`docs/math-spec.md`）およびテスト値（`docs/math-vectors/sin-cos.tsv`）を追加した（[PR #62](https://github.com/TappoyGK/rin/pull/62)）。
 
