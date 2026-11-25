@@ -67,7 +67,6 @@ pub(super) struct EnvState<'a> {
     syms: SymTable,
     globals: Vec<Option<RVal>>,
     modules: BTreeMap<String, RVal>,
-    frozen_modules: Vec<Option<RVal>>,
     module_ids: BTreeMap<String, u32>,
     module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
@@ -101,8 +100,74 @@ pub(super) enum CallOrigin<'a> {
 
 pub(super) const INLINE_EVAL_BINDINGS: usize = 8;
 
+pub(super) enum EvalBindingValues {
+    Inline {
+        entries: [(u32, RVal); INLINE_EVAL_BINDINGS],
+        len: usize,
+    },
+    Map(BTreeMap<u32, RVal>),
+}
+
+impl EvalBindingValues {
+    pub(super) fn new(capacity_hint: usize) -> Self {
+        if capacity_hint <= INLINE_EVAL_BINDINGS {
+            Self::Inline {
+                entries: [(0, RVal::Void); INLINE_EVAL_BINDINGS],
+                len: 0,
+            }
+        } else {
+            Self::Map(BTreeMap::new())
+        }
+    }
+
+    pub(super) fn insert(&mut self, id: u32, val: RVal) -> Option<RVal> {
+        match self {
+            Self::Inline { entries, len } => {
+                for entry in &mut entries[..*len] {
+                    if entry.0 == id {
+                        return Some(std::mem::replace(&mut entry.1, val));
+                    }
+                }
+                entries[*len] = (id, val);
+                *len += 1;
+                None
+            }
+            Self::Map(map) => map.insert(id, val),
+        }
+    }
+
+    pub(super) fn get(&self, id: u32) -> Option<RVal> {
+        match self {
+            Self::Inline { entries, len } => {
+                for &(k, v) in &entries[..*len] {
+                    if k == id {
+                        return Some(v);
+                    }
+                }
+                None
+            }
+            Self::Map(map) => map.get(&id).copied(),
+        }
+    }
+
+    pub(super) fn release_all(self, pool: &mut Pool<'_>) {
+        match self {
+            Self::Inline { entries, len } => {
+                for &(_, v) in &entries[..len] {
+                    pool.release_val(v);
+                }
+            }
+            Self::Map(map) => {
+                for v in map.into_values() {
+                    pool.release_val(v);
+                }
+            }
+        }
+    }
+}
+
 pub(super) struct EvalBindings<'a> {
-    pub(super) entries: &'a [(u32, RVal)],
+    pub(super) values: EvalBindingValues,
     pub(super) raw: &'a [(&'a str, Value)],
 }
 
@@ -111,19 +176,18 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) math_fma: MathFma,
     pub(super) steps_left: usize,
     pub(super) depth: usize,
+    pub(super) frozen: bool,
+    pub(super) eval_bindings: Option<&'a EvalBindings<'a>>,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,
     pub(super) globals: &'a mut Vec<Option<RVal>>,
     pub(super) modules: &'a BTreeMap<String, RVal>,
-    pub(super) frozen_modules: &'a [Option<RVal>],
     pub(super) module_names: &'a [String],
     pub(super) module_envs: &'a mut Vec<Vec<Option<RVal>>>,
     pub(super) active_module: Option<u32>,
     pub(super) export_list: Option<Vec<String>>,
     pub(super) stack: Vec<RVal>,
     pub(super) check_failures: Vec<crate::test::CheckFailure>,
-    pub(super) frozen: bool,
-    pub(super) eval_bindings: Option<&'a EvalBindings<'a>>,
 }
 
 pub(super) enum FrameSource<'a> {

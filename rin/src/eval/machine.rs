@@ -40,14 +40,8 @@ impl<'a> Builder<'a> {
     }
 
     /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
-    pub fn freeze(mut self) -> Result<Machine<'a>, Error> {
+    pub fn freeze(self) -> Result<Machine<'a>, Error> {
         self.check_freeze()?;
-        // 凍結後のモジュール名参照を O(1) のスロット参照で行えるよう索引を作る。
-        // 値は `modules` が所有するため、ここでは参照カウントを増やさない。
-        for (name, &mod_val) in &self.inner.modules {
-            let id = self.inner.syms.intern(name);
-            set_slot(&mut self.inner.frozen_modules, id, mod_val);
-        }
         Ok(Machine { inner: self.inner })
     }
 
@@ -141,7 +135,6 @@ impl<'a> EnvState<'a> {
             syms,
             globals,
             modules: BTreeMap::new(),
-            frozen_modules: Vec::new(),
             module_ids: BTreeMap::new(),
             module_names: Vec::new(),
             module_envs: Vec::new(),
@@ -191,44 +184,18 @@ impl<'a> EnvState<'a> {
         }
 
         // 一時束縛を取り込み、失敗時は取り込み済みをすべて解放する。
-        // 少数の束縛はスタック配列に格納し、ヒープ確保を避ける。
-        let mut inline_entries = [(0u32, RVal::Void); INLINE_EVAL_BINDINGS];
-        let mut inline_len = 0usize;
-        let mut heap_entries = if bindings.len() > INLINE_EVAL_BINDINGS {
-            Vec::with_capacity(bindings.len())
-        } else {
-            Vec::new()
-        };
-        let use_inline = bindings.len() <= INLINE_EVAL_BINDINGS;
-
+        // 少数の束縛はスタック配列に格納し、多数は BTreeMap で O(log N) 参照を保つ。
+        let mut values = EvalBindingValues::new(bindings.len());
         for (name, value) in bindings {
             if let Some(id) = self.syms.get(name) {
                 match self.pool.import(value, Span::default()) {
                     Ok(rval) => {
-                        let entries: &mut [(u32, RVal)] = if use_inline {
-                            &mut inline_entries[..inline_len]
-                        } else {
-                            &mut heap_entries
-                        };
-                        if let Some(slot) = entries.iter_mut().find(|(k, _)| *k == id) {
-                            let prev = std::mem::replace(&mut slot.1, rval);
+                        if let Some(prev) = values.insert(id, rval) {
                             self.pool.release_val(prev);
-                        } else if use_inline {
-                            inline_entries[inline_len] = (id, rval);
-                            inline_len += 1;
-                        } else {
-                            heap_entries.push((id, rval));
                         }
                     }
                     Err(e) => {
-                        let entries: &[(u32, RVal)] = if use_inline {
-                            &inline_entries[..inline_len]
-                        } else {
-                            &heap_entries
-                        };
-                        for &(_, v) in entries {
-                            self.pool.release_val(v);
-                        }
+                        values.release_all(&mut self.pool);
                         return Err(e);
                     }
                 }
@@ -237,27 +204,15 @@ impl<'a> EnvState<'a> {
                 match self.pool.import(value, Span::default()) {
                     Ok(rval) => self.pool.release_val(rval),
                     Err(e) => {
-                        let entries: &[(u32, RVal)] = if use_inline {
-                            &inline_entries[..inline_len]
-                        } else {
-                            &heap_entries
-                        };
-                        for &(_, v) in entries {
-                            self.pool.release_val(v);
-                        }
+                        values.release_all(&mut self.pool);
                         return Err(e);
                     }
                 }
             }
         }
 
-        let entries: &[(u32, RVal)] = if use_inline {
-            &inline_entries[..inline_len]
-        } else {
-            &heap_entries
-        };
         let eval_bindings = EvalBindings {
-            entries,
+            values,
             raw: bindings,
         };
         let res = {
@@ -265,9 +220,7 @@ impl<'a> EnvState<'a> {
             runner.eval_bindings = Some(&eval_bindings);
             runner.run_top_chunk(&chunk)
         };
-        for &(_, v) in entries {
-            self.pool.release_val(v);
-        }
+        eval_bindings.values.release_all(&mut self.pool);
         let last = res?;
         let exported = self.pool.export(last);
         self.pool.release_val(last);
@@ -356,7 +309,6 @@ impl<'a> EnvState<'a> {
             syms: &self.syms,
             globals: &mut self.globals,
             modules: &self.modules,
-            frozen_modules: if frozen { &self.frozen_modules } else { &[] },
             module_names: &self.module_names,
             module_envs: &mut self.module_envs,
             active_module,

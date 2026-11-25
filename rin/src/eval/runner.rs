@@ -53,130 +53,42 @@ impl<'a, 'p> Runner<'a, 'p> {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    // exec_frame へ展開するとレジスタ退避が増えて末尾呼び出しループが遅くなるため分離する。
-    #[inline(never)]
-    pub(super) fn lookup_global(&mut self, id: u32) -> Option<RVal> {
+    pub(super) fn lookup_global(
+        &mut self,
+        id: u32,
+        span: Span,
+        chunk: &Chunk,
+        ip: usize,
+    ) -> Result<RVal, Error> {
         let idx = id as usize;
         if let Some(mod_id) = self.active_module {
             if let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied() {
                 self.pool.retain_val(v);
-                return Some(v);
+                return Ok(v);
             }
-        } else if let Some(bindings) = self.eval_bindings {
-            for &(k, v) in bindings.entries {
-                if k == id {
-                    self.pool.retain_val(v);
-                    return Some(v);
-                }
-            }
+        } else if let Some(bindings) = self.eval_bindings
+            && let Some(v) = bindings.values.get(id)
+        {
+            self.pool.retain_val(v);
+            return Ok(v);
         }
         if let Some(Some(v)) = self.globals.get(idx).copied() {
             self.pool.retain_val(v);
-            return Some(v);
+            return Ok(v);
         }
-        if self.active_module.is_none()
-            && let Some(Some(v)) = self.frozen_modules.get(idx).copied()
+        if self.frozen
+            && self.active_module.is_none()
+            && let Some(name) = self.syms.names.get(idx)
+            && let Some(&v) = self.modules.get(name.as_ref())
         {
             self.pool.retain_val(v);
-            return Some(v);
+            return Ok(v);
         }
-        None
+        Err(self.unknown_name(id, span, chunk, ip))
     }
 
     #[cold]
-    #[inline(never)]
-    pub(super) fn exec_def_global(&mut self, id: u32, span: Span) -> Result<(), Error> {
-        let v = self.stack.pop().expect("stack underflow on DefGlobal");
-        if self.frozen {
-            self.pool.release_val(v);
-            return Err(Error::runtime(
-                "env.frozen",
-                span,
-                "'def' is not allowed in a frozen environment",
-            ));
-        }
-        self.define_top(id, v);
-        self.stack.push(RVal::Void);
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    pub(super) fn exec_def_fn(
-        &mut self,
-        name_id: u32,
-        proto: &Rc<FnProto>,
-        captures: &[RVal],
-        base: usize,
-        span: Span,
-    ) -> Result<(), Error> {
-        if self.frozen {
-            return Err(Error::runtime(
-                "env.frozen",
-                span,
-                "'defn' is not allowed in a frozen environment",
-            ));
-        }
-        let closure = self.build_closure(proto, captures, base, span)?;
-        self.define_top(name_id, closure);
-        self.stack.push(RVal::Void);
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    pub(super) fn exec_import(&mut self, id: u32, span: Span) -> Result<(), Error> {
-        if self.frozen {
-            return Err(Error::runtime(
-                "env.frozen",
-                span,
-                "'import' is not allowed in a frozen environment",
-            ));
-        }
-        let name = &self.syms.names[id as usize];
-        let Some(&mod_val) = self.modules.get(name.as_ref()) else {
-            return Err(Error::runtime(
-                "expr.module",
-                span,
-                suggest(
-                    format!("unknown module '{name}'"),
-                    name,
-                    self.modules.keys().map(String::as_str),
-                ),
-            ));
-        };
-        self.pool.retain_val(mod_val);
-        self.define_top(id, mod_val);
-        self.stack.push(RVal::Void);
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    pub(super) fn exec_export(&mut self, names: &[String], span: Span) -> Result<(), Error> {
-        if self.frozen {
-            return Err(Error::runtime(
-                "env.frozen",
-                span,
-                "'export' is not allowed in a frozen environment",
-            ));
-        }
-        if self.active_module.is_none() {
-            return Err(Error::runtime(
-                "expr.module",
-                span,
-                "'export' can only be used inside a module",
-            ));
-        }
-        let list = self.export_list.get_or_insert_with(Vec::new);
-        list.extend(names.iter().cloned());
-        self.stack.push(RVal::Void);
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    pub(super) fn unknown_name(&self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> Error {
+    fn unknown_name(&self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> Error {
         let name = self
             .syms
             .names

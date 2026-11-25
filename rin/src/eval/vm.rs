@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
-use crate::diagnostic::available;
+use crate::diagnostic::{available, suggest};
 use crate::error::{Error, Span, StackFrame};
 use crate::pool::{Obj, RVal};
 
