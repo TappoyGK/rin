@@ -41,7 +41,12 @@ impl<'a> Builder<'a> {
 
     /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
     pub fn freeze(self) -> Result<Machine<'a>, Error> {
+        self.check_freeze()?;
         Ok(Machine { inner: self.inner })
+    }
+
+    pub(crate) fn check_freeze(&self) -> Result<(), Error> {
+        Ok(())
     }
 
     pub(crate) fn run_test(
@@ -179,19 +184,17 @@ impl<'a> EnvState<'a> {
         }
 
         // 一時束縛を取り込み、失敗時は取り込み済みをすべて解放する。
-        let mut eval_bindings = BTreeMap::new();
-        let mut eval_binding_names = Vec::with_capacity(bindings.len());
+        let mut values = BTreeMap::new();
         for (name, value) in bindings {
-            eval_binding_names.push((*name).to_string());
             if let Some(id) = self.syms.get(name) {
                 match self.pool.import(value, Span::default()) {
                     Ok(rval) => {
-                        if let Some(prev) = eval_bindings.insert(id, rval) {
+                        if let Some(prev) = values.insert(id, rval) {
                             self.pool.release_val(prev);
                         }
                     }
                     Err(e) => {
-                        for v in eval_bindings.into_values() {
+                        for v in values.into_values() {
                             self.pool.release_val(v);
                         }
                         return Err(e);
@@ -202,7 +205,7 @@ impl<'a> EnvState<'a> {
                 match self.pool.import(value, Span::default()) {
                     Ok(rval) => self.pool.release_val(rval),
                     Err(e) => {
-                        for v in eval_bindings.into_values() {
+                        for v in values.into_values() {
                             self.pool.release_val(v);
                         }
                         return Err(e);
@@ -211,18 +214,21 @@ impl<'a> EnvState<'a> {
             }
         }
 
-        let mut runner = self.runner(None, true);
-        runner.eval_bindings = Some(eval_bindings);
-        runner.eval_binding_names = eval_binding_names;
-        let res = runner.run_top_chunk(&chunk);
-        if let Some(bindings_to_release) = runner.eval_bindings.take() {
-            for v in bindings_to_release.into_values() {
-                runner.pool.release_val(v);
-            }
+        let eval_bindings = EvalBindings {
+            values,
+            raw: bindings,
+        };
+        let res = {
+            let mut runner = self.runner(None, true);
+            runner.eval_bindings = Some(&eval_bindings);
+            runner.run_top_chunk(&chunk)
+        };
+        for v in eval_bindings.values.into_values() {
+            self.pool.release_val(v);
         }
         let last = res?;
-        let exported = runner.pool.export(last);
-        runner.pool.release_val(last);
+        let exported = self.pool.export(last);
+        self.pool.release_val(last);
         Ok(exported)
     }
 
@@ -304,7 +310,6 @@ impl<'a> EnvState<'a> {
             depth: 0,
             frozen,
             eval_bindings: None,
-            eval_binding_names: Vec::new(),
             pool: &mut self.pool,
             syms: &self.syms,
             globals: &mut self.globals,

@@ -98,14 +98,18 @@ pub(super) enum CallOrigin<'a> {
     Builtin { name: &'a str, at: Span },
 }
 
+pub(super) struct EvalBindings<'a> {
+    pub(super) values: BTreeMap<u32, RVal>,
+    pub(super) raw: &'a [(&'a str, Value)],
+}
+
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
     pub(super) math_fma: MathFma,
     pub(super) steps_left: usize,
     pub(super) depth: usize,
     pub(super) frozen: bool,
-    pub(super) eval_bindings: Option<BTreeMap<u32, RVal>>,
-    pub(super) eval_binding_names: Vec<String>,
+    pub(super) eval_bindings: Option<&'a EvalBindings<'a>>,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,
     pub(super) globals: &'a mut Vec<Option<RVal>>,

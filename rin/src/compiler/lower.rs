@@ -207,12 +207,7 @@ impl<'a> Compiler<'a> {
                     inner.alloc_slot(p, span)?;
                 }
                 self.scopes.push(inner);
-                steps.push(Step::FinishFn(Box::new(FinishFnStep {
-                    name: None,
-                    arity,
-                    is_defn: false,
-                    span,
-                })));
+                steps.push(Step::FinishFn(Box::new(FinishFnStep { arity, span })));
                 self.push_body(steps, body, true);
             }
             ExprKind::Let { bindings, body } => {

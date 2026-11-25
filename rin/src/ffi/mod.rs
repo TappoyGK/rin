@@ -201,25 +201,18 @@ pub unsafe extern "C" fn rin_freeze(machine: *mut RinMachine) -> bool {
     let Some(m) = (unsafe { begin_operation(machine) }) else {
         return false;
     };
+    if let RinMachineState::Building(builder) = m.state_ref()
+        && let Err(err) = builder.check_freeze()
+    {
+        make_err_res(m, err);
+        return false;
+    }
     match m.state.take().expect("RinMachine state present") {
-        RinMachineState::Building(builder) => match builder.freeze() {
-            Ok(frozen) => {
-                m.state = Some(RinMachineState::Frozen(frozen));
-                true
-            }
-            Err(err) => {
-                // 現時点では `freeze()` は失敗しない。将来失敗しうる場合も
-                // 未初期化状態にしないよう新しい読み込み環境を戻す（実環境保持は #19 で設計）。
-                let alloc_ref: &'static mut dyn Allocator =
-                    unsafe { &mut *(m._alloc.as_mut() as *mut CAllocator as *mut dyn Allocator) };
-                m.state = Some(RinMachineState::Building(Builder::new(
-                    Limits::default(),
-                    alloc_ref,
-                )));
-                make_err_res(m, err);
-                false
-            }
-        },
+        RinMachineState::Building(builder) => {
+            let frozen = builder.freeze().expect("check_freeze already succeeded");
+            m.state = Some(RinMachineState::Frozen(frozen));
+            true
+        }
         RinMachineState::Frozen(frozen) => {
             m.state = Some(RinMachineState::Frozen(frozen));
             true

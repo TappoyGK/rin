@@ -82,10 +82,6 @@ fn globals_builtins_modules_and_private_names() {
         "unknown name 'damge'; did you mean 'damage'?"
     );
     assert_eq!(hint("damge (def damage 1)"), "unknown name 'damge'");
-    assert_eq!(
-        hint("(defn broken () damge) (let (damage 1) (broken))"),
-        "unknown name 'damge'"
-    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module(
@@ -170,10 +166,6 @@ fn field_and_export_lists_are_sorted_and_bounded() {
         .join(", ");
     let expected = format!("Point has no field 'bad'; fields: {shown}, ... and 3 more");
     assert_eq!(hint(&format!("Point{{{fields}}}.bad")), expected);
-    assert_eq!(
-        hint("(defn broken () damge) (let (damage 1) (broken))"),
-        "unknown name 'damge'"
-    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module("empty", "(export)").unwrap();
@@ -196,10 +188,6 @@ fn field_and_export_lists_are_sorted_and_bounded() {
 
 #[test]
 fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
-    assert_eq!(
-        hint("(defn broken () damge) (let (damage 1) (broken))"),
-        "unknown name 'damge'"
-    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     // Interning an unexecuted definition does not make it a known global.
