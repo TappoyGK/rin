@@ -258,25 +258,28 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 - `RinMathFma`：`RIN_MATH_FMA_STRICT = 0`, `RIN_MATH_FMA_FUSED = 1`
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
   - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
-- `RinMachine` / `RinValue`：不透明ハンドル型。
+- `Rin` / `RinValue`：不透明ハンドル型。
+- `RinBinding`：`{ const char *name; const RinValue *value; }`
 - `RinEvalResult`：`{ bool ok; RinValue *value; }`
 
-### 2.2 マシン操作
+### 2.2 `Rin` 操作
 
 | 関数 | 説明 |
 |---|---|
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
-| `RinMachine *rin_new(RinLimits limits, RinAllocator alloc)` | マシンを生成する |
-| `void rin_free(RinMachine *machine)` | マシンを破棄し内部プールを解放する（`NULL` 可） |
-| `bool rin_freeze(RinMachine *machine)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`machine == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
-| `bool rin_set_math_fma(RinMachine *machine, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
-| `RinMathFma rin_math_fma(const RinMachine *machine)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
-| `bool rin_bind(RinMachine *machine, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して `false`） |
-| `RinEvalResult rin_eval(RinMachine *machine, const char *source)` | ソースを評価し結果を返す（凍結後は `[env.frozen]`・`[env.modules]` を適用） |
-| `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
-| `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
-| `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
-| `const RinError *rin_last_error(const RinMachine *machine)` | 直近の対象操作のエラーを借用する（エラーなし・NULL machine は NULL） |
+| `Rin *rin_new(RinLimits limits, RinAllocator alloc)` | 読み込み段階の `Rin` を生成する |
+| `void rin_free(Rin *rin)` | `Rin` を破棄し内部プールを解放する（`NULL` 可） |
+| `bool rin_freeze(Rin *rin)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`rin == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
+| `bool rin_set_math_fma(Rin *rin, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
+| `RinMathFma rin_math_fma(const Rin *rin)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
+| `bool rin_bind(Rin *rin, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して `false`） |
+| `RinEvalResult rin_build(Rin *rin, const char *source)` | 読み込み段階でソースを評価し大域定義を構築する（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_eval(Rin *rin, const char *source)` | 凍結後の環境でソースを評価し結果を返す（`[env.frozen]`・`[env.modules]` を適用。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する（前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
+| `RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
+| `const RinError *rin_last_error(const Rin *rin)` | 直近の対象操作のエラーを借用する（エラーなし・NULL は NULL） |
 | `void rin_res_free(RinEvalResult *res)` | 結果の `value` を解放し NULL にする（エラー情報は保持する） |
 
 #### エラー情報の借用
@@ -306,17 +309,17 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 対象操作は `rin_eval` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 7 関数である。同じ machine への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ machine の対象操作・解放と並行して参照してはならない。
-- 対象操作は引数検査の前に前回の情報をクリアする。有効な machine への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
-- NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。machine 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
+- 対象操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数である。同じ `Rin` への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ `Rin` の対象操作・解放と並行して参照してはならない。
+- 対象操作は引数検査の前に前回の情報をクリアする。有効な `Rin` への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
+- NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時にはホストが所有する値であり、`rin_res_free` で解放する。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
 
-有効な `m` に対する利用例：
+凍結済みの有効な `r` に対する利用例：
 
 ```c
-RinEvalResult result = rin_eval(m, source);
+RinEvalResult result = rin_eval(r, source);
 if (!result.ok) {
-    const RinError *error = rin_last_error(m);
+    const RinError *error = rin_last_error(r);
     fprintf(stderr, "%s\n", error->text);
 }
 rin_res_free(&result);
@@ -370,3 +373,46 @@ rin_res_free(&result);
 | `void rin_schema_free(RinSchema *schema)` | `RinSchema *` を解放する（`NULL` 可） |
 | `bool rin_check(const RinValue *val, const RinSchema *schema)` | `val` が `schema` に適合すれば `true` を返す |
 | `bool rin_check_str(const RinValue *val, const char *schema_src)` | スキーマ文字列をその場で解析して `val` を検証する |
+
+## 3. Rust API と C FFI API の使い分けと対応
+
+### 3.1 Suz から見た使い分け
+
+| 観点 | Rust API（`rin` クレート） | C FFI API（`rin.h` + `librin.a`） |
+|---|---|---|
+| 使う場所 | Suz コンパイラ本体（Rust 製）や CLI ツール | Suz が出力した C23 プログラム（ゲーム本体・ランタイム） |
+| 主な用途 | comptime 計算（定数・テーブル生成）、整形・テストツール連携 | ゲームの Mod・組み込みスクリプトのサンドボックス実行 |
+| 典型フロー | `Builder::new` → `bind` / `load_module` / `eval` → `freeze()` → `Machine::eval` / `eval_with` / `call`（単発は `rin::eval_with`） | `rin_new`（Suz の `arena` 等を `RinAllocator` で渡す）→ `rin_bind` / `rin_load` / `rin_build` → `rin_freeze` → `rin_eval` / `rin_eval_with` / `rin_call` / `rin_call_in` → `rin_free` |
+| 段階分離の守り方 | Rust の型と所有権ムーブ（`Builder` → `Machine`）でコンパイル時に強制 | `Rin *` 1 本のまま `rin_freeze` で不可逆遷移（凍結前 `rin_eval` は `env.phase`、凍結後 `rin_build`/`rin_bind`/`rin_load` は `env.frozen`） |
+| エラー・検証 | `Result<Value, Error>` と `Error::render_with` でコンパイラ診断へ統合 | `rin_last_error`（`RinError`）で取得、`rin_check`（`RinSchema`）で返却値を検証 |
+
+### 3.2 環境・評価・呼び出しの対応
+
+| 操作 | C FFI API | Rust API | 備考 |
+|---|---|---|---|
+| ハンドル型 | `Rin *`（1 型） | `Builder<'a>` / `Machine<'a>`（2 型） | C は状態遷移、Rust は型遷移 |
+| 既定上限 | `rin_limits_default()` | `Limits::default()` | |
+| 生成 | `rin_new(limits, alloc)` | `Builder::new(limits, &mut alloc)` | 読み込み段階で開始 |
+| 破棄 | `rin_free(rin)` | `Drop` | |
+| 凍結 | `rin_freeze(rin)` | `builder.freeze()` | 読み込み → 実行段階へ不可逆遷移 |
+| FMA 設定 | `rin_set_math_fma(rin, mode)` | `builder.set_math_fma` / `machine.set_math_fma` | 両段階で利用可 |
+| FMA 取得 | `rin_math_fma(rin)` | `builder.math_fma` / `machine.math_fma` | 両段階で利用可 |
+| 大域束縛 | `rin_bind(rin, name, val)` | `builder.bind(name, &val)` | C は凍結後 `[env.frozen]` |
+| モジュール読込 | `rin_load(rin, mod_name, src)` | `builder.load_module(name, src)` | C は凍結後 `[env.frozen]` |
+| 読み込み段階の評価 | `rin_build(rin, src)` | `builder.eval(src)` | C は凍結後 `[env.frozen]` |
+| 実行段階の評価 | `rin_eval(rin, src)` | `machine.eval(src)` | C は凍結前 `[env.phase]` |
+| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` | `machine.eval_with(src, bindings)` | C は凍結前 `[env.phase]` |
+| 関数直接呼出 | `rin_call(rin, fn_name, args, argc)` | `machine.call(fn_name, args)` | C は凍結前も呼べる |
+| モジュール関数呼出 | `rin_call_in(rin, mod, fn_name, args, argc)` | `machine.call_in(mod, fn_name, args)` | C は凍結前も呼べる |
+| エラー取得 | `rin_last_error(rin)` | 各メソッドの `Result<_, Error>` | C は直前エラーを `Rin` 内に保持 |
+| 評価結果の解放 | `rin_res_free(&res)` | `Drop` | |
+| 生存バイト数 | （未提供） | `builder.live_bytes` / `machine.live_bytes` | Rust のみ |
+
+### 3.3 値・スキーマ・その他
+
+| 分類 | C FFI API | Rust API |
+|---|---|---|
+| 値の生成・破棄 | `rin_int` / `rin_float` / `rin_bool` / `rin_str` / `rin_i64s` / `rin_f64s` / `rin_nil` / `rin_cons` / `rin_none` / `rin_some` / `rin_struct` + `rin_struct_set` / `rin_variant` / `rin_drop` | `Value` コンストラクタ・`Drop` |
+| 値の読み取り | `rin_tag` / `rin_as_*` / `rin_len` / `rin_car` / `rin_cdr` / `rin_field` / `rin_variant_name` / `rin_unwrap` / `rin_tuple_get` / `rin_copy_*` | `Value` パターンマッチ・各メソッド |
+| スキーマ検証 | `rin_schema` / `rin_schema_free` / `rin_check` / `rin_check_str` | `Schema::parse` / `Schema::check` |
+| Rust のみ | （なし） | `rin::eval` / `rin::eval_with` / `rin::eval_with_allocator` / `rin::fmt::format` / `rin::test` / `Error::render` |

@@ -9,11 +9,11 @@ Rin インタプリタ（`rin` クレート）の評価環境・コンパイラ�
 - **`EnvState`**（内部状態）: 主に `Pool`（値プールとメモリ上限管理）、`SymTable`（シンボル番号表）、`globals`（大域スロット）、`modules`（公開済みモジュール）、`module_envs`（モジュール固有環境）、`ParseScratch`（再利用パーサ作業領域）のほか、`limits`・`math_fma`・`module_ids`・`module_names` を保持する。
 - **`Builder`**（読み込み段階）: `bind`・`load_module`・`eval` で大域環境とモジュールを構築する。`freeze(self)` で `EnvState` の所有権ごと `Machine` へ移行する。
 - **`Machine`**（実行段階・凍結）: `eval`・`eval_with`・`call`・`call_in`（および `set_math_fma`・`math_fma`・`live_bytes`）を提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
-- **C FFI（`RinMachine`）**（`rin/src/ffi/mod.rs`）: 内部で `Builder`（`Building`）または `Machine`（`Frozen`）を包み、評価処理をすべて委譲する C ABI 用ラッパー。ポインタ型 `RinMachine*` を維持したまま `rin_freeze()` で不可逆に凍結し（凍結後の `rin_bind` / `rin_load` は `[env.frozen]` で拒否）、直前エラー（`last_error`）と C アロケータの寿命も管理する。
+- **C FFI（`Rin`）**（`rin/src/ffi/mod.rs`）: 内部で `Builder`（`Building`）または `Machine`（`Frozen`）を包み、評価処理をすべて委譲する C ABI 用ラッパー。ポインタ型 `Rin*` を維持したまま `rin_freeze()` で不可逆に凍結し（凍結後の `rin_bind` / `rin_load` / `rin_build` は `[env.frozen]`、凍結前の `rin_eval` / `rin_eval_with` は `[env.phase]` で拒否）、直前エラー（`last_error`）と C アロケータの寿命も管理する。
 
 ```mermaid
 flowchart TD
-    F["C FFI: RinMachine（ラッパー）"] -->|"Building"| B["Builder（読み込み）"]
+    F["C FFI: Rin（ラッパー）"] -->|"Building"| B["Builder（読み込み）"]
     F -->|"Frozen"| M["Machine（凍結）"]
     B -->|"freeze()"| M
     B --> E["EnvState（内部状態）"]

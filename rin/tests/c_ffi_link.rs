@@ -48,7 +48,7 @@ int main(void) {
     Bump bump;
     bump.offset = 0;
     RinAllocator alloc = { &bump, bump_alloc, NULL };
-    RinMachine *m = rin_new(rin_limits_default(), alloc);
+    Rin *m = rin_new(rin_limits_default(), alloc);
     assert(m != NULL);
 
     RinEvalResult lr = rin_load(m, "base", "(defn make_card (c) Card { id: \"ember\", cost: (- c 1) })");
@@ -84,6 +84,7 @@ int main(void) {
     assert(rin_last_error(m) == error);
     assert(strstr(error->text, "division by zero") != NULL);
 
+    assert(rin_freeze(m));
     failed = rin_eval(m, NULL);
     assert(!failed.ok);
     error = rin_last_error(m);
@@ -95,6 +96,16 @@ int main(void) {
     RinEvalResult success = rin_eval(m, "42");
     assert(success.ok && success.value != NULL && rin_last_error(m) == NULL);
     rin_res_free(&success);
+    RinValue *bx = rin_int(10);
+    RinValue *by = rin_int(32);
+    RinBinding binds[2] = { { "x", bx }, { "y", by } };
+    RinEvalResult with_res = rin_eval_with(m, "(+ x y)", binds, 2);
+    rin_drop(bx);
+    rin_drop(by);
+    assert(with_res.ok && with_res.value != NULL && rin_last_error(m) == NULL);
+    int64_t sum = 0;
+    assert(rin_as_int(with_res.value, &sum) && sum == 42);
+    rin_res_free(&with_res);
     assert(rin_last_error(NULL) == NULL);
     rin_free(m);
     assert(bump.offset > 0);

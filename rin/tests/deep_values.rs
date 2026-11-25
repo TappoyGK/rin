@@ -160,6 +160,7 @@ fn schemas_and_ffi() {
         );
         assert!(rin_bind(m, c"x".as_ptr(), inner));
         rin_drop(inner);
+        assert!(rin_freeze(m));
         let mut result = rin_eval(m, c"x".as_ptr());
         assert!(result.ok);
         assert!(rin_check(result.value, schema));

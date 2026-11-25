@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use rin::ffi::{
     RinAllocator, RinErrorKind, RinMathFma, rin_as_float, rin_bind, rin_drop, rin_eval, rin_float,
-    rin_free, rin_last_error, rin_limits_default, rin_math_fma, rin_new, rin_res_free,
+    rin_free, rin_freeze, rin_last_error, rin_limits_default, rin_math_fma, rin_new, rin_res_free,
     rin_set_math_fma,
 };
 use rin::math::{self, MathFma};
@@ -158,6 +158,7 @@ fn c_ffi_math_fma_api() {
         let input = rin_float(f64::from_bits(0x3fcb_a7ce_3783_fd35));
         assert!(rin_bind(m, c"x".as_ptr(), input));
         rin_drop(input);
+        assert!(rin_freeze(m));
 
         let mut res_fused = rin_eval(m, c"(sin x)".as_ptr());
         assert!(res_fused.ok);
