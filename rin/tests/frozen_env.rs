@@ -152,6 +152,28 @@ fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
         .unwrap_err();
     assert_eq!(mem_err.kind, ErrorKind::TooMuchMemory);
     assert_eq!(machine.live_bytes(), baseline);
+
+    // 9 個以上の束縛（ヒープ経路）と同名上書きも正しく評価・解放される。
+    let many = [
+        ("a1", Value::Int(1)),
+        ("a2", Value::Int(2)),
+        ("a3", Value::Int(3)),
+        ("a4", Value::Int(4)),
+        ("a5", Value::Int(5)),
+        ("a6", Value::Int(6)),
+        ("a7", Value::Int(7)),
+        ("a8", Value::Int(8)),
+        ("a9", Value::Int(9)),
+        ("a1", Value::Int(10)),
+    ];
+    let sum = machine
+        .eval_with(
+            "(+ (+ (+ a1 a2) (+ a3 a4)) (+ (+ a5 a6) (+ (+ a7 a8) a9)))",
+            &many,
+        )
+        .unwrap();
+    assert_eq!(sum, Value::Int(54));
+    assert_eq!(machine.live_bytes(), baseline);
 }
 
 #[test]

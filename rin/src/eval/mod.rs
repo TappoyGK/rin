@@ -67,6 +67,7 @@ pub(super) struct EnvState<'a> {
     syms: SymTable,
     globals: Vec<Option<RVal>>,
     modules: BTreeMap<String, RVal>,
+    frozen_modules: Vec<Option<RVal>>,
     module_ids: BTreeMap<String, u32>,
     module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
@@ -98,8 +99,10 @@ pub(super) enum CallOrigin<'a> {
     Builtin { name: &'a str, at: Span },
 }
 
+pub(super) const INLINE_EVAL_BINDINGS: usize = 8;
+
 pub(super) struct EvalBindings<'a> {
-    pub(super) values: BTreeMap<u32, RVal>,
+    pub(super) entries: &'a [(u32, RVal)],
     pub(super) raw: &'a [(&'a str, Value)],
 }
 
@@ -108,18 +111,19 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) math_fma: MathFma,
     pub(super) steps_left: usize,
     pub(super) depth: usize,
-    pub(super) frozen: bool,
-    pub(super) eval_bindings: Option<&'a EvalBindings<'a>>,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,
     pub(super) globals: &'a mut Vec<Option<RVal>>,
     pub(super) modules: &'a BTreeMap<String, RVal>,
+    pub(super) frozen_modules: &'a [Option<RVal>],
     pub(super) module_names: &'a [String],
     pub(super) module_envs: &'a mut Vec<Vec<Option<RVal>>>,
     pub(super) active_module: Option<u32>,
     pub(super) export_list: Option<Vec<String>>,
     pub(super) stack: Vec<RVal>,
     pub(super) check_failures: Vec<crate::test::CheckFailure>,
+    pub(super) frozen: bool,
+    pub(super) eval_bindings: Option<&'a EvalBindings<'a>>,
 }
 
 pub(super) enum FrameSource<'a> {

@@ -88,37 +88,19 @@ impl Runner<'_, '_> {
                         self.stack.push(v);
                     }
                     Op::GetGlobal(id) => {
-                        let span = chunk.spans[ip - 1];
-                        let v = self.lookup_global(id, span, chunk, ip - 1)?;
+                        let Some(v) = self.lookup_global(id) else {
+                            return Err(self.unknown_name(id, chunk.spans[ip - 1], chunk, ip - 1));
+                        };
                         self.stack.push(v);
                     }
                     Op::DefGlobal(id) => {
                         let span = chunk.spans[ip - 1];
-                        let v = self.stack.pop().expect("stack underflow on DefGlobal");
-                        if self.frozen {
-                            self.pool.release_val(v);
-                            return Err(Error::runtime(
-                                "env.frozen",
-                                span,
-                                "'def' is not allowed in a frozen environment",
-                            ));
-                        }
-                        self.define_top(id, v);
-                        self.stack.push(RVal::Void);
+                        self.exec_def_global(id, span)?;
                     }
                     Op::DefFn(name_id, proto_idx) => {
                         let span = chunk.spans[ip - 1];
-                        if self.frozen {
-                            return Err(Error::runtime(
-                                "env.frozen",
-                                span,
-                                "'defn' is not allowed in a frozen environment",
-                            ));
-                        }
                         let proto = &chunk.protos[proto_idx as usize];
-                        let closure = self.build_closure(proto, captures.as_ref(), base, span)?;
-                        self.define_top(name_id, closure);
-                        self.stack.push(RVal::Void);
+                        self.exec_def_fn(name_id, proto, captures.as_ref(), base, span)?;
                     }
                     Op::MakeClosure(proto_idx) => {
                         let span = chunk.spans[ip - 1];
@@ -662,49 +644,11 @@ impl Runner<'_, '_> {
                     }
                     Op::Import(id) => {
                         let span = chunk.spans[ip - 1];
-                        if self.frozen {
-                            return Err(Error::runtime(
-                                "env.frozen",
-                                span,
-                                "'import' is not allowed in a frozen environment",
-                            ));
-                        }
-                        let name = &self.syms.names[id as usize];
-                        let Some(&mod_val) = self.modules.get(name.as_ref()) else {
-                            return Err(Error::runtime(
-                                "expr.module",
-                                span,
-                                suggest(
-                                    format!("unknown module '{name}'"),
-                                    name,
-                                    self.modules.keys().map(String::as_str),
-                                ),
-                            ));
-                        };
-                        self.pool.retain_val(mod_val);
-                        self.define_top(id, mod_val);
-                        self.stack.push(RVal::Void);
+                        self.exec_import(id, span)?;
                     }
                     Op::Export(idx) => {
                         let span = chunk.spans[ip - 1];
-                        if self.frozen {
-                            return Err(Error::runtime(
-                                "env.frozen",
-                                span,
-                                "'export' is not allowed in a frozen environment",
-                            ));
-                        }
-                        if self.active_module.is_none() {
-                            return Err(Error::runtime(
-                                "expr.module",
-                                span,
-                                "'export' can only be used inside a module",
-                            ));
-                        }
-                        let names = &chunk.export_lists[idx as usize];
-                        let list = self.export_list.get_or_insert_with(Vec::new);
-                        list.extend(names.iter().cloned());
-                        self.stack.push(RVal::Void);
+                        self.exec_export(&chunk.export_lists[idx as usize], span)?;
                     }
                 }
             }
