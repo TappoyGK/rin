@@ -3,7 +3,7 @@ use rin::ffi::*;
 use std::ffi::{CStr, CString};
 use std::ptr::{null, null_mut};
 
-struct Machine(*mut RinMachine);
+struct Machine(*mut Rin);
 impl Machine {
     fn new(limits: RinLimits) -> Self {
         Self(rin_new(
@@ -31,7 +31,7 @@ unsafe fn finish(mut result: RinEvalResult, ok: bool) {
     unsafe { rin_res_free(&mut result) };
     assert!(result.value.is_null());
 }
-unsafe fn check_error(m: *mut RinMachine, kind: RinErrorKind) {
+unsafe fn check_error(m: *mut Rin, kind: RinErrorKind) {
     unsafe {
         let p = rin_last_error(m);
         assert!(!p.is_null());
@@ -100,10 +100,10 @@ fn kinds_modules_and_borrowed_lifetime() {
             true,
         );
         assert!(rin_last_error(m.0).is_null());
-        finish(rin_eval(m.0, c"(/ 1 0)".as_ptr()), false);
+        finish(rin_build(m.0, c"(/ 1 0)".as_ptr()), false);
         assert!((*rin_last_error(m.0)).module.is_null());
         finish(
-            rin_eval(m.0, c"(defn fail () (/ 1 0)) (defn good () 42)".as_ptr()),
+            rin_build(m.0, c"(defn fail () (/ 1 0)) (defn good () 42)".as_ptr()),
             true,
         );
         assert!(rin_last_error(m.0).is_null());
@@ -144,7 +144,7 @@ fn resource_errors_and_bind_failures_preserve_kind() {
             ),
         ] {
             let m = Machine::new(limits);
-            finish(rin_eval(m.0, source.as_ptr()), false);
+            finish(rin_build(m.0, source.as_ptr()), false);
             check_error(m.0, kind);
             assert_eq!(CStr::from_ptr((*rin_last_error(m.0)).rule), c"eval.limits");
         }
@@ -180,10 +180,30 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
         let bad = bad.as_ptr().cast();
         let v = rin_int(1);
         let missing = [null()];
+        let missing_bind_name = [RinBinding {
+            name: null(),
+            value: v,
+        }];
+        let bad_bind_name = [RinBinding {
+            name: bad,
+            value: v,
+        }];
+        let missing_bind_val = [RinBinding {
+            name: c"x".as_ptr(),
+            value: null(),
+        }];
         // 各経路の前にモジュール内のエラーを記録し、残存していないことを確かめる。
         let cases: Vec<Box<dyn Fn() -> bool>> = vec![
+            Box::new(|| rin_build(m.0, null()).ok),
+            Box::new(|| rin_build(m.0, bad).ok),
             Box::new(|| rin_eval(m.0, null()).ok),
             Box::new(|| rin_eval(m.0, bad).ok),
+            Box::new(|| rin_eval_with(m.0, null(), null(), 0).ok),
+            Box::new(|| rin_eval_with(m.0, bad, null(), 0).ok),
+            Box::new(|| rin_eval_with(m.0, c"1".as_ptr(), null(), 1).ok),
+            Box::new(|| rin_eval_with(m.0, c"1".as_ptr(), missing_bind_name.as_ptr(), 1).ok),
+            Box::new(|| rin_eval_with(m.0, c"1".as_ptr(), bad_bind_name.as_ptr(), 1).ok),
+            Box::new(|| rin_eval_with(m.0, c"1".as_ptr(), missing_bind_val.as_ptr(), 1).ok),
             Box::new(|| rin_load(m.0, null(), c"1".as_ptr()).ok),
             Box::new(|| rin_load(m.0, c"m".as_ptr(), null()).ok),
             Box::new(|| rin_load(m.0, bad, c"1".as_ptr()).ok),
@@ -214,7 +234,9 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
         }
         rin_drop(v);
         assert!(rin_last_error(null()).is_null());
+        finish(rin_build(null_mut(), null()), false);
         finish(rin_eval(null_mut(), null()), false);
+        finish(rin_eval_with(null_mut(), null(), null(), 0), false);
         finish(rin_load(null_mut(), null(), null()), false);
         finish(rin_call(null_mut(), null(), null(), 0), false);
         finish(rin_call_in(null_mut(), null(), null(), null(), 0), false);
@@ -229,7 +251,7 @@ fn ffi_text_matches_rust_display() {
     let source = CString::new(source).unwrap();
     unsafe {
         let m = Machine::new(rin_limits_default());
-        finish(rin_eval(m.0, source.as_ptr()), false);
+        finish(rin_build(m.0, source.as_ptr()), false);
         let e = &*rin_last_error(m.0);
         assert_eq!(CStr::from_ptr(e.rule).to_str().unwrap(), expected.rule());
         assert_eq!(
@@ -266,7 +288,7 @@ fn hints_are_in_ffi_message_and_text_with_original_rule() {
         let source = CString::new(source).unwrap();
         unsafe {
             let m = Machine::new(rin_limits_default());
-            finish(rin_eval(m.0, source.as_ptr()), false);
+            finish(rin_build(m.0, source.as_ptr()), false);
             let e = &*rin_last_error(m.0);
             assert_eq!(
                 CStr::from_ptr(e.message).to_str().unwrap(),

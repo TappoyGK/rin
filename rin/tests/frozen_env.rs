@@ -4,9 +4,9 @@
 use std::ffi::CStr;
 
 use rin::ffi::{
-    RinAllocator, RinErrorKind, rin_as_int, rin_bind, rin_call, rin_call_in, rin_drop, rin_eval,
-    rin_free, rin_freeze, rin_int, rin_last_error, rin_limits_default, rin_load, rin_new,
-    rin_res_free,
+    RinAllocator, RinBinding, RinErrorKind, rin_as_int, rin_bind, rin_build, rin_call, rin_call_in,
+    rin_drop, rin_eval, rin_eval_with, rin_free, rin_freeze, rin_int, rin_last_error,
+    rin_limits_default, rin_load, rin_new, rin_res_free,
 };
 use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 
@@ -197,14 +197,32 @@ fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
         assert!(load_res.ok);
         rin_res_free(&mut load_res);
 
-        let mut def_res = rin_eval(m, c"(defn add_g (n) (+ n g))".as_ptr());
+        let mut def_res = rin_build(m, c"(defn add_g (n) (+ n g))".as_ptr());
         assert!(def_res.ok);
         rin_res_free(&mut def_res);
+
+        // 凍結前の rin_eval / rin_eval_with は env.phase エラー
+        let mut pre_eval = rin_eval(m, c"g".as_ptr());
+        assert!(!pre_eval.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.phase");
+        rin_res_free(&mut pre_eval);
 
         // 凍結（2 回目も冪等に成功）
         assert!(rin_freeze(m));
         assert!(rin_last_error(m).is_null());
         assert!(rin_freeze(m));
+
+        // 凍結後の rin_build は env.frozen エラー
+        let mut post_build = rin_build(m, c"(def z 1)".as_ptr());
+        assert!(!post_build.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.frozen");
+        rin_res_free(&mut post_build);
 
         // 凍結後の rin_bind は env.frozen エラー
         let v20 = rin_int(20);
@@ -233,13 +251,40 @@ fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
         assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.frozen");
         rin_res_free(&mut bad_eval);
 
-        // 凍結後は import なしでモジュールを参照でき、call / call_in も動く
+        // 凍結後は import なしでモジュールを参照でき、eval_with / call / call_in も動く
         let mut ok_eval = rin_eval(m, c"(mod_a.twice g)".as_ptr());
         assert!(ok_eval.ok);
         let mut out = 0;
         assert!(rin_as_int(ok_eval.value, &mut out));
         assert_eq!(out, 20);
         rin_res_free(&mut ok_eval);
+
+        // rin_eval_with で一時束縛を渡し、大域 g を上書きせず元に戻ること
+        let tmp_g = rin_int(100);
+        let tmp_y = rin_int(7);
+        let binds = [
+            RinBinding {
+                name: c"g".as_ptr(),
+                value: tmp_g,
+            },
+            RinBinding {
+                name: c"y".as_ptr(),
+                value: tmp_y,
+            },
+        ];
+        let mut with_res = rin_eval_with(m, c"(+ g y)".as_ptr(), binds.as_ptr(), binds.len());
+        rin_drop(tmp_g);
+        rin_drop(tmp_y);
+        assert!(with_res.ok);
+        assert!(rin_as_int(with_res.value, &mut out));
+        assert_eq!(out, 107);
+        rin_res_free(&mut with_res);
+
+        let mut after_g = rin_eval(m, c"g".as_ptr());
+        assert!(after_g.ok);
+        assert!(rin_as_int(after_g.value, &mut out));
+        assert_eq!(out, 10);
+        rin_res_free(&mut after_g);
 
         let arg = rin_int(5);
         let args = [arg as *const _];
