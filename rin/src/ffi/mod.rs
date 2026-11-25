@@ -208,6 +208,14 @@ pub unsafe extern "C" fn rin_freeze(machine: *mut RinMachine) -> bool {
                 true
             }
             Err(err) => {
+                // 現時点では `freeze()` は失敗しない。将来失敗しうる場合も
+                // 未初期化状態にしないよう新しい読み込み環境を戻す（実環境保持は #19 で設計）。
+                let alloc_ref: &'static mut dyn Allocator =
+                    unsafe { &mut *(m._alloc.as_mut() as *mut CAllocator as *mut dyn Allocator) };
+                m.state = Some(RinMachineState::Building(Builder::new(
+                    Limits::default(),
+                    alloc_ref,
+                )));
                 make_err_res(m, err);
                 false
             }

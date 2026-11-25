@@ -2,6 +2,77 @@
 use super::*;
 
 impl<'a> Compiler<'a> {
+    pub(super) fn compile_top_level(&mut self, exprs: &'a [Expr]) -> Result<(), Error> {
+        for (i, expr) in exprs.iter().enumerate() {
+            let last = i + 1 == exprs.len();
+            let span = expr.span;
+            match &expr.kind {
+                ExprKind::Def { name, value } => {
+                    if self.frozen {
+                        return Err(self.decl_error("def", span));
+                    }
+                    self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
+                    self.compile_expr_shallow(value, false, 1)?;
+                    let n_idx = self.syms.intern(name);
+                    self.emit(Op::DefGlobal(n_idx), span);
+                }
+                ExprKind::Defn { name, params, body } => {
+                    if self.frozen {
+                        return Err(self.decl_error("defn", span));
+                    }
+                    self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
+                    let arity = u32::try_from(params.len()).map_err(|_| {
+                        Error::parse("compile.capacity", span, "too many parameters")
+                    })?;
+                    let mut inner = self.new_scope();
+                    for p in params {
+                        inner.alloc_slot(p, span)?;
+                    }
+                    self.scopes.push(inner);
+                    self.compile_body_shallow(body, true, 1)?;
+                    let finished = self.scopes.pop().unwrap();
+                    let captures: Vec<Capture> =
+                        finished.captures.into_iter().map(|(_, c)| c).collect();
+                    let proto = Rc::new(FnProto {
+                        name: Some(name.clone()),
+                        module: finished.module,
+                        arity,
+                        local_count: finished.max_slots,
+                        captures,
+                        chunk: finished.chunk,
+                    });
+                    let p_idx = self.chunk().add_proto(proto);
+                    let n_idx = self.syms.intern(name);
+                    self.emit(Op::DefFn(n_idx, p_idx), span);
+                }
+                ExprKind::Import { name } => {
+                    if self.frozen {
+                        return Err(self.decl_error("import", span));
+                    }
+                    self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
+                    let idx = self.syms.intern(name);
+                    self.emit(Op::Import(idx), span);
+                }
+                ExprKind::Export { names } => {
+                    if self.frozen {
+                        return Err(self.decl_error("export", span));
+                    }
+                    self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
+                    let idx = self.chunk().add_exports(names.clone());
+                    self.emit(Op::Export(idx), span);
+                }
+                _ => self.compile_expr_shallow(expr, false, 0)?,
+            }
+            if !last {
+                self.emit(Op::Pop, expr.span);
+            }
+        }
+        if !exprs.is_empty() {
+            self.flush_ticks();
+        }
+        Ok(())
+    }
+
     pub(super) fn compile_body_shallow(
         &mut self,
         exprs: &'a [Expr],
@@ -162,34 +233,11 @@ impl<'a> Compiler<'a> {
                 self.compile_expr_shallow(index, false, depth + 1)?;
                 self.emit(Op::GetIndex, span);
             }
-            ExprKind::Def { name, value } => {
-                self.compile_expr_shallow(value, false, depth + 1)?;
-                let n_idx = self.syms.intern(name);
-                self.emit(Op::DefGlobal(n_idx), span);
+            ExprKind::Def { .. } => {
+                return Err(self.decl_error("def", span));
             }
-            ExprKind::Defn { name, params, body } => {
-                let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
-                for p in params {
-                    inner.alloc_slot(p, span)?;
-                }
-                self.scopes.push(inner);
-                self.compile_body_shallow(body, true, depth + 1)?;
-                let finished = self.scopes.pop().unwrap();
-                let captures: Vec<Capture> =
-                    finished.captures.into_iter().map(|(_, c)| c).collect();
-                let proto = Rc::new(FnProto {
-                    name: Some(name.clone()),
-                    module: finished.module,
-                    arity,
-                    local_count: finished.max_slots,
-                    captures,
-                    chunk: finished.chunk,
-                });
-                let p_idx = self.chunk().add_proto(proto);
-                let n_idx = self.syms.intern(name);
-                self.emit(Op::DefFn(n_idx, p_idx), span);
+            ExprKind::Defn { .. } => {
+                return Err(self.decl_error("defn", span));
             }
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
@@ -342,13 +390,11 @@ impl<'a> Compiler<'a> {
                 };
                 self.emit(call_op, span);
             }
-            ExprKind::Import { name } => {
-                let idx = self.syms.intern(name);
-                self.emit(Op::Import(idx), span);
+            ExprKind::Import { .. } => {
+                return Err(self.decl_error("import", span));
             }
-            ExprKind::Export { names } => {
-                let idx = self.chunk().add_exports(names.clone());
-                self.emit(Op::Export(idx), span);
+            ExprKind::Export { .. } => {
+                return Err(self.decl_error("export", span));
             }
         }
         Ok(())

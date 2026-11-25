@@ -4,7 +4,7 @@ use crate::ErrorKind;
 fn compile(source: &str) -> Chunk {
     let mut scratch = crate::parser::ParseScratch::new();
     let exprs = crate::parser::parse_program_with_scratch(source, &mut scratch).unwrap();
-    compile_program(exprs, None, &mut SymTable::default(), &[]).unwrap()
+    compile_program(exprs, None, &mut SymTable::default(), &[], false).unwrap()
 }
 
 #[test]

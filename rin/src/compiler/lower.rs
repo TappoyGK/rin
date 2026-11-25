@@ -193,32 +193,11 @@ impl<'a> Compiler<'a> {
                     is_tail: false,
                 });
             }
-            ExprKind::Def { name, value } => {
-                let n_idx = self.syms.intern(name);
-                steps.push(Step::EmitFlushed {
-                    op: Op::DefGlobal(n_idx),
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: value,
-                    is_tail: false,
-                });
+            ExprKind::Def { .. } => {
+                return Err(self.decl_error("def", span));
             }
-            ExprKind::Defn { name, params, body } => {
-                let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
-                for p in params {
-                    inner.alloc_slot(p, span)?;
-                }
-                self.scopes.push(inner);
-                steps.push(Step::FinishFn(Box::new(FinishFnStep {
-                    name: Some(name.clone()),
-                    arity,
-                    is_defn: true,
-                    span,
-                })));
-                self.push_body(steps, body, true);
+            ExprKind::Defn { .. } => {
+                return Err(self.decl_error("defn", span));
             }
             ExprKind::Fn { params, body } => {
                 let arity = u32::try_from(params.len())
@@ -352,13 +331,11 @@ impl<'a> Compiler<'a> {
                     is_tail: false,
                 });
             }
-            ExprKind::Import { name } => {
-                let idx = self.syms.intern(name);
-                self.emit(Op::Import(idx), span);
+            ExprKind::Import { .. } => {
+                return Err(self.decl_error("import", span));
             }
-            ExprKind::Export { names } => {
-                let idx = self.chunk().add_exports(names.clone());
-                self.emit(Op::Export(idx), span);
+            ExprKind::Export { .. } => {
+                return Err(self.decl_error("export", span));
             }
         }
         Ok(())

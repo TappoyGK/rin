@@ -44,6 +44,30 @@ fn frozen_rejects_declarations_and_module_forms_before_execution() {
 }
 
 #[test]
+fn non_top_level_declarations_are_syntax_errors_even_during_loading() {
+    let mut alloc = HeapAllocator;
+    let mut builder = Builder::new(Limits::default(), &mut alloc);
+    for (src, rule) in [
+        ("(defn g () (def y 1) y)", "expr.def"),
+        ("(defn mk () (defn made () 42) 0)", "expr.defn"),
+        ("(defn late () (import lib) 0)", "expr.module"),
+        ("(defn exp () (export x) 0)", "expr.module"),
+        ("(if false (def y 1) 0)", "expr.def"),
+        ("(let (a 1) (def y 2) y)", "expr.def"),
+        ("(fn () (def y 1))", "expr.def"),
+    ] {
+        let err = builder.eval(src).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "{src}");
+        assert_eq!(err.rule(), rule, "{src}");
+    }
+    let mod_err = builder
+        .load_module("mm", "(def z 0) (defn h () (def z (+ z 1)) z)")
+        .unwrap_err();
+    assert_eq!(mod_err.kind, ErrorKind::Parse);
+    assert_eq!(mod_err.rule(), "expr.def");
+}
+
+#[test]
 fn frozen_exposes_loaded_modules_without_import_and_keeps_isolation() {
     let mut alloc = HeapAllocator;
     let mut builder = Builder::new(Limits::default(), &mut alloc);

@@ -93,12 +93,28 @@ impl Runner<'_, '_> {
                         self.stack.push(v);
                     }
                     Op::DefGlobal(id) => {
+                        let span = chunk.spans[ip - 1];
                         let v = self.stack.pop().expect("stack underflow on DefGlobal");
+                        if self.frozen {
+                            self.pool.release_val(v);
+                            return Err(Error::runtime(
+                                "env.frozen",
+                                span,
+                                "'def' is not allowed in a frozen environment",
+                            ));
+                        }
                         self.define_top(id, v);
                         self.stack.push(RVal::Void);
                     }
                     Op::DefFn(name_id, proto_idx) => {
                         let span = chunk.spans[ip - 1];
+                        if self.frozen {
+                            return Err(Error::runtime(
+                                "env.frozen",
+                                span,
+                                "'defn' is not allowed in a frozen environment",
+                            ));
+                        }
                         let proto = &chunk.protos[proto_idx as usize];
                         let closure = self.build_closure(proto, captures.as_ref(), base, span)?;
                         self.define_top(name_id, closure);
@@ -646,6 +662,13 @@ impl Runner<'_, '_> {
                     }
                     Op::Import(id) => {
                         let span = chunk.spans[ip - 1];
+                        if self.frozen {
+                            return Err(Error::runtime(
+                                "env.frozen",
+                                span,
+                                "'import' is not allowed in a frozen environment",
+                            ));
+                        }
                         let name = &self.syms.names[id as usize];
                         let Some(&mod_val) = self.modules.get(name.as_ref()) else {
                             return Err(Error::runtime(
@@ -664,6 +687,13 @@ impl Runner<'_, '_> {
                     }
                     Op::Export(idx) => {
                         let span = chunk.spans[ip - 1];
+                        if self.frozen {
+                            return Err(Error::runtime(
+                                "env.frozen",
+                                span,
+                                "'export' is not allowed in a frozen environment",
+                            ));
+                        }
                         if self.active_module.is_none() {
                             return Err(Error::runtime(
                                 "expr.module",

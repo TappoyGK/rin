@@ -37,7 +37,7 @@ fn local_scope_and_closures() {
                 "unknown name 'damge'",
             ),
             (
-                "(defn broken () damge) (let (damage 1) (broken))",
+                "(let (broken (fn () damge)) (let (damage 1) (broken)))",
                 "unknown name 'damge'",
             ),
             (
@@ -55,6 +55,10 @@ fn local_scope_and_closures() {
             assert_eq!(hint(&wrapped), expected, "{wrapped}");
         }
     }
+    assert_eq!(
+        hint("(defn broken () damge) (let (damage 1) (broken))"),
+        "unknown name 'damge'"
+    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(def saved (let (damage 1) (fn () damge)))")
@@ -78,6 +82,10 @@ fn globals_builtins_modules_and_private_names() {
         "unknown name 'damge'; did you mean 'damage'?"
     );
     assert_eq!(hint("damge (def damage 1)"), "unknown name 'damge'");
+    assert_eq!(
+        hint("(defn broken () damge) (let (damage 1) (broken))"),
+        "unknown name 'damge'"
+    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module(
@@ -162,6 +170,10 @@ fn field_and_export_lists_are_sorted_and_bounded() {
         .join(", ");
     let expected = format!("Point has no field 'bad'; fields: {shown}, ... and 3 more");
     assert_eq!(hint(&format!("Point{{{fields}}}.bad")), expected);
+    assert_eq!(
+        hint("(defn broken () damge) (let (damage 1) (broken))"),
+        "unknown name 'damge'"
+    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module("empty", "(export)").unwrap();
@@ -184,13 +196,15 @@ fn field_and_export_lists_are_sorted_and_bounded() {
 
 #[test]
 fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
+    assert_eq!(
+        hint("(defn broken () damge) (let (damage 1) (broken))"),
+        "unknown name 'damge'"
+    );
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     // Interning an unexecuted definition does not make it a known global.
     for _ in 0..3 {
-        let err = m
-            .eval("(if false (def damge 1) 0) (let (damage 2) damge)")
-            .unwrap_err();
+        let err = m.eval("(let (damage 2) damge) (def damge 1)").unwrap_err();
         assert_eq!(err.message, "unknown name 'damge'; did you mean 'damage'?");
     }
     // Also compile while the previous module environment still contains damage.

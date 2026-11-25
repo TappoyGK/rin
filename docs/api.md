@@ -55,9 +55,11 @@ impl<'a> Machine<'a> {
 
 - `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。
-- `Builder::eval`：読み込み段階でソースを評価する（`def`・`defn`・`import` 等を許可する）。
-- `Builder::freeze`：大域環境と読み込み済みモジュールを凍結し、実行段階の `Machine` を返す。
-- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings` はその 1 回の評価にだけ有効で、評価終了時に解放する。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。
+- `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。
+- `Builder::freeze`：大域環境と読み込み済みモジュールを凍結し、実行段階の `Machine` を返す。将来の永続領域確定エラーに備えて `Result` を返す（現行実装では常に `Ok` を返す）。
+- 凍結後の `Machine` から読み込みの段階には戻れない。Mod を読み直す場合は、新しい `Builder` を作って読み込み・凍結し、ホスト側で `Machine` を差し替える（ホットリロードは組み込む側が担う）。
+- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効で、評価するソースとそこから呼ばれるモジュール外の関数から参照でき（モジュール内の関数からは参照されない）、評価終了時に解放する。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。名前解決の優先順位は、局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛 → 読み込み済みモジュール名とする。
+- Rust API では `call` / `call_in` は凍結後の `Machine` のみ提供する（C FFI では同一ハンドル上で `rin_call` / `rin_call_in` を凍結前・凍結後のどちらでも呼び出せる）。
 - `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
 - `live_bytes`：現在内部プール上で生存しているオブジェクトの概算バイト数を返す。
 
@@ -157,7 +159,7 @@ impl Error {
 - `Schema::check`（C FFI の `rin_check` / `rin_check_str` を含む）。値を消費せず同じ参照を巡回するスキーマは検証エラーとなる。
 - `Value` / `ListNode` の解放。共有された子は残し、最後の強参照を解放する際に子を分解する。Weak 参照が残る場合も扱う。
 
-import がメモリ上限・アロケータの確保失敗・取り込めない値で失敗した場合、生成途中の値を回収する。既存の束縛は保持し、同じ `Machine` を引き続き使える。C FFI の値操作は同じ値表現・解放処理を使用する。
+import がメモリ上限・アロケータの確保失敗・取り込めない値で失敗した場合、生成途中の値を回収する。既存の束縛は保持し、同じ `Builder` または `Machine` を引き続き使える。C FFI の値操作は同じ値表現・解放処理を使用する。
 
 変換と解放は深さ 32、比較と書式化は深さ 16 まで直接処理し、それ以降は反復処理だけで進める。反復処理から深さをリセットして再帰へ戻ることはない。作業スタックの小さい部分は固定長領域に置き、必要な場合だけシステムヒープへ拡張する。この一時領域とホスト側の `Value` は `memory_bytes` の計数対象ではない。すべての確保を指定アロケータへ統合する変更は別途行う。評価器の関数呼び出し深度に関する制約は 1.4 の `depth` と同じである。
 
@@ -266,14 +268,14 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
 | `RinMachine *rin_new(RinLimits limits, RinAllocator alloc)` | マシンを生成する |
 | `void rin_free(RinMachine *machine)` | マシンを破棄し内部プールを解放する（`NULL` 可） |
-| `bool rin_freeze(RinMachine *machine)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（すでに凍結済みなら `true`） |
+| `bool rin_freeze(RinMachine *machine)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`machine == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(RinMachine *machine, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
 | `RinMathFma rin_math_fma(const RinMachine *machine)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
-| `bool rin_bind(RinMachine *machine, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `[env.frozen]` エラー） |
+| `bool rin_bind(RinMachine *machine, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して `false`） |
 | `RinEvalResult rin_eval(RinMachine *machine, const char *source)` | ソースを評価し結果を返す（凍結後は `[env.frozen]`・`[env.modules]` を適用） |
-| `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `[env.frozen]` エラー） |
-| `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す |
-| `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す |
+| `RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
+| `RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `const RinError *rin_last_error(const RinMachine *machine)` | 直近の対象操作のエラーを借用する（エラーなし・NULL machine は NULL） |
 | `void rin_res_free(RinEvalResult *res)` | 結果の `value` を解放し NULL にする（エラー情報は保持する） |
 

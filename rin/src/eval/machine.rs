@@ -150,7 +150,7 @@ impl<'a> EnvState<'a> {
         let chunk = {
             let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
             let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals)?
+            compile_program(exprs, None, &mut self.syms, &self.globals, false)?
         };
         let mut runner = self.runner(None, false);
         let last = runner.run_top_chunk(&chunk)?;
@@ -167,9 +167,16 @@ impl<'a> EnvState<'a> {
         let chunk = {
             let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
             let exprs = scratch.parse(source)?;
-            validate_frozen_ast(exprs)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals)?
+            compile_program(exprs, None, &mut self.syms, &self.globals, true)?
         };
+
+        if bindings.is_empty() {
+            let mut runner = self.runner(None, true);
+            let last = runner.run_top_chunk(&chunk)?;
+            let exported = runner.pool.export(last);
+            runner.pool.release_val(last);
+            return Ok(exported);
+        }
 
         // 一時束縛を取り込み、失敗時は取り込み済みをすべて解放する。
         let mut eval_bindings = BTreeMap::new();
@@ -205,12 +212,13 @@ impl<'a> EnvState<'a> {
         }
 
         let mut runner = self.runner(None, true);
-        runner.eval_bindings = eval_bindings;
+        runner.eval_bindings = Some(eval_bindings);
         runner.eval_binding_names = eval_binding_names;
         let res = runner.run_top_chunk(&chunk);
-        let bindings_to_release = std::mem::take(&mut runner.eval_bindings);
-        for v in bindings_to_release.into_values() {
-            runner.pool.release_val(v);
+        if let Some(bindings_to_release) = runner.eval_bindings.take() {
+            for v in bindings_to_release.into_values() {
+                runner.pool.release_val(v);
+            }
         }
         let last = res?;
         let exported = runner.pool.export(last);
@@ -223,10 +231,11 @@ impl<'a> EnvState<'a> {
         setup: &[crate::ast::Expr],
         body: &[crate::ast::Expr],
     ) -> (Vec<crate::test::CheckFailure>, Result<(), Error>) {
-        let chunk = match compile_program_parts(setup, body, None, &mut self.syms, &self.globals) {
-            Ok(chunk) => chunk,
-            Err(error) => return (Vec::new(), Err(error)),
-        };
+        let chunk =
+            match compile_program_parts(setup, body, None, &mut self.syms, &self.globals, false) {
+                Ok(chunk) => chunk,
+                Err(error) => return (Vec::new(), Err(error)),
+            };
         let mut runner = self.runner(None, false);
         let result = runner
             .run_top_chunk(&chunk)
@@ -294,7 +303,7 @@ impl<'a> EnvState<'a> {
             steps_left: self.limits.steps,
             depth: 0,
             frozen,
-            eval_bindings: BTreeMap::new(),
+            eval_bindings: None,
             eval_binding_names: Vec::new(),
             pool: &mut self.pool,
             syms: &self.syms,

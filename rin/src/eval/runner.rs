@@ -66,7 +66,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 self.pool.retain_val(v);
                 return Ok(v);
             }
-        } else if let Some(&v) = self.eval_bindings.get(&id) {
+        } else if let Some(bindings) = &self.eval_bindings
+            && let Some(&v) = bindings.get(&id)
+        {
             self.pool.retain_val(v);
             return Ok(v);
         }

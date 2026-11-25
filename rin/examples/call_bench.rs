@@ -73,12 +73,14 @@ fn main() {
     }
     if selected.as_ref().is_none_or(|wanted| wanted == "eval_fib") {
         let source = "(defn ef (n) (if (< n 2) n (+ (ef (- n 1)) (ef (- n 2))))) (ef 12)";
+        let mut alloc = HeapAllocator;
+        let mut builder = Builder::new(Limits::default(), &mut alloc);
         for _ in 0..1000 {
-            assert_eq!(machine.eval(source).unwrap(), Value::Int(144));
+            assert_eq!(builder.eval(source).unwrap(), Value::Int(144));
         }
         let start = Instant::now();
         for _ in 0..iterations {
-            black_box(machine.eval(black_box(source)).unwrap());
+            black_box(builder.eval(black_box(source)).unwrap());
         }
         println!(
             "eval_fib: {:.1} ns/op",
