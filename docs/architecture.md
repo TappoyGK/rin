@@ -6,18 +6,18 @@ Rin インタプリタ（`rin` クレート）の評価環境・コンパイラ�
 
 評価環境は、公開 API を `Builder` と `Machine` の 2 つの型に分け、どちらも同じ内部構造体 `EnvState` を包む構成にしている（型定義は `rin/src/eval/mod.rs`、メソッド実装は `rin/src/eval/machine.rs`）。
 
-- **`EnvState`**（内部状態）: `Pool`（値プールとメモリ上限管理）、`SymTable`（シンボル番号表）、`globals`（大域スロット）、`modules`（公開済みモジュール）、`module_envs`（モジュール固有環境）、`ParseScratch`（再利用パーサ作業領域）を保持する。
+- **`EnvState`**（内部状態）: 主に `Pool`（値プールとメモリ上限管理）、`SymTable`（シンボル番号表）、`globals`（大域スロット）、`modules`（公開済みモジュール）、`module_envs`（モジュール固有環境）、`ParseScratch`（再利用パーサ作業領域）のほか、`limits`・`math_fma`・`module_ids`・`module_names` を保持する。
 - **`Builder`**（読み込み段階）: `bind`・`load_module`・`eval` で大域環境とモジュールを構築する。`freeze(self)` で `EnvState` の所有権ごと `Machine` へ移行する。
-- **`Machine`**（実行段階・凍結）: `eval`・`eval_with`・`call`・`call_in` のみを提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
-- **C FFI**（`rin/src/ffi/mod.rs`）: ポインタ型 `RinMachine*` を維持したまま内部で `Building` / `Frozen` 状態を持ち、`rin_freeze()` で不可逆に凍結する。凍結後の `rin_bind` / `rin_load` は `[env.frozen]` で拒否する。
+- **`Machine`**（実行段階・凍結）: `eval`・`eval_with`・`call`・`call_in`（および `set_math_fma`・`math_fma`・`live_bytes`）を提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
+- **C FFI（`RinMachine`）**（`rin/src/ffi/mod.rs`）: 内部で `Builder`（`Building`）または `Machine`（`Frozen`）を包み、評価処理をすべて委譲する C ABI 用ラッパー。ポインタ型 `RinMachine*` を維持したまま `rin_freeze()` で不可逆に凍結し（凍結後の `rin_bind` / `rin_load` は `[env.frozen]` で拒否）、直前エラー（`last_error`）と C アロケータの寿命も管理する。
 
 ```mermaid
 flowchart TD
-    B["Builder（読み込み）"] -->|"freeze()"| M["Machine（凍結）"]
-    F["C FFI: RinMachine"] -->|"rin_freeze()"| F
-    B --> E["EnvState"]
+    F["C FFI: RinMachine（ラッパー）"] -->|"Building"| B["Builder（読み込み）"]
+    F -->|"Frozen"| M["Machine（凍結）"]
+    B -->|"freeze()"| M
+    B --> E["EnvState（内部状態）"]
     M --> E
-    F --> E
 ```
 
 ## 2. 宣言の位置制限と凍結検査（1 パス）
@@ -47,11 +47,12 @@ flowchart TD
 
 VM の `Op::GetGlobal(id)` は `Runner::lookup_global`（`rin/src/eval/runner.rs`）で次の順に名前を解決する。
 
-1. **モジュール関数内（`active_module = Some(mod_id)`）**: そのモジュールの環境 `module_envs[mod_id]` を参照する。ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない（`[env.modules]`・`[env.isolation]`）。
-2. **モジュール外（`active_module = None`）**: `eval_with` の一時束縛（`EvalBindings`）があれば先に参照する。
-3. **大域環境**: `globals[id]`（組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
-4. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール一覧 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
-5. **未定義エラー**: どれにも無ければ `unknown_name`（`[expr.name]`）を返し、その時点で可視な名前だけを候補として提示する。
+1. **ローカルな最優先スコープ**:
+   - モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `module_envs[mod_id]` を参照する（ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない：`[env.modules]`・`[env.isolation]`）。
+   - モジュール外（`active_module = None`）なら、`eval_with` の一時束縛（`EvalBindings`）があれば参照する。
+2. **大域環境**: `globals[id]`（組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
+3. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール一覧 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
+4. **未定義エラー**: どれにも無ければ `unknown_name`（`[expr.name]`）を返し、その時点で可視な名前だけを候補として提示する。
 
 ```mermaid
 flowchart TD
