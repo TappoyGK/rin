@@ -45,7 +45,7 @@ typedef struct RinAllocator {
     void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align);
 } RinAllocator;
 
-typedef struct Rin Rin;
+typedef struct RinMachine RinMachine;
 typedef struct RinValue RinValue;
 typedef struct RinSchema RinSchema;
 
@@ -71,39 +71,31 @@ typedef struct RinError {
     const char *text;      /* 常に非 NULL。見出しと履歴の全体。 */
 } RinError;
 
-typedef struct RinBinding {
-    const char *name;
-    const RinValue *value;
-} RinBinding;
-
 typedef struct RinEvalResult {
     bool ok;
     RinValue *value; /* 評価・呼び出し成功時に所有。rin_load 成功時と失敗時は NULL。 */
 } RinEvalResult;
 
 RinLimits rin_limits_default(void);
-Rin *rin_new(RinLimits limits, RinAllocator alloc);
-void rin_free(Rin *rin);
-bool rin_freeze(Rin *rin);
-bool rin_set_math_fma(Rin *rin, RinMathFma mode);
-RinMathFma rin_math_fma(const Rin *rin);
-bool rin_bind(Rin *rin, const char *name, const RinValue *val);
-RinEvalResult rin_build(Rin *rin, const char *source);
-RinEvalResult rin_eval(Rin *rin, const char *source);
-RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count);
-RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source);
-RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc);
-RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
-/* 直近の対象操作のエラー。エラーなし、または rin == NULL なら NULL。
- * ポインタと文字列は同じ rin の次の rin_build / rin_eval / rin_eval_with /
- * rin_load / rin_call / rin_call_in / rin_bind / rin_freeze / rin_set_math_fma、
- * または rin_free まで有効。
+RinMachine *rin_new(RinLimits limits, RinAllocator alloc);
+void rin_free(RinMachine *machine);
+bool rin_freeze(RinMachine *machine);
+bool rin_set_math_fma(RinMachine *machine, RinMathFma mode);
+RinMathFma rin_math_fma(const RinMachine *machine);
+bool rin_bind(RinMachine *machine, const char *name, const RinValue *val);
+RinEvalResult rin_eval(RinMachine *machine, const char *source);
+RinEvalResult rin_load(RinMachine *machine, const char *mod_name, const char *source);
+RinEvalResult rin_call(RinMachine *machine, const char *fn_name, const RinValue *const *args, size_t argc);
+RinEvalResult rin_call_in(RinMachine *machine, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
+/* 直近の対象操作のエラー。エラーなし、または machine == NULL なら NULL。
+ * ポインタと文字列は同じ machine の次の rin_eval / rin_load / rin_call /
+ * rin_call_in / rin_bind / rin_freeze / rin_set_math_fma、または rin_free まで有効。
  * 対象操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
  * rin_last_error や rin_res_free は無効化しない。
- * NULL rin には記録できない。それ以外の引数エラーは RIN_ERR_HOST、位置は 0。
- * 同じ rin の対象操作・解放と並行して参照してはならない。
+ * NULL machine には記録できない。それ以外の引数エラーは RIN_ERR_HOST、位置は 0。
+ * 同じ machine の対象操作・解放と並行して参照してはならない。
  */
-const RinError *rin_last_error(const Rin *rin);
+const RinError *rin_last_error(const RinMachine *machine);
 void rin_res_free(RinEvalResult *res);
 
 RinValue *rin_int(int64_t n);

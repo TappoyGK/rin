@@ -172,7 +172,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             },
         );
         let c_src = std::ffi::CString::new(src).unwrap();
-        let mut res = crate::ffi::rin_build(cm, c_src.as_ptr());
+        let mut res = crate::ffi::rin_eval(cm, c_src.as_ptr());
         assert!(!res.ok);
         let bt_ptr = (*crate::ffi::rin_last_error(cm)).backtrace;
         assert!(!bt_ptr.is_null());
@@ -183,7 +183,7 @@ fn runtime_and_limit_errors_record_call_backtrace() {
 
         // 早期リターンによるエラーでも前回の呼び出し履歴は消去する。
         let bad_utf8 = [0xffu8, 0x00];
-        let mut bad_res = crate::ffi::rin_build(cm, bad_utf8.as_ptr().cast());
+        let mut bad_res = crate::ffi::rin_eval(cm, bad_utf8.as_ptr().cast());
         assert!(!bad_res.ok);
         assert!((*crate::ffi::rin_last_error(cm)).backtrace.is_null());
         crate::ffi::rin_res_free(&mut bad_res);

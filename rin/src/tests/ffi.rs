@@ -41,7 +41,7 @@ fn c_ffi_roundtrip_with_custom_allocator() {
         assert!(ffi::rin_bind(m, name.as_ptr(), v_in));
         ffi::rin_drop(v_in);
 
-        let mut res = ffi::rin_build(m, src.as_ptr());
+        let mut res = ffi::rin_eval(m, src.as_ptr());
         assert!(res.ok);
         assert_eq!(ffi::rin_tag(res.value), ffi::RinTag::Array);
         assert_eq!(ffi::rin_len(res.value), 4);
@@ -86,7 +86,7 @@ fn c_ffi_list_library_roundtrip() {
         ffi::rin_drop(l1);
         ffi::rin_drop(l2);
 
-        let mut res = ffi::rin_build(m, src.as_ptr());
+        let mut res = ffi::rin_eval(m, src.as_ptr());
         assert!(res.ok);
         assert_eq!(ffi::rin_tag(res.value), ffi::RinTag::List);
         assert_eq!(ffi::rin_len(res.value), 2);
@@ -131,7 +131,7 @@ fn c_ffi_struct_variant_field_extraction() {
     let f_elem = CString::new("element").unwrap();
 
     unsafe {
-        let mut res = ffi::rin_build(m, src.as_ptr());
+        let mut res = ffi::rin_eval(m, src.as_ptr());
         assert!(res.ok);
         assert!(ffi::rin_check_str(res.value, schema_src.as_ptr()));
 
@@ -189,7 +189,7 @@ fn c_ffi_call_and_struct_roundtrip() {
     let v_frost = CString::new("Frost").unwrap();
 
     unsafe {
-        let mut def_res = ffi::rin_build(m, def_src.as_ptr());
+        let mut def_res = ffi::rin_eval(m, def_src.as_ptr());
         assert!(def_res.ok);
         ffi::rin_res_free(&mut def_res);
 
