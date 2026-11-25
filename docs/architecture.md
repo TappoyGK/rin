@@ -4,7 +4,7 @@ Rin インタプリタ（`rin` クレート）の評価環境・コンパイラ�
 
 ## 1. 読み込み段階と実行段階の分離
 
-評価環境は、内部状態を共有しつつ公開 API を 2 つの型に分けている（`rin/src/eval/mod.rs`、`rin/src/eval/machine.rs`）。
+評価環境は、公開 API を `Builder` と `Machine` の 2 つの型に分け、どちらも同じ内部構造体 `EnvState` を包む構成にしている（型定義は `rin/src/eval/mod.rs`、メソッド実装は `rin/src/eval/machine.rs`）。
 
 - **`EnvState`**（内部状態）: `Pool`（値プールとメモリ上限管理）、`SymTable`（シンボル番号表）、`globals`（大域スロット）、`modules`（公開済みモジュール）、`module_envs`（モジュール固有環境）、`ParseScratch`（再利用パーサ作業領域）を保持する。
 - **`Builder`**（読み込み段階）: `bind`・`load_module`・`eval` で大域環境とモジュールを構築する。`freeze(self)` で `EnvState` の所有権ごと `Machine` へ移行する。
