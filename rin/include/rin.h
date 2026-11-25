@@ -71,6 +71,9 @@ typedef struct RinError {
     const char *text;      /* 常に非 NULL。見出しと履歴の全体。 */
 } RinError;
 
+/* rin_eval_with に渡す 1 件の初期束縛。
+ * name は NUL 終端の UTF-8、value は有効な RinValue で、呼び出しの間だけ有効であればよい（所有権は移動しない）。
+ */
 typedef struct RinBinding {
     const char *name;
     const RinValue *value;
@@ -90,6 +93,9 @@ RinMathFma rin_math_fma(const Rin *rin);
 bool rin_bind(Rin *rin, const char *name, const RinValue *val);
 RinEvalResult rin_build(Rin *rin, const char *source);
 RinEvalResult rin_eval(Rin *rin, const char *source);
+/* bindings は binding_count 個の有効な RinBinding を指すこと（binding_count == 0 なら NULL 可）。
+ * binding_count > 0 で bindings == NULL、要素の name/value が NULL、または name が不正 UTF-8 なら RIN_ERR_HOST。
+ */
 RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count);
 RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source);
 RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc);
