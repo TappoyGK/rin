@@ -10,7 +10,7 @@ use rin::ffi::{
     rin_set_math_fma,
 };
 use rin::math::{self, MathFma};
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 
 fn vectors_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,11 +43,11 @@ fn trig_matches_shared_vectors_strict_and_fused() {
     let mut strict_fused_diffs = 0usize;
 
     let mut alloc_s = HeapAllocator;
-    let mut machine_s = Machine::new(Limits::default(), &mut alloc_s);
+    let mut machine_s = Builder::new(Limits::default(), &mut alloc_s);
     assert_eq!(machine_s.math_fma(), MathFma::Strict);
 
     let mut alloc_f = HeapAllocator;
-    let mut machine_f = Machine::new(Limits::default(), &mut alloc_f);
+    let mut machine_f = Builder::new(Limits::default(), &mut alloc_f);
     machine_f.set_math_fma(MathFma::Fused);
     assert_eq!(machine_f.math_fma(), MathFma::Fused);
 
@@ -116,7 +116,7 @@ fn user_arithmetic_is_never_fused_even_in_fused_mode() {
 
     for mode in [MathFma::Strict, MathFma::Fused] {
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(Limits::default(), &mut alloc);
+        let mut machine = Builder::new(Limits::default(), &mut alloc);
         machine.set_math_fma(mode);
         machine.bind("a", &Value::Float(a)).unwrap();
         machine.bind("b", &Value::Float(b)).unwrap();

@@ -1,11 +1,11 @@
-use crate::{HeapAllocator, Limits, Machine, Schema, Value, ffi};
+use crate::{Builder, HeapAllocator, Limits, Schema, Value, ffi};
 
 #[test]
 fn modules_import_export_isolation_and_ffi_call_in() {
     use std::ffi::CString;
 
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     machine
         .load_module(
             "base",

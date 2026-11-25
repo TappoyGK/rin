@@ -1,4 +1,4 @@
-use crate::{ErrorKind, HeapAllocator, Limits, Machine, Value, eval, eval_with};
+use crate::{Builder, ErrorKind, HeapAllocator, Limits, Value, eval, eval_with};
 use std::collections::BTreeMap;
 
 #[test]
@@ -112,7 +112,7 @@ fn edge_cases_short_circuit_overflow_when_empty_match() {
 #[test]
 fn tail_call_optimization_and_with_eval_order() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(
+    let mut m = Builder::new(
         Limits {
             steps: 100_000,
             depth: 10,
@@ -158,7 +158,7 @@ fn cross_function_tail_calls_and_first_class_and_or() {
     assert_eq!(eval(diff_arity).unwrap(), Value::Int(6));
 
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module(
         "m",
         r#"

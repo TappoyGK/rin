@@ -56,9 +56,7 @@ pub(super) struct WhenAfterCondStep<'a> {
 }
 
 pub(super) struct FinishFnStep {
-    pub(super) name: Option<String>,
     pub(super) arity: u32,
-    pub(super) is_defn: bool,
     pub(super) span: Span,
 }
 
@@ -150,7 +148,7 @@ impl<'a> Compiler<'a> {
                     let captures: Vec<Capture> =
                         finished.captures.into_iter().map(|(_, c)| c).collect();
                     let proto = Rc::new(FnProto {
-                        name: ff.name.clone(),
+                        name: None,
                         module: finished.module,
                         arity: ff.arity,
                         local_count: finished.max_slots,
@@ -158,12 +156,7 @@ impl<'a> Compiler<'a> {
                         chunk: finished.chunk,
                     });
                     let p_idx = self.chunk().add_proto(proto);
-                    if ff.is_defn {
-                        let n_idx = self.syms.intern(ff.name.as_deref().unwrap());
-                        self.emit(Op::DefFn(n_idx, p_idx), ff.span);
-                    } else {
-                        self.emit(Op::MakeClosure(p_idx), ff.span);
-                    }
+                    self.emit(Op::MakeClosure(p_idx), ff.span);
                 }
                 Step::IfAfterCond(ic) => {
                     let j_else = self.emit(Op::JumpIfFalse(0), ic.cond_span);

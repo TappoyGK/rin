@@ -1,5 +1,5 @@
 //! 手動計測: cargo test -p rin --release --test builtin_cost_timing -- --ignored --nocapture
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 use std::{hint::black_box, time::Instant};
 
 #[test]
@@ -19,7 +19,7 @@ fn time_per_step_at_100_and_10000_elements() {
             ("equality", "(== xs ys)", 2 * n + 6),
         ] {
             let mut alloc = HeapAllocator;
-            let mut m = Machine::new(
+            let mut m = Builder::new(
                 Limits {
                     steps,
                     ..Limits::default()
@@ -31,6 +31,7 @@ fn time_per_step_at_100_and_10000_elements() {
             m.bind("ys", &xs).unwrap();
             m.bind("text", &Value::str("x".repeat(n))).unwrap();
             m.eval(&format!("(defn run () {body})")).unwrap();
+            let mut m = m.freeze().unwrap();
             m.call("run", &[]).unwrap();
             let repeats = if label == "unique" { 3 } else { 100 };
             let start = Instant::now();

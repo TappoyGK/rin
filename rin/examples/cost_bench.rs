@@ -1,7 +1,7 @@
 //! 通常実行の速度と、2 MiBスタックの余裕を比較する手動ベンチマーク。
 //! cargo run -p rin --release --example cost_bench
 //! cargo run -p rin --example cost_bench -- stack 300
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Machine, Value};
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 fn main() {
@@ -10,14 +10,15 @@ fn main() {
         let n = args[2].parse::<i64>().unwrap();
         std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(move || {
             let mut alloc = HeapAllocator;
-            let mut m = Machine::new(Limits { steps: usize::MAX, depth: usize::MAX, ..Limits::default() }, &mut alloc);
+            let mut m = Builder::new(Limits { steps: usize::MAX, depth: usize::MAX, ..Limits::default() }, &mut alloc);
             m.eval("(defn mdeep (n) (if (== n 0) 0 (+ 1 (fold (fn (acc x) (mdeep (- n 1))) 0 [1]))))").unwrap();
+            let mut m = m.freeze().unwrap();
             assert_eq!(m.call("mdeep", &[Value::Int(n)]).unwrap(), Value::Int(n));
         }).unwrap().join().unwrap();
         return;
     }
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(
+    let mut m = Builder::new(
         Limits {
             steps: usize::MAX,
             ..Limits::default()
@@ -25,6 +26,7 @@ fn main() {
         &mut alloc,
     );
     m.eval("(defn identity (x) x) (defn direct (x) (+ 1 (identity x))) (defn recur (n) (if (== n 0) 0 (+ 1 (recur (- n 1))))) (defn tail (n acc) (if (== n 0) acc (tail (- n 1) (+ acc 1)))) (defn fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))").unwrap();
+    let mut m = m.freeze().unwrap();
     for (name, args, repeats) in [
         ("direct", vec![Value::Int(7)], 200_000),
         ("recur", vec![Value::Int(100)], 2_000),
@@ -35,16 +37,12 @@ fn main() {
     }
     for n in [10usize, 10_000] {
         let xs = Value::list((0..n).map(|i| Value::Int(i as i64)).collect());
-        m.bind("xs", &xs).unwrap();
-        m.bind("ys", &xs).unwrap();
         let s = Value::structure(
             "S",
             (0..n)
                 .map(|i| (format!("f{i}"), Value::Int(i as i64)))
                 .collect::<BTreeMap<_, _>>(),
         );
-        m.bind("s", &s).unwrap();
-        m.bind("t", &s).unwrap();
         for (name, body) in [
             ("len", "(len xs)"),
             ("contains", "(contains xs 9)"),
@@ -53,7 +51,20 @@ fn main() {
             ("fold", "(fold + 0 xs)"),
             ("unique", "(len (unique xs))"),
         ] {
-            m.eval(&format!("(defn run () {body})")).unwrap();
+            let mut alloc = HeapAllocator;
+            let mut b = Builder::new(
+                Limits {
+                    steps: usize::MAX,
+                    ..Limits::default()
+                },
+                &mut alloc,
+            );
+            b.bind("xs", &xs).unwrap();
+            b.bind("ys", &xs).unwrap();
+            b.bind("s", &s).unwrap();
+            b.bind("t", &s).unwrap();
+            b.eval(&format!("(defn run () {body})")).unwrap();
+            let mut m = b.freeze().unwrap();
             let repeats = if n == 10 {
                 100_000
             } else if name == "unique" {

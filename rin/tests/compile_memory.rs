@@ -1,7 +1,7 @@
 //! steps=0でも行う解析・コンパイルのピークメモリを、複数の入力サイズで検証する。
 #[path = "../examples/compile_memory/mod.rs"]
 mod memory;
-use rin::{ErrorKind, HeapAllocator, Limits, Machine};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits};
 
 #[test]
 fn preparation_memory_scales_with_source_size() {
@@ -10,7 +10,7 @@ fn preparation_memory_scales_with_source_size() {
             .map(|i| format!("(defn f{i:08} (x) (+ x {i}))\n"))
             .collect::<String>();
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(
+        let mut machine = Builder::new(
             Limits {
                 steps: 0,
                 ..Limits::default()

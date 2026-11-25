@@ -1,6 +1,6 @@
 //! 同じ評価を別プロセス・別ビルドで実行し、値と診断の全出力を比較する。
 use super::*;
-use rin::{HeapAllocator, Machine};
+use rin::{Builder, HeapAllocator};
 use std::fmt::Write;
 use std::process::Command;
 
@@ -121,7 +121,7 @@ fn trig_modes(out: &mut String) {
         ("trig-fused", rin::MathFma::Fused),
     ] {
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(Limits::default(), &mut alloc);
+        let mut machine = Builder::new(Limits::default(), &mut alloc);
         machine.set_math_fma(mode);
         let result = machine.eval(source);
         if let Ok(Value::List(list)) = &result {
@@ -141,7 +141,7 @@ fn trig_modes(out: &mut String) {
 
 fn stateful(out: &mut String) {
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     for name in ["alpho", "alpha", "alphi"] {
         machine.bind(name, &Value::Int(1)).unwrap();
     }
@@ -166,12 +166,39 @@ fn stateful(out: &mut String) {
     ] {
         record(out, source, source, machine.eval(source));
     }
-    record(
-        out,
-        "host-call",
-        "",
-        machine.call_in("client", "call", &[Value::Int(2)]),
-    );
+    {
+        let mut alloc2 = HeapAllocator;
+        let mut b2 = Builder::new(Limits::default(), &mut alloc2);
+        b2.load_module(
+            "base",
+            "(export zeta alpha) (def zeta 2) (defn alpha (x) (/ x 0)) (def hidden 9)",
+        )
+        .unwrap();
+        b2.load_module(
+            "client",
+            "(import base) (defn call (x) (+ 1 (base.alpha x)))",
+        )
+        .unwrap();
+        let mut frozen = b2.freeze().unwrap();
+        record(
+            out,
+            "host-call",
+            "",
+            frozen.call_in("client", "call", &[Value::Int(2)]),
+        );
+        record(
+            out,
+            "frozen-module-access",
+            "base.zeta",
+            frozen.eval("base.zeta"),
+        );
+        record(
+            out,
+            "frozen-def-rejected",
+            "(def x 1)",
+            frozen.eval("(def x 1)"),
+        );
+    }
     machine
         .load_module("base", "(export zeta) (def zeta 7)")
         .unwrap();
@@ -181,6 +208,7 @@ fn stateful(out: &mut String) {
         "(import base) base.zeta",
         machine.eval("(import base) base.zeta"),
     );
+    let mut machine = machine.freeze().unwrap();
     record(
         out,
         "reload-error",

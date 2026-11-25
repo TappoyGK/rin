@@ -1,5 +1,5 @@
 //! cargo run --release --example value_bench で浅い値の処理時間と確保回数を測る。
-use rin::{HeapAllocator, Limits, Machine, Schema, Value};
+use rin::{Builder, HeapAllocator, Limits, Schema, Value};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,7 +48,7 @@ fn main() {
         return;
     }
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     let value = Value::list((0..8).map(Value::Int).collect());
     let other = Value::list((0..8).map(Value::Int).collect());
     let schema = Schema::parse("(list i64)").unwrap();
@@ -127,12 +127,13 @@ fn extended() {
         let v = make_case(case);
         let other = make_case(case);
         let mut alloc = HeapAllocator;
-        let mut m = Machine::new(Limits::default(), &mut alloc);
+        let mut m = Builder::new(Limits::default(), &mut alloc);
         m.eval("(defn id (x) x)").unwrap();
         m.bind("x", &v).unwrap();
         measure_n(&format!("{case} bind"), n, || {
             m.bind("x", black_box(&v)).unwrap();
         });
+        let mut m = m.freeze().unwrap();
         measure_n(&format!("{case} export"), n, || {
             black_box(m.eval("x").unwrap());
         });
@@ -156,8 +157,9 @@ fn extended() {
         });
     }
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(defn dedup () (unique (range 0 1000)))").unwrap();
+    let mut m = m.freeze().unwrap();
     measure_n("VM unique1000", 50, || {
         black_box(m.call("dedup", &[]).unwrap());
     });

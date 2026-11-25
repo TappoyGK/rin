@@ -31,8 +31,9 @@ pub(crate) fn compile_program(
     module: Option<u32>,
     syms: &mut SymTable,
     globals: &[Option<RVal>],
+    frozen: bool,
 ) -> Result<Chunk, Error> {
-    compile_program_parts(exprs, &[], module, syms, globals)
+    compile_program_parts(exprs, &[], module, syms, globals, frozen)
 }
 
 pub(crate) fn compile_program_parts<'a>(
@@ -41,12 +42,14 @@ pub(crate) fn compile_program_parts<'a>(
     module: Option<u32>,
     syms: &mut SymTable,
     globals: &[Option<RVal>],
+    frozen: bool,
 ) -> Result<Chunk, Error> {
     let mut compiler = Compiler {
         scopes: vec![Scope::new(module)],
         module,
         syms,
         globals,
+        frozen,
         name_table: NameTable::default(),
         shared_names: None,
     };
@@ -54,13 +57,13 @@ pub(crate) fn compile_program_parts<'a>(
         compiler.chunk().emit(Op::Void, Span::default());
     } else {
         if !exprs.is_empty() {
-            compiler.compile_body_shallow(exprs, false, 0)?;
+            compiler.compile_top_level(exprs)?;
             if !body.is_empty() {
                 compiler.emit(Op::Pop, Span::default());
             }
         }
         if !body.is_empty() {
-            compiler.compile_body_shallow(body, false, 0)?;
+            compiler.compile_top_level(body)?;
         }
         compiler.flush_ticks();
     }
@@ -84,11 +87,28 @@ struct Compiler<'a> {
     module: Option<u32>,
     syms: &'a mut SymTable,
     globals: &'a [Option<RVal>],
+    frozen: bool,
     name_table: NameTable,
     shared_names: Option<Rc<OnceCell<NameTable>>>,
 }
 
 impl<'a> Compiler<'a> {
+    fn decl_error(&self, form: &str, span: Span) -> Error {
+        if self.frozen {
+            Error::parse(
+                "env.frozen",
+                span,
+                format!("'{form}' is not allowed in a frozen environment"),
+            )
+        } else {
+            let msg = format!("'{form}' is only allowed at top level");
+            match form {
+                "def" => Error::parse("expr.def", span, msg),
+                "defn" => Error::parse("expr.defn", span, msg),
+                _ => Error::parse("expr.module", span, msg),
+            }
+        }
+    }
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.scopes.last_mut().unwrap().chunk
     }

@@ -1,5 +1,5 @@
 //! VM の既定深さを 2 MiB のネイティブスタック上で検証する。abort は子プロセスに隔離する。
-use rin::{ErrorKind, HeapAllocator, Limits, Machine};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits};
 
 fn chain(count: usize, builtin: &str, leaf: &str) -> String {
     let mut source = String::new();
@@ -50,9 +50,10 @@ fn default_depth_is_safe_on_two_mib_stack() {
                 let count = parts[1].parse::<usize>().unwrap();
                 let source = chain(count, parts[0], parts[2]);
                 let mut alloc = HeapAllocator;
-                let mut machine = Machine::new(Limits::default(), &mut alloc);
+                let mut machine = Builder::new(Limits::default(), &mut alloc);
                 let (definitions, call) = source.rsplit_once('\n').unwrap();
                 machine.eval(definitions).unwrap();
+                let mut machine = machine.freeze().unwrap();
                 let live_before = machine.live_bytes();
                 let result = if parts[3] == "host" {
                     let args = if parts[0] == "fold" {
@@ -150,7 +151,7 @@ fn callback_arity_errors_release_owned_arguments() {
                 continue;
             }
             let mut alloc = HeapAllocator;
-            let mut machine = Machine::new(Limits::default(), &mut alloc);
+            let mut machine = Builder::new(Limits::default(), &mut alloc);
             let live_before = machine.live_bytes();
             let args = " [\"owned\"]".repeat(argc);
             let error = machine.eval(&format!("({builtin}{args})")).unwrap_err();

@@ -1,9 +1,9 @@
 //! ホスト提供モジュールの読み込みとモジュール内の呼び出し。
 use super::*;
 
-impl Machine<'_> {
+impl EnvState<'_> {
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
-    pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
+    pub(super) fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         let with_mod = |mut err: Error| {
             err.resolve_module(Some(name.to_string()));
             err
@@ -21,7 +21,8 @@ impl Machine<'_> {
         let chunk = {
             let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
             let exprs = scratch.parse(source).map_err(with_mod)?;
-            compile_program(exprs, Some(mod_id), &mut self.syms, &self.globals).map_err(with_mod)?
+            compile_program(exprs, Some(mod_id), &mut self.syms, &self.globals, false)
+                .map_err(with_mod)?
         };
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
             .into_iter()
@@ -29,7 +30,7 @@ impl Machine<'_> {
         {
             self.pool.release_val(v);
         }
-        let mut runner = self.runner(Some(mod_id));
+        let mut runner = self.runner(Some(mod_id), false);
         let v = runner.run_top_chunk(&chunk).map_err(with_mod)?;
         runner.pool.release_val(v);
         let export_filter = runner.export_list.take();
@@ -81,11 +82,12 @@ impl Machine<'_> {
     }
 
     /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
-    pub fn call_in(
+    pub(super) fn call_in(
         &mut self,
         mod_name: &str,
         fn_name: &str,
         args: &[Value],
+        frozen: bool,
     ) -> Result<Value, Error> {
         let Some(&RVal::Obj(mod_id)) = self.modules.get(mod_name) else {
             return Err(Error::runtime(
@@ -112,6 +114,6 @@ impl Machine<'_> {
                 ),
             ));
         };
-        self.call_rval(callee, args)
+        self.call_rval(callee, args, frozen)
     }
 }

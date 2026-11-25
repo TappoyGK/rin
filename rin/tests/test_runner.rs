@@ -1,5 +1,5 @@
 use rin::test::{TestStatus, run, run_filtered};
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value, eval};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value, eval};
 
 #[test]
 fn collects_checks_in_control_flow_and_continues_after_failure() {
@@ -90,7 +90,7 @@ fn test_syntax_is_rejected_outside_its_context() {
     ] {
         assert_eq!(eval(source).unwrap_err().kind, ErrorKind::Parse);
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(Limits::default(), &mut alloc);
+        let mut machine = Builder::new(Limits::default(), &mut alloc);
         assert_eq!(
             machine.load_module("m", source).unwrap_err().kind,
             ErrorKind::Parse

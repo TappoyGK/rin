@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- **破壊的変更**: 大域環境の凍結（読み込みの段階と実行の段階の分離）を導入し、`def`・`defn`・`import`・`export` をトップレベル専用（関数本体や式の中は読み込み段階でも `[expr.def]`・`[expr.defn]`・`[expr.module]` の構文エラー）とした。Rust API では `Machine::new`・`bind`・`load_module` を `Builder` へ移し、`Builder::freeze()` で実行専用の `Machine`（`eval`・`eval_with`・`call`・`call_in`）へ移行する形とした。C FFI には `rin_freeze` を追加した。凍結後は `def`・`defn`・`import`・`export` を位置によらず評価前に `[env.frozen]` の構文エラーとし、読み込み済みモジュールを `import` なしで `mod_name.symbol` として参照できる（移行手順：`Machine::new` → `Builder::new`、読み込み完了後に `.freeze()?` で `Machine` を取得する）（[PR #63](https://github.com/TappoyGK/rin/pull/63)）。
+
 - `sin`・`cos` を環境によらずビット一致する自前の実装に置き換え、`[eval.determinism]` の例外を廃止した。`MathFma`（`Strict` / `Fused`、既定は `Strict`）設定と、Suz と共有する手順書（`docs/math-spec.md`）およびテスト値（`docs/math-vectors/sin-cos.tsv`）を追加した（[PR #62](https://github.com/TappoyGK/rin/pull/62)）。
 
 - 組み込み関数の走査・比較・生成と、`with` による構造体の複製を、要素数・文字列長・フィールド数に応じてステップ数へ計上するようにした。同じ `steps` 上限でも、従来より早く `TooManySteps` になる場合がある。関数ごとの計上式に加え、ステップに数えないコンパイル・解放・診断の処理量と制御方法を仕様に定めた（[PR #58](https://github.com/TappoyGK/rin/pull/58)）。

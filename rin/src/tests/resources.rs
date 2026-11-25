@@ -1,5 +1,5 @@
 use crate::{
-    ArenaAllocator, ErrorKind, HeapAllocator, Limits, Machine, Value, eval_with,
+    ArenaAllocator, Builder, ErrorKind, HeapAllocator, Limits, Value, eval_with,
     eval_with_allocator,
 };
 
@@ -47,7 +47,7 @@ fn arena_allocator_reuses_slots_across_many_calls() {
     let mut backing = vec![0u8; 64 * 1024];
     let mut arena = ArenaAllocator::new(&mut backing);
     {
-        let mut machine = Machine::new(Limits::default(), &mut arena);
+        let mut machine = Builder::new(Limits::default(), &mut arena);
         machine
             .eval("(defn sum_double (n) (fold + 0 (map (fn (x) (* x 2)) (range 0 n))))")
             .unwrap();
@@ -74,7 +74,7 @@ fn arena_exhaustion_returns_too_much_memory() {
 fn error_paths_do_not_leak_pool_slots() {
     let mut backing = vec![0u8; 64 * 1024];
     let mut arena = ArenaAllocator::new(&mut backing);
-    let mut machine = Machine::new(
+    let mut machine = Builder::new(
         Limits {
             steps: 200,
             depth: 50,
@@ -117,7 +117,7 @@ fn error_paths_do_not_leak_pool_slots() {
 fn memory_limit_does_not_double_free_shared_values_or_modules() {
     // 再現 1: memory_bytes 上限超過時に共有された大域文字列を二重解放しない。
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(
+    let mut m = Builder::new(
         Limits {
             steps: 100_000,
             depth: 200,
@@ -133,7 +133,7 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
 
     // 再現 2: memory_bytes 上限で失敗した load_module が大域環境を壊さない。
     let mut alloc2 = HeapAllocator;
-    let mut m2 = Machine::new(
+    let mut m2 = Builder::new(
         Limits {
             steps: 100_000,
             depth: 200,

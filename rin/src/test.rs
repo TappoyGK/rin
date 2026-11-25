@@ -2,7 +2,7 @@
 
 use crate::ast::{Expr, ExprKind, Pattern, children};
 use crate::parser::{ParseScratch, ParseScratchGuard, parse_tests};
-use crate::{Error, HeapAllocator, Limits, Machine, Span, Value};
+use crate::{Builder, Error, HeapAllocator, Limits, Span, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 失敗した検査の位置と評価済みの値。
@@ -90,7 +90,7 @@ pub fn run_filtered(
                 continue;
             }
             let mut alloc = HeapAllocator;
-            let mut machine = Machine::new(limits, &mut alloc);
+            let mut machine = Builder::new(limits, &mut alloc);
             let mut error = None;
             for &idx in &order {
                 let (name, source) = modules[idx];

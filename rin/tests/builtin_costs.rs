@@ -1,16 +1,18 @@
 //! ホスト呼び出しで式評価分を除き、組み込み関数の計上式を検証する。
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 
 fn check(name: &str, args: &[Value], cost: usize, expected: Value) {
     for steps in 0..=cost + 1 {
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(
+        let mut machine = Builder::new(
             Limits {
                 steps,
                 ..Limits::default()
             },
             &mut alloc,
-        );
+        )
+        .freeze()
+        .unwrap();
         for _ in 0..3 {
             let result = machine.call(name, args);
             if steps < cost {
@@ -264,13 +266,15 @@ fn strings_nested_equality_and_scalar_operations() {
 #[test]
 fn huge_range_rejects_overflow_before_allocating() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(
+    let mut m = Builder::new(
         Limits {
             steps: usize::MAX,
             ..Limits::default()
         },
         &mut alloc,
-    );
+    )
+    .freeze()
+    .unwrap();
     assert_eq!(
         m.call("range", &[Value::Int(i64::MIN), Value::Int(i64::MAX)])
             .unwrap_err()

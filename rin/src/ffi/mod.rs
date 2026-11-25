@@ -5,8 +5,8 @@ use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 
 use crate::alloc::{Allocator, HeapAllocator};
-use crate::error::{Error, Limits};
-use crate::eval::Machine;
+use crate::error::{Error, Limits, Span};
+use crate::eval::{Builder, Machine};
 use crate::math::MathFma;
 use crate::value::Value;
 
@@ -99,11 +99,26 @@ impl Allocator for CAllocator {
     }
 }
 
+enum RinMachineState {
+    Building(Builder<'static>),
+    Frozen(Machine<'static>),
+}
+
 pub struct RinMachine {
-    // `Pool::drop` が `_alloc` を呼ぶため、`_alloc` より先に `machine` を破棄する。
-    machine: Machine<'static>,
+    // `Pool::drop` が `_alloc` を呼ぶため、`_alloc` より先に `state` を破棄する。
+    state: Option<RinMachineState>,
     last_error: Option<StoredError>,
     _alloc: Box<CAllocator>,
+}
+
+impl RinMachine {
+    fn state_ref(&self) -> &RinMachineState {
+        self.state.as_ref().expect("RinMachine state present")
+    }
+
+    fn state_mut(&mut self) -> &mut RinMachineState {
+        self.state.as_mut().expect("RinMachine state present")
+    }
 }
 
 fn make_err_res(m: &mut RinMachine, err: Error) -> RinEvalResult {
@@ -157,9 +172,9 @@ pub extern "C" fn rin_new(limits: RinLimits, alloc: RinAllocator) -> *mut RinMac
     // SAFETY: `boxed_alloc` は `RinMachine` 内に保持し、`machine` より後に破棄する。
     let alloc_ref: &'static mut dyn Allocator =
         unsafe { &mut *(boxed_alloc.as_mut() as *mut CAllocator as *mut dyn Allocator) };
-    let machine = Machine::new(limits.into(), alloc_ref);
+    let builder = Builder::new(limits.into(), alloc_ref);
     Box::into_raw(Box::new(RinMachine {
-        machine,
+        state: Some(RinMachineState::Building(builder)),
         last_error: None,
         _alloc: boxed_alloc,
     }))
@@ -172,6 +187,36 @@ pub unsafe extern "C" fn rin_free(machine: *mut RinMachine) {
     if !machine.is_null() {
         // SAFETY: `machine` は `Box::into_raw` で生成したポインタ。
         unsafe { drop(Box::from_raw(machine)) };
+    }
+}
+
+/// 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する。
+/// すでに凍結済みの場合はそのまま `true` を返す。
+///
+/// # Safety
+/// `machine` は NULL または排他的に利用できる有効なポインタでなければならない。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_freeze(machine: *mut RinMachine) -> bool {
+    // SAFETY: 呼び出し側が machine の有効性と排他的アクセスを保証する。
+    let Some(m) = (unsafe { begin_operation(machine) }) else {
+        return false;
+    };
+    if let RinMachineState::Building(builder) = m.state_ref()
+        && let Err(err) = builder.check_freeze()
+    {
+        make_err_res(m, err);
+        return false;
+    }
+    match m.state.take().expect("RinMachine state present") {
+        RinMachineState::Building(builder) => {
+            let frozen = builder.freeze().expect("check_freeze already succeeded");
+            m.state = Some(RinMachineState::Frozen(frozen));
+            true
+        }
+        RinMachineState::Frozen(frozen) => {
+            m.state = Some(RinMachineState::Frozen(frozen));
+            true
+        }
     }
 }
 
@@ -193,7 +238,10 @@ pub unsafe extern "C" fn rin_set_math_fma(machine: *mut RinMachine, mode: i32) -
             return false;
         }
     };
-    m.machine.set_math_fma(parsed);
+    match m.state_mut() {
+        RinMachineState::Building(b) => b.set_math_fma(parsed),
+        RinMachineState::Frozen(f) => f.set_math_fma(parsed),
+    }
     true
 }
 
@@ -207,7 +255,11 @@ pub unsafe extern "C" fn rin_math_fma(machine: *const RinMachine) -> RinMathFma 
     let Some(m) = (unsafe { machine.as_ref() }) else {
         return RinMathFma::Strict;
     };
-    match m.machine.math_fma() {
+    let mode = match m.state_ref() {
+        RinMachineState::Building(b) => b.math_fma(),
+        RinMachineState::Frozen(f) => f.math_fma(),
+    };
+    match mode {
         MathFma::Strict => RinMathFma::Strict,
         MathFma::Fused => RinMathFma::Fused,
     }
@@ -237,7 +289,15 @@ pub unsafe extern "C" fn rin_bind(
     };
     // SAFETY: 呼び出し側が有効な `RinValue` を保証する。
     let v = unsafe { &(*val).0 };
-    match m.machine.bind(key, v) {
+    let res = match m.state_mut() {
+        RinMachineState::Building(b) => b.bind(key, v),
+        RinMachineState::Frozen(_) => Err(Error::runtime(
+            "env.frozen",
+            Span::default(),
+            "cannot bind in a frozen environment",
+        )),
+    };
+    match res {
         Ok(()) => true,
         Err(err) => {
             make_err_res(m, err);
@@ -266,7 +326,11 @@ pub unsafe extern "C" fn rin_eval(
         return host_error(m, "invalid UTF-8 source");
     };
 
-    match m.machine.eval(src) {
+    let res = match m.state_mut() {
+        RinMachineState::Building(b) => b.eval(src),
+        RinMachineState::Frozen(f) => f.eval(src),
+    };
+    match res {
         Ok(val) => RinEvalResult {
             ok: true,
             value: Box::into_raw(Box::new(RinValue(val))),
@@ -310,7 +374,11 @@ pub unsafe extern "C" fn rin_call(
             owned_args.push(unsafe { &(*ptr).0 }.clone());
         }
     }
-    match m.machine.call(name, &owned_args) {
+    let res = match m.state_mut() {
+        RinMachineState::Building(b) => b.call(name, &owned_args),
+        RinMachineState::Frozen(f) => f.call(name, &owned_args),
+    };
+    match res {
         Ok(val) => RinEvalResult {
             ok: true,
             value: Box::into_raw(Box::new(RinValue(val))),
@@ -343,7 +411,15 @@ pub unsafe extern "C" fn rin_load(
     ) else {
         return host_error(m, "invalid UTF-8 argument");
     };
-    match m.machine.load_module(name, src) {
+    let res = match m.state_mut() {
+        RinMachineState::Building(b) => b.load_module(name, src),
+        RinMachineState::Frozen(_) => Err(Error::runtime(
+            "env.frozen",
+            Span::default(),
+            "cannot load module in a frozen environment",
+        )),
+    };
+    match res {
         Ok(()) => RinEvalResult {
             ok: true,
             value: std::ptr::null_mut(),
@@ -391,7 +467,11 @@ pub unsafe extern "C" fn rin_call_in(
             owned_args.push(unsafe { &(*ptr).0 }.clone());
         }
     }
-    match m.machine.call_in(mname, fname, &owned_args) {
+    let res = match m.state_mut() {
+        RinMachineState::Building(b) => b.call_in(mname, fname, &owned_args),
+        RinMachineState::Frozen(f) => f.call_in(mname, fname, &owned_args),
+    };
+    match res {
         Ok(val) => RinEvalResult {
             ok: true,
             value: Box::into_raw(Box::new(RinValue(val))),
@@ -401,7 +481,7 @@ pub unsafe extern "C" fn rin_call_in(
 }
 
 /// 直近の対象操作のエラーを借用する。エラーなし、または NULL machine なら NULL。
-/// 次の rin_eval / rin_load / rin_call / rin_call_in / rin_bind / rin_set_math_fma、または rin_free まで有効。
+/// 次の rin_eval / rin_load / rin_call / rin_call_in / rin_bind / rin_freeze / rin_set_math_fma、または rin_free まで有効。
 /// この取得関数や rin_res_free はエラーを無効化しない。ホストは解放しない。
 ///
 /// # Safety

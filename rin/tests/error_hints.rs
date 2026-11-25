@@ -1,4 +1,4 @@
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value, eval};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value, eval};
 
 fn hint(source: &str) -> String {
     let error = eval(source).unwrap_err();
@@ -37,7 +37,7 @@ fn local_scope_and_closures() {
                 "unknown name 'damge'",
             ),
             (
-                "(defn broken () damge) (let (damage 1) (broken))",
+                "(let (broken (fn () damge)) (let (damage 1) (broken)))",
                 "unknown name 'damge'",
             ),
             (
@@ -55,10 +55,15 @@ fn local_scope_and_closures() {
             assert_eq!(hint(&wrapped), expected, "{wrapped}");
         }
     }
+    assert_eq!(
+        hint("(defn broken () damge) (let (damage 1) (broken))"),
+        "unknown name 'damge'"
+    );
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(def saved (let (damage 1) (fn () damge)))")
         .unwrap();
+    let mut m = m.freeze().unwrap();
     let err = m.call("saved", &[]).unwrap_err();
     assert_eq!(err.message, "unknown name 'damge'; did you mean 'damage'?");
     assert_eq!(err.rule(), "expr.name");
@@ -78,7 +83,7 @@ fn globals_builtins_modules_and_private_names() {
     );
     assert_eq!(hint("damge (def damage 1)"), "unknown name 'damge'");
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module(
         "combat",
         "(def damage 1) (defn attack () 1) (export attack)",
@@ -99,6 +104,17 @@ fn globals_builtins_modules_and_private_names() {
         m.eval("combat.damge").unwrap_err().message,
         "module 'combat' has no export 'damge'; exports: attack"
     );
+    m.bind("damage", &Value::Int(1)).unwrap();
+    m.load_module("other", "(def damage 2) (defn fail () damge)")
+        .unwrap();
+    m.load_module(
+        "private",
+        "(def shield 1) (defn fail () shild) (export fail)",
+    )
+    .unwrap();
+    assert_eq!(m.eval("shild").unwrap_err().message, "unknown name 'shild'");
+    m.bind("cat猫", &Value::Int(1)).unwrap();
+    let mut m = m.freeze().unwrap();
     assert_eq!(
         m.call_in("combat", "damge", &[]).unwrap_err().message,
         "module 'combat' has no export 'damge'; exports: attack"
@@ -107,27 +123,17 @@ fn globals_builtins_modules_and_private_names() {
         m.call_in("combt", "attack", &[]).unwrap_err().message,
         "unknown module 'combt'; did you mean 'combat'?"
     );
-    m.bind("damage", &Value::Int(1)).unwrap();
     assert_eq!(
         m.call("damge", &[]).unwrap_err().message,
         "unknown function 'damge'; did you mean 'damage'?"
     );
-    m.load_module("other", "(def damage 2) (defn fail () damge)")
-        .unwrap();
     let err = m.call_in("other", "fail", &[]).unwrap_err();
     assert_eq!(err.message, "unknown name 'damge'; did you mean 'damage'?");
     assert_eq!(err.module(), Some("other"));
-    m.load_module(
-        "private",
-        "(def shield 1) (defn fail () shild) (export fail)",
-    )
-    .unwrap();
     assert_eq!(
         m.call_in("private", "fail", &[]).unwrap_err().message,
         "unknown name 'shild'; did you mean 'shield'?"
     );
-    assert_eq!(m.eval("shild").unwrap_err().message, "unknown name 'shild'");
-    m.bind("cat猫", &Value::Int(1)).unwrap();
     assert_eq!(
         m.call("cat犬", &[]).unwrap_err().message,
         "unknown function 'cat犬'; did you mean 'cat猫'?"
@@ -161,18 +167,19 @@ fn field_and_export_lists_are_sorted_and_bounded() {
     let expected = format!("Point has no field 'bad'; fields: {shown}, ... and 3 more");
     assert_eq!(hint(&format!("Point{{{fields}}}.bad")), expected);
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.load_module("empty", "(export)").unwrap();
-    assert_eq!(
-        m.call_in("empty", "bad", &[]).unwrap_err().message,
-        "module 'empty' has no export 'bad'; exports: (none)"
-    );
     let defs = (0..19)
         .rev()
         .map(|i| format!("(def f{i:02} 0)"))
         .collect::<Vec<_>>()
         .join(" ");
     m.load_module("many", &defs).unwrap();
+    let mut m = m.freeze().unwrap();
+    assert_eq!(
+        m.call_in("empty", "bad", &[]).unwrap_err().message,
+        "module 'empty' has no export 'bad'; exports: (none)"
+    );
     assert_eq!(
         m.call_in("many", "bad", &[]).unwrap_err().message,
         format!("module 'many' has no export 'bad'; exports: {shown}, ... and 3 more")
@@ -182,12 +189,10 @@ fn field_and_export_lists_are_sorted_and_bounded() {
 #[test]
 fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     // Interning an unexecuted definition does not make it a known global.
     for _ in 0..3 {
-        let err = m
-            .eval("(if false (def damge 1) 0) (let (damage 2) damge)")
-            .unwrap_err();
+        let err = m.eval("(let (damage 2) damge) (def damge 1)").unwrap_err();
         assert_eq!(err.message, "unknown name 'damge'; did you mean 'damage'?");
     }
     // Also compile while the previous module environment still contains damage.
@@ -199,15 +204,15 @@ fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
         .unwrap();
     }
     m.eval("(import combat) (def old combat.saved)").unwrap();
-    assert_eq!(m.call("old", &[]).unwrap(), Value::Int(1));
+    assert_eq!(m.eval("(old)").unwrap(), Value::Int(1));
     // Old closures survive reloading, but their module's definitions can disappear.
     m.load_module("combat", "0").unwrap();
     assert_eq!(
-        m.call("old", &[]).unwrap_err().message,
+        m.eval("(old)").unwrap_err().message,
         "unknown name 'damage'; did you mean 'damge'?"
     );
     m.bind("damage", &Value::Int(3)).unwrap();
-    assert_eq!(m.call("old", &[]).unwrap(), Value::Int(3));
+    assert_eq!(m.eval("(old)").unwrap(), Value::Int(3));
     m.bind("damage", &Value::Int(4)).unwrap();
-    assert_eq!(m.call("old", &[]).unwrap(), Value::Int(4));
+    assert_eq!(m.eval("(old)").unwrap(), Value::Int(4));
 }

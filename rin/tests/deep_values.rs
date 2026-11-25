@@ -1,7 +1,7 @@
 //! 値の深さによる abort を子プロセスと小さいスタックで検出する。
 use rin::ffi::*;
 use rin::value::ListNode;
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Schema, Value};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Schema, Value};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::rc::Rc;
@@ -39,7 +39,7 @@ impl std::fmt::Write for Fail {
 
 fn deep_roundtrips() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(
+    let mut m = Builder::new(
         Limits {
             steps: 1_000_000, // 深い構造体の名前・フィールド比較も計上する。
             memory_bytes: 128 * 1024 * 1024,
@@ -195,7 +195,7 @@ fn failure_cleanup() {
             nested(shape, 500, Value::Builtin("not-a-builtin")),
         ]);
         let mut alloc = HeapAllocator;
-        let mut m = Machine::new(Limits::default(), &mut alloc);
+        let mut m = Builder::new(Limits::default(), &mut alloc);
         m.bind("keep", &Value::str("retained")).unwrap();
         let before = m.live_bytes();
         for _ in 0..3 {
@@ -206,7 +206,7 @@ fn failure_cleanup() {
         // メモリ上限を変えて、子の変換途中・親の確保失敗を通す。
         for budget in [0, 40, 100, 500, 4000, 8000] {
             let mut alloc = HeapAllocator;
-            let mut m = Machine::new(
+            let mut m = Builder::new(
                 Limits {
                     memory_bytes: budget,
                     ..Limits::default()
@@ -243,7 +243,7 @@ fn allocator_failures() {
     let deep = nested(4, 2000, Value::None);
     for remaining in 0..4 {
         let mut alloc = FailAfter { remaining };
-        let mut m = Machine::new(Limits::default(), &mut alloc);
+        let mut m = Builder::new(Limits::default(), &mut alloc);
         assert_eq!(
             m.bind("x", &deep).unwrap_err().kind,
             ErrorKind::TooMuchMemory
@@ -253,8 +253,9 @@ fn allocator_failures() {
     }
     // すでに取り込んだ別引数と、変換中の兄弟の両方を回収する。
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(defn accept (a b) 1)").unwrap();
+    let mut m = m.freeze().unwrap();
     let before = m.live_bytes();
     let bad = Value::array(vec![deep.clone(), Value::Builtin("invalid")]);
     assert_eq!(
@@ -348,7 +349,7 @@ fn formatting_and_schema_error_order() {
 #[test]
 fn shallow_and_iterative_paths_agree() {
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     for depth in [7, 8, 9, 15, 16, 17, 31, 32, 33, 64] {
         for shape in 0..8 {
             let value = nested(shape, depth, Value::Int(7));
