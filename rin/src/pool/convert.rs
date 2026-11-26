@@ -53,7 +53,17 @@ impl Pool<'_> {
                                     })?,
                             )),
                             Value::Str(s) => Some(RVal::Obj(self.alloc_str(s.as_str(), span)?)),
-                            Value::Ident(s) => Some(RVal::Obj(self.alloc_ident(s.as_str(), span)?)),
+                            Value::Ident(s) => {
+                                if !crate::lexer::is_valid_ident(s.as_str()) {
+                                    return Err(self.core.err_fmt(
+                                        "host.value",
+                                        ErrorKind::Runtime,
+                                        span,
+                                        format_args!("invalid identifier '{s}'"),
+                                    ));
+                                }
+                                Some(RVal::Obj(self.alloc_ident(s.as_str(), span)?))
+                            }
                             _ => None,
                         };
                         if let Some(v) = scalar {

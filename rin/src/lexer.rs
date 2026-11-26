@@ -217,7 +217,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 self.lex_number(span, true)?
             }
-            _ if is_ident_start(b) => TokenKind::Ident(self.lex_ident()),
+            _ if is_ident_start(b) => TokenKind::Ident(self.lex_ident(span)?),
             _ => {
                 return Err(Error::lex(
                     "src.token",
@@ -496,7 +496,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_ident(&mut self) -> String {
+    fn lex_ident(&mut self, span: Span) -> Result<String, Error> {
         let mut out = String::new();
         while let Some(b) = self.peek() {
             if is_ident_continue(b) {
@@ -506,7 +506,14 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        out
+        if self.peek() == Some(b'\'') {
+            return Err(Error::lex(
+                "src.ident",
+                span,
+                "single quote '\\'' is not allowed in identifier",
+            ));
+        }
+        Ok(out)
     }
 }
 

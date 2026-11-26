@@ -323,6 +323,14 @@ impl Lexer<'_> {
                 break;
             }
         }
+        if self.peek() == Some(b'\'') {
+            return Err(core.err_str(
+                "src.ident",
+                ErrorKind::Lex,
+                span,
+                "single quote '\\'' is not allowed in identifier",
+            ));
+        }
         // SAFETY: `is_ident_continue` は ASCII のみなので有効な UTF-8。
         let s = unsafe { std::str::from_utf8_unchecked(&self.src[start..self.pos]) };
         match RawStr::from_work(work, core, s) {

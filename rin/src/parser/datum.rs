@@ -76,6 +76,13 @@ impl Parser<'_, '_, '_> {
                 })
             }
             WorkTokenKind::Unquote => {
+                if qq_depth == 0 {
+                    return Err(self.parse_err(
+                        "src.syntax",
+                        span,
+                        "unquote ',' is only allowed inside quasiquote",
+                    ));
+                }
                 self.advance()?;
                 if qq_depth == 1 {
                     self.push_frame(
@@ -98,12 +105,19 @@ impl Parser<'_, '_, '_> {
                         span,
                     )?;
                     Ok(NextStep::StartDatum {
-                        qq_depth: qq_depth.saturating_sub(1),
+                        qq_depth: qq_depth - 1,
                         allow_splice: false,
                     })
                 }
             }
             WorkTokenKind::UnquoteSplicing => {
+                if qq_depth == 0 {
+                    return Err(self.parse_err(
+                        "src.syntax",
+                        span,
+                        "unquote-splicing ',@' is only allowed inside quasiquote",
+                    ));
+                }
                 self.advance()?;
                 if qq_depth == 1 {
                     if !allow_splice {
@@ -133,7 +147,7 @@ impl Parser<'_, '_, '_> {
                         span,
                     )?;
                     Ok(NextStep::StartDatum {
-                        qq_depth: qq_depth.saturating_sub(1),
+                        qq_depth: qq_depth - 1,
                         allow_splice: false,
                     })
                 }
@@ -201,105 +215,117 @@ impl Parser<'_, '_, '_> {
             ));
         }
 
-        if qq_depth >= 1 {
-            let special = if let WorkTokenKind::Ident(head) = self.peek().kind {
-                let next_tok = self.peek_next()?;
-                let is_plain_head = !matches!(next_tok.map(|t| t.kind), Some(WorkTokenKind::Dot))
-                    && !matches!(
-                        next_tok,
-                        Some(WorkToken {
-                            kind: WorkTokenKind::LBracket,
-                            attached: true,
-                            ..
-                        })
-                    );
-                if is_plain_head { Some(head) } else { None }
-            } else {
-                None
-            };
-            if let Some(head) = special {
-                match head.as_str() {
-                    "quasiquote" => {
-                        self.advance()?;
+        let special = if let WorkTokenKind::Ident(head) = self.peek().kind {
+            let next_tok = self.peek_next()?;
+            let is_plain_head = !matches!(next_tok.map(|t| t.kind), Some(WorkTokenKind::Dot))
+                && !matches!(
+                    next_tok,
+                    Some(WorkToken {
+                        kind: WorkTokenKind::LBracket,
+                        attached: true,
+                        ..
+                    })
+                );
+            if is_plain_head { Some(head) } else { None }
+        } else {
+            None
+        };
+        if let Some(head) = special {
+            match head.as_str() {
+                "quasiquote" if qq_depth >= 1 => {
+                    self.advance()?;
+                    self.push_frame(
+                        ParseFrame::DatumWrap {
+                            span: start,
+                            tag: "quasiquote",
+                            is_paren: true,
+                            outer_qq_depth: qq_depth,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartDatum {
+                        qq_depth: qq_depth + 1,
+                        allow_splice: false,
+                    });
+                }
+                "unquote" => {
+                    if qq_depth == 0 {
+                        return Err(self.parse_err(
+                            "src.syntax",
+                            start,
+                            "'unquote' is only allowed inside quasiquote",
+                        ));
+                    }
+                    self.advance()?;
+                    if qq_depth == 1 {
+                        self.push_frame(
+                            ParseFrame::DatumUnquote {
+                                span: start,
+                                is_paren: true,
+                                is_splicing: false,
+                            },
+                            start,
+                        )?;
+                        return Ok(NextStep::StartExpr);
+                    } else {
                         self.push_frame(
                             ParseFrame::DatumWrap {
                                 span: start,
-                                tag: "quasiquote",
+                                tag: "unquote",
                                 is_paren: true,
                                 outer_qq_depth: qq_depth,
                             },
                             start,
                         )?;
                         return Ok(NextStep::StartDatum {
-                            qq_depth: qq_depth + 1,
+                            qq_depth: qq_depth - 1,
                             allow_splice: false,
                         });
                     }
-                    "unquote" => {
-                        self.advance()?;
-                        if qq_depth == 1 {
-                            self.push_frame(
-                                ParseFrame::DatumUnquote {
-                                    span: start,
-                                    is_paren: true,
-                                    is_splicing: false,
-                                },
-                                start,
-                            )?;
-                            return Ok(NextStep::StartExpr);
-                        } else {
-                            self.push_frame(
-                                ParseFrame::DatumWrap {
-                                    span: start,
-                                    tag: "unquote",
-                                    is_paren: true,
-                                    outer_qq_depth: qq_depth,
-                                },
-                                start,
-                            )?;
-                            return Ok(NextStep::StartDatum {
-                                qq_depth: qq_depth - 1,
-                                allow_splice: false,
-                            });
-                        }
-                    }
-                    "unquote_splicing" => {
-                        self.advance()?;
-                        if qq_depth == 1 {
-                            if !allow_splice {
-                                return Err(self.parse_err(
-                                    "src.syntax",
-                                    start,
-                                    "unquote-splicing ',@' is only allowed inside a list",
-                                ));
-                            }
-                            self.push_frame(
-                                ParseFrame::DatumUnquote {
-                                    span: start,
-                                    is_paren: true,
-                                    is_splicing: true,
-                                },
-                                start,
-                            )?;
-                            return Ok(NextStep::StartExpr);
-                        } else {
-                            self.push_frame(
-                                ParseFrame::DatumWrap {
-                                    span: start,
-                                    tag: "unquote_splicing",
-                                    is_paren: true,
-                                    outer_qq_depth: qq_depth,
-                                },
-                                start,
-                            )?;
-                            return Ok(NextStep::StartDatum {
-                                qq_depth: qq_depth - 1,
-                                allow_splice: false,
-                            });
-                        }
-                    }
-                    _ => {}
                 }
+                "unquote_splicing" => {
+                    if qq_depth == 0 {
+                        return Err(self.parse_err(
+                            "src.syntax",
+                            start,
+                            "'unquote_splicing' is only allowed inside quasiquote",
+                        ));
+                    }
+                    self.advance()?;
+                    if qq_depth == 1 {
+                        if !allow_splice {
+                            return Err(self.parse_err(
+                                "src.syntax",
+                                start,
+                                "unquote-splicing ',@' is only allowed inside a list",
+                            ));
+                        }
+                        self.push_frame(
+                            ParseFrame::DatumUnquote {
+                                span: start,
+                                is_paren: true,
+                                is_splicing: true,
+                            },
+                            start,
+                        )?;
+                        return Ok(NextStep::StartExpr);
+                    } else {
+                        self.push_frame(
+                            ParseFrame::DatumWrap {
+                                span: start,
+                                tag: "unquote_splicing",
+                                is_paren: true,
+                                outer_qq_depth: qq_depth,
+                            },
+                            start,
+                        )?;
+                        return Ok(NextStep::StartDatum {
+                            qq_depth: qq_depth - 1,
+                            allow_splice: false,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
 

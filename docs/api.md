@@ -119,7 +119,7 @@ pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Re
 - **`ValueRef<'_>` と補助借用ビュー**：
   - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
   - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `Ident` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
-  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
+  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_ident`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
   - `Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
 - **`ErrorRef<'_>`**：
   - マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。次の可変操作まで有効。`Display` を含めシステムヒープを一切使わない。`std-value` フィーチャ有効時は `to_error(&self) -> Error` で所有型 `Error` へ変換できる。
@@ -234,7 +234,7 @@ impl Error {
 
 ### 1.5 深い値の処理（`std-value` 側の `Value` とゼロヒープ経路）
 
-`std-value` フィーチャ有効時のホスト側所有コンテナは `Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
+`std-value` フィーチャ有効時のホスト側所有コンテナおよび識別子値は `Value::ident`・`Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する（`Value::Ident` は有効な識別子名のみ取り込める）。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
 
 解放処理はこれらの所有データと `ListNode` に実装している。`Value` 自身は独自の `Drop` を持たないため、パターンマッチで所有データを取り出せる。共有参照の解放では参照カウントを減らすだけで、最後の所有者になったときだけ子を処理する。
 

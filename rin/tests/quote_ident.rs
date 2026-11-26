@@ -27,6 +27,13 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(err.kind, ErrorKind::Lex);
     assert_eq!(err.rule(), "src.char");
 
+    // 識別子直後の `'` は字句エラー
+    for bad_ident in ["(def y' 1)", "foo'bar", "x'"] {
+        let err = eval(bad_ident).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Lex, "{bad_ident}: {err}");
+        assert_eq!(err.rule(), "src.ident", "{bad_ident}: {err}");
+    }
+
     // quote としての `'`
     assert_eq!(eval("'foo").unwrap(), Value::ident("foo"));
     assert_eq!(eval("''a'").unwrap(), Value::Char('a'));
@@ -37,8 +44,17 @@ fn lex_char_vs_quote_and_unicode_escapes() {
         Value::list(vec![Value::ident("a"), Value::ident("b")])
     );
 
-    // quasiquote 外の `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)` は構文エラー
-    for bad in [",x", ",@xs", "(unquote x)", "(unquote_splicing xs)"] {
+    // quasiquote 外（quote の中も含む）の `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)` は構文エラー
+    for bad in [
+        ",x",
+        ",@xs",
+        "(unquote x)",
+        "(unquote_splicing xs)",
+        "'(a ,x)",
+        "'(a ,@x)",
+        "'(unquote x)",
+        "'(unquote_splicing x)",
+    ] {
         let err = eval(bad).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse, "{bad}: {err}");
         assert_eq!(err.rule(), "src.syntax", "{bad}: {err}");
@@ -198,7 +214,7 @@ fn ident_operations_conversions_match_schema_and_ffi() {
     assert!(schema.check(&Value::ident("foo")).is_ok());
     assert!(schema.check(&Value::str("foo")).is_err());
 
-    // Rust zero-heap API
+    // Rust zero-heap API & Value import validation
     let mut alloc = HeapAllocator;
     let mut b = Builder::new(Limits::default(), &mut alloc);
     let iv = b.val_ident("alpha").unwrap();
@@ -206,6 +222,18 @@ fn ident_operations_conversions_match_schema_and_ffi() {
     assert_eq!(b.value_ref(iv).as_ident(), Some("alpha"));
     assert!(b.val_ident("123").is_err());
     b.release_val(iv);
+
+    let err = b.bind("bad_id", &Value::ident("1 bad'")).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "host.value");
+    // 深い経路（depth >= 32）でも Value::Ident を検査する
+    let mut deep = Value::ident("1 bad'");
+    for _ in 0..35 {
+        deep = Value::some(deep);
+    }
+    let err = b.bind("bad_deep", &deep).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "host.value");
 
     // C FFI
     unsafe {

@@ -145,7 +145,17 @@ impl Pool<'_> {
                     )
                 }),
             Value::Str(s) => self.alloc_str(s.as_str(), span).map(RVal::Obj),
-            Value::Ident(s) => self.alloc_ident(s.as_str(), span).map(RVal::Obj),
+            Value::Ident(s) => {
+                if !crate::lexer::is_valid_ident(s.as_str()) {
+                    return Err(self.core.err_fmt(
+                        "host.value",
+                        ErrorKind::Runtime,
+                        span,
+                        format_args!("invalid identifier '{s}'"),
+                    ));
+                }
+                self.alloc_ident(s.as_str(), span).map(RVal::Obj)
+            }
             Value::List(xs) => {
                 let items: Vec<_> = xs.iter().collect();
                 let mut acc = RVal::EmptyList;
