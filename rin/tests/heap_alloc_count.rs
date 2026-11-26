@@ -13,10 +13,13 @@ use rin::ffi::{
     rin_as_str, rin_bind, rin_bool, rin_build, rin_call, rin_call_in, rin_car, rin_cdr, rin_cons,
     rin_copy_f64s, rin_copy_i64s, rin_drop, rin_eval, rin_eval_with, rin_f64s, rin_field,
     rin_float, rin_free, rin_freeze, rin_i64s, rin_int, rin_last_error, rin_len,
-    rin_limits_default, rin_load, rin_new, rin_nil, rin_none, rin_some, rin_str, rin_struct,
-    rin_struct_set, rin_tag, rin_tuple_get, rin_unwrap, rin_variant, rin_variant_name,
+    rin_limits_default, rin_load, rin_memory_config_default, rin_new_with_config, rin_nil,
+    rin_none, rin_some, rin_str, rin_struct, rin_struct_set, rin_tag, rin_tuple_get, rin_unwrap,
+    rin_variant, rin_variant_name,
 };
-use rin::{ArenaAllocator, Builder, ErrorKind, Limits, ValueTag};
+use rin::{
+    Allocator, ArenaAllocator, Builder, ErrorKind, Limits, MemoryConfig, RegionConfig, ValueTag,
+};
 
 struct CountingAllocator;
 
@@ -32,13 +35,10 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 impl CountingAllocator {
     #[inline]
     fn on_alloc() -> bool {
-        if FORBID_HEAP.with(|f| f.get()) {
-            return false;
-        }
         if COUNTING_ENABLED.with(|c| c.get()) {
             THREAD_ALLOCS.with(|n| n.set(n.get() + 1));
         }
-        true
+        !FORBID_HEAP.with(|f| f.get())
     }
 }
 
@@ -214,7 +214,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             .eval_ref("(defn add_meta (n) (+ n meta.count))")
             .unwrap();
 
-        let mut machine = builder.freeze().unwrap();
+        let mut machine = builder.into_machine();
 
         // eval_ref + Display into FixedWriter
         {
@@ -291,6 +291,75 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
         }
 
         drop(machine);
+
+        // 資源上限エラー（TooDeep / TooManySteps / TooMuchMemory）もゼロヒープでバックトレース付き返却
+        {
+            let mut arena2 = ArenaAllocator::new(&mut backing);
+            let mut b = Builder::with_memory_config(
+                Limits {
+                    steps: 500,
+                    depth: 12,
+                    memory_bytes: 256 * 1024,
+                },
+                MemoryConfig {
+                    perm: RegionConfig::new(2048, 16 * 1024),
+                    obj: RegionConfig::new(2048, 16 * 1024),
+                    work: RegionConfig::new(2048, 16 * 1024),
+                },
+                &mut arena2,
+            );
+            b.eval_ref(
+                r#"
+                (defn deep (n) (if (== n 0) 0 (+ 1 (deep (- n 1)))))
+                (defn spin (n) (if (== n 0) 0 (spin (- n 1))))
+                "#,
+            )
+            .unwrap();
+            let mut m = b.into_machine();
+
+            let e_deep = m.eval_ref("(deep 50)").unwrap_err();
+            assert_eq!(e_deep.kind(), ErrorKind::TooDeep);
+            assert!(e_deep.backtrace_len() >= 2);
+            out.clear();
+            write!(out, "{e_deep}").unwrap();
+            assert!(out.as_str().contains("deep"));
+
+            let e_steps = m.eval_ref("(spin 10000)").unwrap_err();
+            assert_eq!(e_steps.kind(), ErrorKind::TooManySteps);
+            assert!(e_steps.backtrace_len() >= 1);
+            out.clear();
+            write!(out, "{e_steps}").unwrap();
+            assert!(out.as_str().contains("step limit exceeded"));
+
+            drop(m);
+        }
+        {
+            let mut arena3 = ArenaAllocator::new(&mut backing);
+            let mut b = Builder::with_memory_config(
+                Limits {
+                    steps: 100_000,
+                    depth: 200,
+                    memory_bytes: 24 * 1024,
+                },
+                MemoryConfig {
+                    perm: RegionConfig::new(2048, 8 * 1024),
+                    obj: RegionConfig::new(2048, 8 * 1024),
+                    work: RegionConfig::new(2048, 8 * 1024),
+                },
+                &mut arena3,
+            );
+            b.eval_ref("(defn blowup (n) (range 0 n))").unwrap();
+            let mut m = b.into_machine();
+
+            let e_mem = m.eval_ref("(blowup 10000)").unwrap_err();
+            assert_eq!(e_mem.kind(), ErrorKind::TooMuchMemory);
+            assert!(e_mem.backtrace_len() >= 1);
+            out.clear();
+            write!(out, "{e_mem}").unwrap();
+            assert!(out.as_str().contains("blowup"));
+
+            drop(m);
+        }
     });
 }
 
@@ -328,7 +397,7 @@ fn zero_heap_full_c_ffi_lifecycle() {
             alloc: Some(c_alloc),
             dealloc: None,
         };
-        let m = rin_new(rin_limits_default(), alloc);
+        let m = rin_new_with_config(rin_limits_default(), rin_memory_config_default(), alloc);
         assert!(!m.is_null());
 
         unsafe {
@@ -442,9 +511,85 @@ fn zero_heap_full_c_ffi_lifecycle() {
 }
 
 #[test]
+fn val_list_does_not_leak_objects() {
+    let mut backing = vec![0u8; 64 * 1024];
+    forbid_heap(|| {
+        let mut arena = ArenaAllocator::new(&mut backing);
+        let mut builder = Builder::new(Limits::default(), &mut arena);
+
+        // スカラ列
+        let a = builder.val_int(1);
+        let b = builder.val_int(2);
+        let c = builder.val_int(3);
+        let lst = builder.val_list(&[a, b, c]).unwrap();
+        assert_eq!(builder.value_ref(lst).list_len(), Some(3));
+        builder.release_val(lst);
+        assert_eq!(builder.live_bytes(), 0);
+
+        // 文字列と入れ子リスト（参照カウント共有を含む）
+        let s1 = builder.val_str("alpha").unwrap();
+        let s2 = builder.val_str("beta").unwrap();
+        let inner = builder.val_list(&[s1, s2]).unwrap();
+        let outer = builder.val_list(&[inner, s1, s2]).unwrap();
+        assert_eq!(builder.value_ref(outer).list_len(), Some(3));
+        builder.release_val(outer);
+        builder.release_val(inner);
+        builder.release_val(s1);
+        builder.release_val(s2);
+        assert_eq!(builder.live_bytes(), 0);
+
+        // 途中 OOM 時にも構築済みセル・要素をリークしない
+        drop(builder);
+        let mut small_buf = [0u8; 32 * 1024];
+        let mut small_arena = ArenaAllocator::new(&mut small_buf);
+        let mut small = Builder::with_memory_config(
+            Limits {
+                memory_bytes: 10 * 1024,
+                ..Limits::default()
+            },
+            MemoryConfig {
+                perm: RegionConfig::new(512, 1024),
+                obj: RegionConfig::new(512, 1024),
+                work: RegionConfig::new(512, 1024),
+            },
+            &mut small_arena,
+        );
+        let item = small.val_str("payload").unwrap();
+        let base_live = small.live_bytes();
+        let items = [item; 512];
+        let err = small.val_list(&items).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::TooMuchMemory);
+        assert_eq!(small.live_bytes(), base_live);
+        small.release_val(item);
+        assert_eq!(small.live_bytes(), 0);
+    });
+}
+
+#[test]
 fn arena_usage_plateaus_across_thousands_of_evaluations() {
+    struct TrackedArena<'a> {
+        inner: ArenaAllocator<'a>,
+        used_cell: &'a Cell<usize>,
+    }
+
+    impl Allocator for TrackedArena<'_> {
+        fn alloc(&mut self, layout: Layout) -> Option<std::ptr::NonNull<u8>> {
+            let p = self.inner.alloc(layout);
+            self.used_cell.set(self.inner.used());
+            p
+        }
+
+        unsafe fn dealloc(&mut self, ptr: std::ptr::NonNull<u8>, layout: Layout) {
+            unsafe { self.inner.dealloc(ptr, layout) };
+        }
+    }
+
     let mut backing = vec![0u8; 256 * 1024];
-    let mut arena = ArenaAllocator::new(&mut backing);
+    let used_cell = Cell::new(0usize);
+    let mut arena = TrackedArena {
+        inner: ArenaAllocator::new(&mut backing),
+        used_cell: &used_cell,
+    };
 
     let mut builder = Builder::new(Limits::default(), &mut arena);
     builder
@@ -458,15 +603,22 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
             "#,
         )
         .unwrap();
-    let mut machine = builder.freeze().unwrap();
+    let mut machine = builder.into_machine();
     let baseline_live = machine.live_bytes();
 
     // ウォームアップ（WorkArena / ObjHeap / Pool チャンクを定常サイズまで確保）
-    for i in 0..32 {
-        let a = machine.val_int(20);
+    for i in 0..64 {
+        let a = machine.val_int(8);
         let r = machine.call_ref("work", &[a]).unwrap();
-        assert_eq!(r.as_int(), Some(90));
+        assert_eq!(r.as_int(), Some(12));
         machine.release_val(a);
+
+        let s = machine.val_str("elem").unwrap();
+        let lst = machine.val_list(&[s, machine.val_int(i as i64)]).unwrap();
+        let v = machine.eval_with_vals("(len xs)", &[("xs", lst)]).unwrap();
+        assert_eq!(v.as_int(), Some(2));
+        machine.release_val(lst);
+        machine.release_val(s);
 
         let e = machine
             .eval_ref("(fold + 0 (map (fn (x) (* x 2)) [1 2 3 4 5]))")
@@ -477,31 +629,39 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
             assert!(machine.eval_ref("(/ 1 0)").is_err());
         }
     }
-    let after_warmup = machine.live_bytes();
-    assert!(after_warmup <= baseline_live + 128);
+    let after_warmup_live = machine.live_bytes();
+    let after_warmup_arena = used_cell.get();
+    assert!(after_warmup_live <= baseline_live + 128);
 
-    // 5,000 回反復しても ArenaAllocator 上で枯渇せず live_bytes が一定に保たれる。
-    for i in 0..5_000 {
-        let a = machine.val_int(20);
+    // 30,000 回反復しても ArenaAllocator の新規確保が 0 バイト（完全定常）であること。
+    for i in 0..30_000 {
+        let a = machine.val_int(8);
         let r = machine.call_ref("work", &[a]).unwrap();
-        assert_eq!(r.as_int(), Some(90));
+        assert_eq!(r.as_int(), Some(12));
         machine.release_val(a);
+
+        let s = machine.val_str("elem").unwrap();
+        let lst = machine.val_list(&[s, machine.val_int(i as i64)]).unwrap();
+        let v = machine.eval_with_vals("(len xs)", &[("xs", lst)]).unwrap();
+        assert_eq!(v.as_int(), Some(2));
+        machine.release_val(lst);
+        machine.release_val(s);
 
         let e = machine
             .eval_ref("(fold + 0 (map (fn (x) (* x 2)) [1 2 3 4 5]))")
             .unwrap();
         assert_eq!(e.as_int(), Some(30));
 
-        if i % 50 == 0 {
+        if i % 100 == 0 {
             assert!(machine.eval_ref("(/ 1 0)").is_err());
         }
     }
-    assert!(machine.live_bytes() <= after_warmup);
-    drop(machine);
-    // 256 KiB の Arena に余裕を持って収まっている（解放不可のアリーナでも無限増加しない）
-    assert!(
-        arena.used() < 128 * 1024,
-        "arena grew unexpectedly: {} bytes",
-        arena.used()
+    assert!(machine.live_bytes() <= after_warmup_live);
+    assert_eq!(
+        used_cell.get(),
+        after_warmup_arena,
+        "arena grew after warmup: warmup={after_warmup_arena}, after={}",
+        used_cell.get()
     );
+    drop(machine);
 }
