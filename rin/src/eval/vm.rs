@@ -178,13 +178,9 @@ impl<'a> Runner<'a, '_> {
                         &mut self.pool.core,
                         FrameEntry::Rin(frame),
                     );
-                    if let Err(err) = self.start_callback_from_stack(
-                        &mut frames,
-                        builtin,
-                        arg_start,
-                        argc,
-                        span,
-                    ) {
+                    if let Err(err) =
+                        self.start_callback_from_stack(&mut frames, builtin, arg_start, argc, span)
+                    {
                         return Err(self.unwind_frames(frames, err));
                     }
                 }

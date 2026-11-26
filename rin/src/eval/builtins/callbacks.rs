@@ -92,19 +92,15 @@ impl Runner<'_, '_> {
         let (f, init_val, list_v) = match kind {
             CallbackKind::Fold => {
                 let [f, init, list_v] = args else {
-                    return Err(self.callback_arity_error(
-                        span,
-                        "'fold' takes 3 arguments (fn, init, list)",
-                    ));
+                    return Err(self
+                        .callback_arity_error(span, "'fold' takes 3 arguments (fn, init, list)"));
                 };
                 (*f, Some(*init), *list_v)
             }
             CallbackKind::SortBy => {
                 let [f, list_v] = args else {
-                    return Err(self.callback_arity_error(
-                        span,
-                        "'sort_by' takes 2 arguments (key_fn, list)",
-                    ));
+                    return Err(self
+                        .callback_arity_error(span, "'sort_by' takes 2 arguments (key_fn, list)"));
                 };
                 (*f, None, *list_v)
             }

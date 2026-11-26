@@ -299,11 +299,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let f = f.as_ref();
                 let params = f.params.as_slice();
                 let Ok(arity) = u32::try_from(params.len()) else {
-                    return Err(self.fail_parse(
-                        "compile.capacity",
-                        span,
-                        "too many parameters",
-                    ));
+                    return Err(self.fail_parse("compile.capacity", span, "too many parameters"));
                 };
                 let mut inner = self.new_scope();
                 for &p in params {
@@ -467,11 +463,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return Ok(());
                 }
                 let Ok(argc) = u32::try_from(args.len()) else {
-                    return Err(self.fail_parse(
-                        "compile.capacity",
-                        span,
-                        "too many arguments",
-                    ));
+                    return Err(self.fail_parse("compile.capacity", span, "too many arguments"));
                 };
                 let call_op = if is_tail {
                     Op::TailCall(argc)

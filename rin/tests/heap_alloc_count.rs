@@ -182,7 +182,9 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
         let ok_v = builder.val_ok(opt).unwrap();
         let err_v = builder.val_err(s).unwrap();
         let tup = builder.val_tuple(&[s, i3]).unwrap();
-        let arr = builder.val_array(&[builder.val_int(1), builder.val_int(2)]).unwrap();
+        let arr = builder
+            .val_array(&[builder.val_int(1), builder.val_int(2)])
+            .unwrap();
         let lst = builder.val_list(&[i3, builder.val_int(5)]).unwrap();
         let st = builder
             .val_struct("Meta", &[("tag", s), ("count", i3)])
@@ -216,9 +218,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
 
         // eval_ref + Display into FixedWriter
         {
-            let v = machine
-                .eval_ref("(cards.make_card \"bolt\" 2)")
-                .unwrap();
+            let v = machine.eval_ref("(cards.make_card \"bolt\" 2)").unwrap();
             assert_eq!(v.tag(), ValueTag::Struct);
             let sr = v.as_struct().unwrap();
             assert_eq!(sr.name(), "Card");
@@ -237,8 +237,13 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
 
             let cname = machine.val_str("ice").unwrap();
             let ccost = machine.val_int(4);
-            let c1 = machine.call_in_ref("cards", "make_card", &[cname, ccost]).unwrap();
-            assert_eq!(c1.as_struct().unwrap().field("cost").unwrap().as_int(), Some(8));
+            let c1 = machine
+                .call_in_ref("cards", "make_card", &[cname, ccost])
+                .unwrap();
+            assert_eq!(
+                c1.as_struct().unwrap().field("cost").unwrap().as_int(),
+                Some(8)
+            );
             machine.release_val(cname);
 
             let bv = machine.val_int(99);
@@ -297,11 +302,7 @@ fn zero_heap_full_c_ffi_lifecycle() {
         offset: usize,
     }
 
-    unsafe extern "C" fn c_alloc(
-        ctx: *mut std::ffi::c_void,
-        size: usize,
-        align: usize,
-    ) -> *mut u8 {
+    unsafe extern "C" fn c_alloc(ctx: *mut std::ffi::c_void, size: usize, align: usize) -> *mut u8 {
         if size == 0 {
             return std::ptr::NonNull::<u8>::dangling().as_ptr();
         }

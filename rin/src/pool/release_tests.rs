@@ -73,7 +73,9 @@ fn shared_children_are_scanned_only_on_the_last_reference() {
             pool.retain(shared);
         }
         let tuple_items = vec![RVal::Obj(shared); n];
-        let root = pool.alloc_tuple_owned(&tuple_items, Span::default()).unwrap();
+        let root = pool
+            .alloc_tuple_owned(&tuple_items, Span::default())
+            .unwrap();
         pool.release(root);
         assert_eq!(
             pool.release_counts,

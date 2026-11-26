@@ -303,8 +303,7 @@ fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
         assert!(rin_as_int(m, call_res.value, &mut out));
         assert_eq!(out, 15);
 
-        let call_in_res =
-            rin_call_in(m, c"mod_a".as_ptr(), c"twice".as_ptr(), args.as_ptr(), 1);
+        let call_in_res = rin_call_in(m, c"mod_a".as_ptr(), c"twice".as_ptr(), args.as_ptr(), 1);
         assert!(call_in_res.ok);
         assert!(rin_as_int(m, call_in_res.value, &mut out));
         assert_eq!(out, 10);

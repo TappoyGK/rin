@@ -145,10 +145,7 @@ impl<'a> EnvState<'a> {
                 "memory limit exceeded",
             ));
         };
-        match self
-            .globals
-            .set(&mut self.pool, id, rval, Span::default())
-        {
+        match self.globals.set(&mut self.pool, id, rval, Span::default()) {
             Ok(Some(prev)) => self.pool.release_val(prev),
             Ok(None) => {}
             Err(_) => {

@@ -438,11 +438,7 @@ impl fmt::Display for ValueRef<'_> {
         }
         let mut stack: [Option<Frame<'_>>; 64] = [const { None }; 64];
         let mut sp = 0usize;
-        fn push<'a>(
-            stack: &mut [Option<Frame<'a>>; 64],
-            sp: &mut usize,
-            item: Frame<'a>,
-        ) -> bool {
+        fn push<'a>(stack: &mut [Option<Frame<'a>>; 64], sp: &mut usize, item: Frame<'a>) -> bool {
             if *sp < stack.len() {
                 stack[*sp] = Some(item);
                 *sp += 1;
@@ -462,7 +458,9 @@ impl fmt::Display for ValueRef<'_> {
                 Frame::Key(k) => write!(f, "{k}: ")?,
                 Frame::ListTail(mut tail) => {
                     while let RVal::Obj(id) = tail
-                        && let Obj::Cons { head, tail: next, .. } = self.pool.get(id)
+                        && let Obj::Cons {
+                            head, tail: next, ..
+                        } = self.pool.get(id)
                     {
                         f.write_str(", ")?;
                         if !push(&mut stack, &mut sp, Frame::ListTail(*next))

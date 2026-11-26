@@ -32,7 +32,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         ));
                     };
                     let prev_scopes_cap = self.scopes.capacity();
-                    let defn_work_mark = (!self.frozen).then(|| self.pool.work.mark(&self.pool.core));
+                    let defn_work_mark =
+                        (!self.frozen).then(|| self.pool.work.mark(&self.pool.core));
                     let mut inner = self.new_scope();
                     for &p in params {
                         inner.alloc_slot(self.pool, p, span)?;
@@ -263,11 +264,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let f = f.as_ref();
                 let params = f.params.as_slice();
                 let Ok(arity) = u32::try_from(params.len()) else {
-                    return Err(self.fail_parse(
-                        "compile.capacity",
-                        span,
-                        "too many parameters",
-                    ));
+                    return Err(self.fail_parse("compile.capacity", span, "too many parameters"));
                 };
                 let mut inner = self.new_scope();
                 for &p in params {
@@ -285,11 +282,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let saved_next_slot = self.scopes.last().unwrap().next_slot;
                 for &(name, ref val_expr) in l.bindings.as_slice() {
                     self.compile_expr_shallow(val_expr, false, depth + 1)?;
-                    let slot = self
-                        .scopes
-                        .last_mut()
-                        .unwrap()
-                        .alloc_slot(self.pool, name, val_expr.span)?;
+                    let slot = self.scopes.last_mut().unwrap().alloc_slot(
+                        self.pool,
+                        name,
+                        val_expr.span,
+                    )?;
                     self.emit_raw(Op::SetLocal(slot), val_expr.span)?;
                 }
                 self.compile_body_shallow(l.body.as_slice(), is_tail, depth + 1)?;
@@ -409,11 +406,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return Ok(());
                 }
                 let Ok(argc) = u32::try_from(args.len()) else {
-                    return Err(self.fail_parse(
-                        "compile.capacity",
-                        span,
-                        "too many arguments",
-                    ));
+                    return Err(self.fail_parse("compile.capacity", span, "too many arguments"));
                 };
                 self.compile_expr_shallow(callee.as_ref(), false, depth + 1)?;
                 for arg in args {

@@ -250,14 +250,9 @@ impl ModuleTable {
         let hash = fnv1a_bytes(name.as_bytes());
         if self
             .ids
-            .insert_perm(
-                &mut pool.perm,
-                &mut pool.core,
-                hash,
-                raw,
-                id,
-                |a, b| a.as_str() == b.as_str(),
-            )
+            .insert_perm(&mut pool.perm, &mut pool.core, hash, raw, id, |a, b| {
+                a.as_str() == b.as_str()
+            })
             .is_none()
         {
             self.envs.pop();
@@ -351,8 +346,7 @@ fn env_bound_names<'a>(
     syms: &'a SymTable,
     env: &'a EnvSlots,
 ) -> impl Iterator<Item = &'a str> + 'a {
-    env.iter_defined()
-        .filter_map(|(id, _)| syms.name(id))
+    env.iter_defined().filter_map(|(id, _)| syms.name(id))
 }
 
 fn set_slot_perm(

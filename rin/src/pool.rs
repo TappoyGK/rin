@@ -6,7 +6,9 @@ use std::ptr::NonNull;
 use crate::alloc::{AllocBuf, Allocator};
 use crate::bytecode::{BuiltinId, FnProtoPtr};
 use crate::error::{ErrRecorded, ErrorKind, Span};
-use crate::mem::{AllocCore, MemoryConfig, ObjBlock, ObjHeap, PermArena, RawMap, RawStr, RawVec, WorkArena};
+use crate::mem::{
+    AllocCore, MemoryConfig, ObjBlock, ObjHeap, PermArena, RawMap, RawStr, RawVec, WorkArena,
+};
 use crate::value::Value;
 
 mod convert;
@@ -374,17 +376,9 @@ pub(crate) enum Obj {
 }
 
 enum Slot {
-    Free {
-        next: Option<u32>,
-    },
-    Live {
-        rc: u32,
-        obj: Obj,
-    },
-    Dying {
-        next: Option<u32>,
-        obj: Obj,
-    },
+    Free { next: Option<u32> },
+    Live { rc: u32, obj: Obj },
+    Dying { next: Option<u32>, obj: Obj },
 }
 
 const SLOT_BYTES: usize = std::mem::size_of::<Slot>();
@@ -537,7 +531,8 @@ impl<'a> Pool<'a> {
 
     #[cold]
     fn oom_error(&mut self, span: Span, msg: &str) -> ErrRecorded {
-        self.core.err_str("eval.limits", ErrorKind::TooMuchMemory, span, msg)
+        self.core
+            .err_str("eval.limits", ErrorKind::TooMuchMemory, span, msg)
     }
 
     #[cold]
@@ -832,7 +827,10 @@ impl<'a> Pool<'a> {
         let Some(layout) = Layout::array::<T>(src.len()).ok() else {
             return Err(self.oom_error(span, "memory limit exceeded"));
         };
-        let Some(block) = self.obj_heap.alloc(&mut self.core, layout.size(), layout.align()) else {
+        let Some(block) = self
+            .obj_heap
+            .alloc(&mut self.core, layout.size(), layout.align())
+        else {
             return Err(self.oom_limit_error(span));
         };
         let ptr = block.ptr.cast::<T>();
@@ -960,14 +958,15 @@ impl<'a> Pool<'a> {
         }
         // 凍結後の新規構造体はオブジェクト領域に参照カウント付き記述子として置く。
         let os_name = self.alloc_obj_str(name, span)?;
-        let mut fields_slice = match self.alloc_obj_slice_uninit::<ObjStr>(sorted_fields.len(), span) {
-            Ok(s) => s,
-            Err(e) => {
-                // SAFETY: 直前に確保した `os_name`。
-                unsafe { self.obj_heap.free(&mut self.core, os_name.block()) };
-                return Err(e);
-            }
-        };
+        let mut fields_slice =
+            match self.alloc_obj_slice_uninit::<ObjStr>(sorted_fields.len(), span) {
+                Ok(s) => s,
+                Err(e) => {
+                    // SAFETY: 直前に確保した `os_name`。
+                    unsafe { self.obj_heap.free(&mut self.core, os_name.block()) };
+                    return Err(e);
+                }
+            };
         let mut init_len = 0usize;
         for &f in sorted_fields {
             match self.alloc_obj_str(f, span) {
@@ -1010,7 +1009,10 @@ impl<'a> Pool<'a> {
         let Some(layout) = Layout::array::<T>(len).ok() else {
             return Err(self.oom_error(span, "memory limit exceeded"));
         };
-        let Some(block) = self.obj_heap.alloc(&mut self.core, layout.size(), layout.align()) else {
+        let Some(block) = self
+            .obj_heap
+            .alloc(&mut self.core, layout.size(), layout.align())
+        else {
             return Err(self.oom_limit_error(span));
         };
         // SAFETY: `block.actual_size >= layout.size()`。ゼロ初期化しておく。
@@ -1065,18 +1067,18 @@ impl<'a> Pool<'a> {
                 return Err(e);
             }
         };
-        let mut slice = match self.alloc_obj_slice_uninit::<ModuleExport>(sorted_exports.len(), span)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                // SAFETY: 直前に確保した `mod_name`。
-                unsafe { self.obj_heap.free(&mut self.core, mod_name.block()) };
-                for &(_, v) in sorted_exports {
-                    self.release_val(v);
+        let mut slice =
+            match self.alloc_obj_slice_uninit::<ModuleExport>(sorted_exports.len(), span) {
+                Ok(s) => s,
+                Err(e) => {
+                    // SAFETY: 直前に確保した `mod_name`。
+                    unsafe { self.obj_heap.free(&mut self.core, mod_name.block()) };
+                    for &(_, v) in sorted_exports {
+                        self.release_val(v);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
         let mut init_len = 0usize;
         for &(k, v) in sorted_exports {
             match self.alloc_obj_str(k, span) {
@@ -1112,7 +1114,9 @@ impl<'a> Pool<'a> {
 
     pub fn struct_desc_name(&self, desc: StructDescRef) -> &str {
         match desc {
-            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize].name.as_str(),
+            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize]
+                .name
+                .as_str(),
             StructDescRef::Obj(id) => match self.get(id) {
                 Obj::StructDesc { name, .. } => name.as_str(),
                 _ => unreachable!(),
@@ -1132,9 +1136,10 @@ impl<'a> Pool<'a> {
 
     pub fn struct_desc_field_name(&self, desc: StructDescRef, idx: usize) -> &str {
         match desc {
-            StructDescRef::Perm(id) => {
-                self.struct_descs.descs.as_slice()[id as usize].fields.as_slice()[idx].as_str()
-            }
+            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize]
+                .fields
+                .as_slice()[idx]
+                .as_str(),
             StructDescRef::Obj(id) => match self.get(id) {
                 Obj::StructDesc { fields, .. } => fields[idx].as_str(),
                 _ => unreachable!(),
@@ -1167,7 +1172,9 @@ impl<'a> Pool<'a> {
 
     pub(crate) fn copy_struct_desc_name_to_work(&mut self, desc: StructDescRef) -> Option<RawStr> {
         let name = match desc {
-            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize].name.as_str(),
+            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize]
+                .name
+                .as_str(),
             StructDescRef::Obj(id) => {
                 let idx = id.0 as usize;
                 let chunk_idx = idx / CHUNK_SLOTS;
@@ -1195,10 +1202,10 @@ impl<'a> Pool<'a> {
         field_idx: usize,
     ) -> Option<RawStr> {
         let fname = match desc {
-            StructDescRef::Perm(id) => {
-                self.struct_descs.descs.as_slice()[id as usize].fields.as_slice()[field_idx]
-                    .as_str()
-            }
+            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize]
+                .fields
+                .as_slice()[field_idx]
+                .as_str(),
             StructDescRef::Obj(id) => {
                 let idx = id.0 as usize;
                 let chunk_idx = idx / CHUNK_SLOTS;

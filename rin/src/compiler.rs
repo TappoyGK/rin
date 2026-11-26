@@ -134,7 +134,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
     }
 
-    fn push_step(&mut self, steps: &mut RawVec<Step<'a>>, step: Step<'a>, span: Span) -> Result<(), Failed> {
+    fn push_step(
+        &mut self,
+        steps: &mut RawVec<Step<'a>>,
+        step: Step<'a>,
+        span: Span,
+    ) -> Result<(), Failed> {
         if steps
             .push_work(&mut self.pool.work, &mut self.pool.core, step)
             .is_none()
@@ -213,7 +218,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
     fn add_string(&mut self, s: &str, span: Span) -> Result<u32, Failed> {
         let region = self.current_region();
         let top = self.scopes.last_mut().unwrap();
-        match top.chunk.add_string(self.pool, region, &mut top.string_map, s) {
+        match top
+            .chunk
+            .add_string(self.pool, region, &mut top.string_map, s)
+        {
             Some(idx) => Ok(idx),
             None => Err(self.fail_oom(span)),
         }
@@ -228,7 +236,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
     }
 
-    fn add_struct(&mut self, name: &str, fields: RawVec<RawStr>, span: Span) -> Result<u32, Failed> {
+    fn add_struct(
+        &mut self,
+        name: &str,
+        fields: RawVec<RawStr>,
+        span: Span,
+    ) -> Result<u32, Failed> {
         let region = self.current_region();
         let Some(name_raw) = self.pool.alloc_code_str(region, name) else {
             return Err(self.fail_oom(span));
@@ -244,7 +257,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
     }
 
-    fn build_field_names(&mut self, fields: &[(RawStr, Expr)], span: Span) -> Result<RawVec<RawStr>, Failed> {
+    fn build_field_names(
+        &mut self,
+        fields: &[(RawStr, Expr)],
+        span: Span,
+    ) -> Result<RawVec<RawStr>, Failed> {
         let region = self.current_region();
         let mut out = RawVec::new();
         for (k, _) in fields {
@@ -285,7 +302,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         let mut captures = RawVec::new();
         for &(_, c) in finished.captures.as_slice() {
-            if self.pool.push_code(proto_region, &mut captures, c).is_none() {
+            if self
+                .pool
+                .push_code(proto_region, &mut captures, c)
+                .is_none()
+            {
                 return Err(self.fail_oom(span));
             }
         }

@@ -230,8 +230,9 @@ impl<T> RawVec<T> {
         if self.cap > 0 {
             let old_size = (self.cap as usize) * std::mem::size_of::<T>();
             // SAFETY: `self.ptr` はこの `WorkArena` から `old_size` バイト確保された領域。
-            if unsafe { work.try_grow_in_place(core, self.ptr.cast::<u8>(), old_size, layout.size()) }
-            {
+            if unsafe {
+                work.try_grow_in_place(core, self.ptr.cast::<u8>(), old_size, layout.size())
+            } {
                 self.cap = new_cap as u32;
                 return Some(());
             }
@@ -287,8 +288,9 @@ impl<T> RawVec<T> {
         if self.cap > 0 {
             let old_size = (self.cap as usize) * std::mem::size_of::<T>();
             // SAFETY: `self.ptr` はこの `PermArena` から `old_size` バイト確保された領域。
-            if unsafe { perm.try_grow_in_place(core, self.ptr.cast::<u8>(), old_size, layout.size()) }
-            {
+            if unsafe {
+                perm.try_grow_in_place(core, self.ptr.cast::<u8>(), old_size, layout.size())
+            } {
                 self.cap = new_cap as u32;
                 return Some(());
             }

@@ -58,7 +58,9 @@ impl EnvState<'_> {
         for &v in rvals.as_slice() {
             self.pool.retain_val(v);
         }
-        let res = self.pool.alloc_array_owned(rvals.as_slice(), Span::default());
+        let res = self
+            .pool
+            .alloc_array_owned(rvals.as_slice(), Span::default());
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
             Ok(id) => Ok(Val(RVal::Obj(id))),
@@ -87,7 +89,9 @@ impl EnvState<'_> {
         for &v in rvals.as_slice() {
             self.pool.retain_val(v);
         }
-        let res = self.pool.alloc_tuple_owned(rvals.as_slice(), Span::default());
+        let res = self
+            .pool
+            .alloc_tuple_owned(rvals.as_slice(), Span::default());
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
             Ok(id) => Ok(Val(RVal::Obj(id))),
@@ -272,7 +276,9 @@ impl EnvState<'_> {
                 return Err(self.pool.core.error.as_ref());
             }
         }
-        let res = self.pool.alloc_array_owned(rvals.as_slice(), Span::default());
+        let res = self
+            .pool
+            .alloc_array_owned(rvals.as_slice(), Span::default());
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
             Ok(id) => Ok(Val(RVal::Obj(id))),
@@ -298,7 +304,9 @@ impl EnvState<'_> {
                 return Err(self.pool.core.error.as_ref());
             }
         }
-        let res = self.pool.alloc_array_owned(rvals.as_slice(), Span::default());
+        let res = self
+            .pool
+            .alloc_array_owned(rvals.as_slice(), Span::default());
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
             Ok(id) => Ok(Val(RVal::Obj(id))),
@@ -355,7 +363,11 @@ impl EnvState<'_> {
                 return Err(self.pool.core.error.as_ref());
             };
             if pairs
-                .push_work(&mut self.pool.work, &mut self.pool.core, (fname_raw, values[i]))
+                .push_work(
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    (fname_raw, values[i]),
+                )
                 .is_none()
             {
                 self.pool.work.rewind(&mut self.pool.core, mark);
@@ -381,7 +393,11 @@ impl EnvState<'_> {
                 return Err(self.pool.core.error.as_ref());
             }
         };
-        if let Some(pos) = pairs.as_slice().iter().position(|(k, _)| k.as_str() == field) {
+        if let Some(pos) = pairs
+            .as_slice()
+            .iter()
+            .position(|(k, _)| k.as_str() == field)
+        {
             pairs.as_mut_slice()[pos].1 = val.0;
         } else if pairs
             .push_work(&mut self.pool.work, &mut self.pool.core, (field_raw, val.0))
@@ -464,10 +480,7 @@ impl EnvState<'_> {
             );
             return Err(self.pool.core.error.as_ref());
         };
-        match self
-            .globals
-            .set(&mut self.pool, id, val.0, Span::default())
-        {
+        match self.globals.set(&mut self.pool, id, val.0, Span::default()) {
             Ok(Some(prev)) => {
                 self.pool.release_val(prev);
                 Ok(())
@@ -627,7 +640,11 @@ impl EnvState<'_> {
                     .error
                     .begin_msg("expr.module", ErrorKind::Runtime, Span::default());
             let _ = write!(out, "module '{mod_name}' has no export '{fn_name}'");
-            write_available(out, "exports", exports.as_slice().iter().map(|e| e.name.as_str()));
+            write_available(
+                out,
+                "exports",
+                exports.as_slice().iter().map(|e| e.name.as_str()),
+            );
             return Err(self.pool.core.error.as_ref());
         };
         self.call_rval_vals_ref(callee, args, frozen)

@@ -11,7 +11,11 @@ impl EnvState<'_> {
     }
 
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する（システムヒープ不使用）。
-    pub(super) fn load_module_inner(&mut self, name: &str, source: &str) -> Result<(), ErrRecorded> {
+    pub(super) fn load_module_inner(
+        &mut self,
+        name: &str,
+        source: &str,
+    ) -> Result<(), ErrRecorded> {
         let mod_id = match self.modules.ensure_module(&mut self.pool, name) {
             Ok(id) => id,
             Err(e) => {
@@ -85,7 +89,10 @@ impl EnvState<'_> {
                         ));
                     };
                     self.pool.retain_val(val);
-                    if let Some(pos) = exports.as_slice().iter().position(|(k, _)| k.as_str() == sym)
+                    if let Some(pos) = exports
+                        .as_slice()
+                        .iter()
+                        .position(|(k, _)| k.as_str() == sym)
                     {
                         let prev = std::mem::replace(&mut exports.as_mut_slice()[pos].1, val);
                         self.pool.release_val(prev);

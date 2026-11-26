@@ -61,7 +61,47 @@ impl<'a> Machine<'a> {
 - `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効で、評価するソースとそこから呼ばれるモジュール外の関数から参照でき（モジュール内の関数からは参照されない）、評価終了時に解放する。`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。名前解決の優先順位は、局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛 → 読み込み済みモジュール名とする。
 - Rust API では `call` / `call_in` は凍結後の `Machine` のみ提供する（C FFI では同一ハンドル上で `rin_call` / `rin_call_in` を凍結前・凍結後のどちらでも呼び出せる）。
 - `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
-- `live_bytes`：現在内部プール上で生存しているオブジェクトの概算バイト数を返す。
+- `live_bytes`：現在オブジェクト領域上で生存している実確保バイト数を返す。
+
+### 1.2.1 ゼロヒープ・ホスト境界 API（`Val` / `ValueRef` / `ErrorRef`）
+
+`Builder` / `Machine` は、Rust のシステムヒープを一切使わず呼び出し元が渡した `Allocator` の上だけで完結する API を提供する（Cargo フィーチャ `std-value` を無効化した `--no-default-features` でも利用可能）。
+
+```rust
+// 値ハンドルの構築・解放（Builder / Machine 共通）
+pub fn val_void(&self) -> Val
+pub fn val_int(&self, n: i64) -> Val
+pub fn val_float(&self, x: f64) -> Val
+pub fn val_bool(&self, b: bool) -> Val
+pub fn val_char(&self, c: char) -> Val
+pub fn val_none(&self) -> Val
+pub fn val_str(&mut self, s: &str) -> Result<Val, ErrorRef<'_>>
+pub fn val_list(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
+pub fn val_array(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
+pub fn val_tuple(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
+pub fn val_struct(&mut self, name: &str, fields: &[(&str, Val)]) -> Result<Val, ErrorRef<'_>>
+pub fn val_variant(&mut self, type_name: &str, variant: &str, data: Option<Val>) -> Result<Val, ErrorRef<'_>>
+pub fn val_some(&mut self, v: Val) -> Result<Val, ErrorRef<'_>>
+pub fn val_ok(&mut self, v: Val) -> Result<Val, ErrorRef<'_>>
+pub fn val_err(&mut self, v: Val) -> Result<Val, ErrorRef<'_>>
+pub fn release_val(&mut self, v: Val)
+pub fn value_ref(&self, v: Val) -> ValueRef<'_>
+
+// Builder
+pub fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>>
+pub fn load_module_ref(&mut self, name: &str, source: &str) -> Result<(), ErrorRef<'_>>
+pub fn eval_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>>
+
+// Machine
+pub fn eval_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn eval_with_vals(&mut self, source: &str, bindings: &[(&str, Val)]) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn call_ref(&mut self, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
+```
+
+- `Val`：マシン所有のプール値への不透明ハンドル。使い終わったら同じマシンの `release_val` へ返却する。
+- `ValueRef<'_>`：プール上の値を複製せずに直接読み取る借用ビュー（`tag`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`・`as_array`・`as_tuple`・`as_struct`・`as_variant`・`as_some`・`as_ok`・`as_err`）。`Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
+- `ErrorRef<'_>`：マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。`Display` を含めシステムヒープを一切使わない。`to_error(&self) -> Error` で所有型 `Error` へ変換できる。
 
 ### 数学関数の直接呼び出しと `MathFma`
 
@@ -258,29 +298,28 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 - `RinMathFma`：`RIN_MATH_FMA_STRICT = 0`, `RIN_MATH_FMA_FUSED = 1`
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
   - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
-- `Rin` / `RinValue`：不透明ハンドル型。
+- `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
 - `RinBinding`：`{ const char *name; const RinValue *value; }`
-- `RinEvalResult`：`{ bool ok; RinValue *value; }`
+- `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。ホスト側で解放しない）
 
 ### 2.2 `Rin` 操作
 
 | 関数 | 説明 |
 |---|---|
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
-| `Rin *rin_new(RinLimits limits, RinAllocator alloc)` | 読み込み段階の `Rin` を生成する |
-| `void rin_free(Rin *rin)` | `Rin` を破棄し内部プールを解放する（`NULL` 可） |
+| `Rin *rin_new(RinLimits limits, RinAllocator alloc)` | 読み込み段階の `Rin` を `alloc` 上に生成する（確保失敗時は `NULL`） |
+| `void rin_free(Rin *rin)` | `Rin` と保持中の全ハンドル・プールを `alloc` へ解放する（`NULL` 可） |
 | `bool rin_freeze(Rin *rin)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`rin == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(Rin *rin, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
 | `RinMathFma rin_math_fma(const Rin *rin)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
 | `bool rin_bind(Rin *rin, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して `false`） |
 | `RinEvalResult rin_build(Rin *rin, const char *source)` | 読み込み段階でソースを評価し大域定義を構築する（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
-| `RinEvalResult rin_eval(Rin *rin, const char *source)` | 凍結後の環境でソースを評価し結果を返す（`[env.frozen]`・`[env.modules]` を適用。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
-| `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する（前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_eval(Rin *rin, const char *source)` | 凍結後の環境でソースを評価し結果を借用ポインタで返す（`[env.frozen]`・`[env.modules]` を適用。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する（前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は同じ `Rin` で生成した有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
 | `RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
 | `RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `const RinError *rin_last_error(const Rin *rin)` | 直近の対象操作のエラーを借用する（エラーなし・NULL は NULL） |
-| `void rin_res_free(RinEvalResult *res)` | 結果の `value` を解放し NULL にする（エラー情報は保持する） |
 
 #### エラー情報の借用
 
@@ -309,10 +348,10 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 対象操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数である。同じ `Rin` への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得や `rin_res_free` では無効化しない。同じ `Rin` の対象操作・解放と並行して参照してはならない。
+- 対象操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数である。同じ `Rin` への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の対象操作・解放と並行して参照してはならない。
 - 対象操作は引数検査の前に前回の情報をクリアする。有効な `Rin` への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
-- `RinEvalResult.value` は評価・関数呼び出し成功時にはホストが所有する値であり、`rin_res_free` で解放する。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
+- `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（ホスト側での解放は不要）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
 
 凍結済みの有効な `r` に対する利用例：
 
@@ -322,48 +361,47 @@ if (!result.ok) {
     const RinError *error = rin_last_error(r);
     fprintf(stderr, "%s\n", error->text);
 }
-rin_res_free(&result);
 ```
 
 ### 2.3 値の生成と解放
 
-生成関数が返す `RinValue *` は呼び出し側が所有し、不要になったら `rin_drop` で解放する。
+生成関数は `Rin *rin` を第 1 引数に取り、`rin` のアロケータ上で値ハンドルを確保して返す。使い終わったら同じ `rin` に対して `rin_drop(rin, val)` で返却する。
 
 | 関数 | 説明 |
 |---|---|
-| `RinValue *rin_int(int64_t n)` | `i64` 値を生成する |
-| `RinValue *rin_float(double x)` | `f64` 値を生成する |
-| `RinValue *rin_bool(bool b)` | `bool` 値を生成する |
-| `RinValue *rin_str(const char *s)` | UTF-8 文字列を生成する |
-| `RinValue *rin_i64s(const int64_t *ptr, size_t len)` | `i64` の `array` を生成する |
-| `RinValue *rin_f64s(const double *ptr, size_t len)` | `f64` の `array` を生成する |
-| `RinValue *rin_nil(void)` | 空リスト `[]` を生成する |
-| `RinValue *rin_cons(const RinValue *head, const RinValue *tail)` | `tail` の先頭に `head` を追加した新リストを返す（O(1)） |
-| `RinValue *rin_none(void)` | `none` 値を生成する |
-| `RinValue *rin_some(const RinValue *val)` | `some(val)` 値を生成する |
-| `RinValue *rin_struct(const char *name)` | 空の `Struct` 値を生成する |
-| `bool rin_struct_set(RinValue *s, const char *field, const RinValue *val)` | `Struct` のフィールドを設定する |
-| `RinValue *rin_variant(const char *type_name, const char *variant, const RinValue *data)` | `Variant` 値を生成する（`data` は `NULL` 可） |
-| `void rin_drop(RinValue *val)` | `RinValue *` を解放する（`NULL` 可） |
+| `RinValue *rin_int(Rin *rin, int64_t n)` | `i64` 値を生成する |
+| `RinValue *rin_float(Rin *rin, double x)` | `f64` 値を生成する |
+| `RinValue *rin_bool(Rin *rin, bool b)` | `bool` 値を生成する |
+| `RinValue *rin_str(Rin *rin, const char *s)` | UTF-8 文字列を生成する |
+| `RinValue *rin_i64s(Rin *rin, const int64_t *ptr, size_t len)` | `i64` の `array` を生成する |
+| `RinValue *rin_f64s(Rin *rin, const double *ptr, size_t len)` | `f64` の `array` を生成する |
+| `RinValue *rin_nil(Rin *rin)` | 空リスト `[]` を生成する |
+| `RinValue *rin_cons(Rin *rin, const RinValue *head, const RinValue *tail)` | `tail` の先頭に `head` を追加した新リストを返す（O(1)） |
+| `RinValue *rin_none(Rin *rin)` | `none` 値を生成する |
+| `RinValue *rin_some(Rin *rin, const RinValue *val)` | `some(val)` 値を生成する |
+| `RinValue *rin_struct(Rin *rin, const char *name)` | 空の `Struct` 値を生成する |
+| `bool rin_struct_set(Rin *rin, RinValue *s, const char *field, const RinValue *val)` | `Struct` のフィールドを設定する |
+| `RinValue *rin_variant(Rin *rin, const char *type_name, const char *variant, const RinValue *data)` | `Variant` 値を生成する（`data` は `NULL` 可） |
+| `void rin_drop(Rin *rin, RinValue *val)` | `RinValue *` ハンドルを解放する（`NULL` 可） |
 
 ### 2.4 値の読み取り
 
 | 関数 | 説明 |
 |---|---|
-| `RinTag rin_tag(const RinValue *val)` | 値の型タグを返す |
-| `bool rin_as_int(const RinValue *val, int64_t *out)` | `i64` なら `*out` に書き込み `true` を返す |
-| `bool rin_as_float(const RinValue *val, double *out)` | `f64` なら `*out` に書き込み `true` を返す |
-| `bool rin_as_bool(const RinValue *val, bool *out)` | `bool` なら `*out` に書き込み `true` を返す |
-| `const uint8_t *rin_as_str(const RinValue *val, size_t *out_len)` | `Str` の UTF-8 バイト列を借用して返す（`val` が有効な間のみ有効、非文字列は `NULL`） |
-| `size_t rin_len(const RinValue *val)` | `List`、`Array`、または `Tuple` の要素数を返す |
-| `RinValue *rin_car(const RinValue *val)` | `List` の先頭要素を新しい `RinValue *` で返す（空・非リストは `NULL`） |
-| `RinValue *rin_cdr(const RinValue *val)` | `List` の残余リストを新しい `RinValue *` で返す（O(1)、非リストは `NULL`） |
-| `RinValue *rin_field(const RinValue *val, const char *field)` | `Struct` のフィールド `field` を新しい `RinValue *` で返す（欠落・非構造体は `NULL`） |
-| `const uint8_t *rin_variant_name(const RinValue *val, size_t *out_len)` | `Variant` のバリアント名 UTF-8 バイト列を借用して返す（`val` が有効な間のみ有効） |
-| `RinValue *rin_unwrap(const RinValue *val)` | `Some` / `Ok` / `Err` / `Variant` ペイロードの中身を新しい `RinValue *` で返す |
-| `RinValue *rin_tuple_get(const RinValue *val, size_t index)` | `Tuple` / `Array` の `index` 番目要素を新しい `RinValue *` で返す |
-| `size_t rin_copy_i64s(const RinValue *val, int64_t *out_ptr, size_t out_cap)` | `i64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |
-| `size_t rin_copy_f64s(const RinValue *val, double *out_ptr, size_t out_cap)` | `f64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |
+| `RinTag rin_tag(const Rin *rin, const RinValue *val)` | 値の型タグを返す |
+| `bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out)` | `i64` なら `*out` に書き込み `true` を返す |
+| `bool rin_as_float(const Rin *rin, const RinValue *val, double *out)` | `f64` なら `*out` に書き込み `true` を返す |
+| `bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out)` | `bool` なら `*out` に書き込み `true` を返す |
+| `const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len)` | `Str` の UTF-8 バイト列を借用して返す（`val` が有効な間のみ有効、非文字列は `NULL`） |
+| `size_t rin_len(const Rin *rin, const RinValue *val)` | `List`、`Array`、または `Tuple` の要素数を返す |
+| `RinValue *rin_car(Rin *rin, const RinValue *val)` | `List` の先頭要素を所有 `RinValue *` で返す（空・非リストは `NULL`、`rin_drop` で解放） |
+| `RinValue *rin_cdr(Rin *rin, const RinValue *val)` | `List` の残余リストを所有 `RinValue *` で返す（O(1)、非リストは `NULL`、`rin_drop` で解放） |
+| `RinValue *rin_field(Rin *rin, const RinValue *val, const char *field)` | `Struct` のフィールド `field` を所有 `RinValue *` で返す（欠落・非構造体は `NULL`、`rin_drop` で解放） |
+| `const uint8_t *rin_variant_name(const Rin *rin, const RinValue *val, size_t *out_len)` | `Variant` のバリアント名 UTF-8 バイト列を借用して返す（`val` が有効な間のみ有効） |
+| `RinValue *rin_unwrap(Rin *rin, const RinValue *val)` | `Some` / `Ok` / `Err` / `Variant` ペイロードの中身を所有 `RinValue *` で返す（`rin_drop` で解放） |
+| `RinValue *rin_tuple_get(Rin *rin, const RinValue *val, size_t index)` | `Tuple` / `Array` の `index` 番目要素を所有 `RinValue *` で返す（`rin_drop` で解放） |
+| `size_t rin_copy_i64s(const Rin *rin, const RinValue *val, int64_t *out_ptr, size_t out_cap)` | `i64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |
+| `size_t rin_copy_f64s(const Rin *rin, const RinValue *val, double *out_ptr, size_t out_cap)` | `f64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |
 
 ### 2.5 スキーマ検証（[スキーマ仕様](schema.md)）
 
@@ -371,8 +409,8 @@ rin_res_free(&result);
 |---|---|
 | `RinSchema *rin_schema(const char *src)` | スキーマ文字列を解析して `RinSchema *` を返す（構文エラー時は `NULL`） |
 | `void rin_schema_free(RinSchema *schema)` | `RinSchema *` を解放する（`NULL` 可） |
-| `bool rin_check(const RinValue *val, const RinSchema *schema)` | `val` が `schema` に適合すれば `true` を返す |
-| `bool rin_check_str(const RinValue *val, const char *schema_src)` | スキーマ文字列をその場で解析して `val` を検証する |
+| `bool rin_check(const Rin *rin, const RinValue *val, const RinSchema *schema)` | `val` が `schema` に適合すれば `true` を返す |
+| `bool rin_check_str(const Rin *rin, const RinValue *val, const char *schema_src)` | スキーマ文字列をその場で解析して `val` を検証する |
 
 ## 3. Rust API と C FFI API の使い分けと対応
 
@@ -405,7 +443,7 @@ rin_res_free(&result);
 | 関数直接呼出 | `rin_call(rin, fn_name, args, argc)` | `machine.call(fn_name, args)` | C は凍結前も呼べる |
 | モジュール関数呼出 | `rin_call_in(rin, mod, fn_name, args, argc)` | `machine.call_in(mod, fn_name, args)` | C は凍結前も呼べる |
 | エラー取得 | `rin_last_error(rin)` | 各メソッドの `Result<_, Error>` | C は直前エラーを `Rin` 内に保持 |
-| 評価結果の解放 | `rin_res_free(&res)` | `Drop` | |
+| 評価結果の解放 | 不要（借用ポインタ） | `ValueRef` は借用、`Value` は `Drop` | |
 | 生存バイト数 | （未提供） | `builder.live_bytes` / `machine.live_bytes` | Rust のみ |
 
 ### 3.3 値・スキーマ・その他

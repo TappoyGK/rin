@@ -192,7 +192,9 @@ impl Runner<'_, '_> {
             | BuiltinId::Filter
             | BuiltinId::FlatMap
             | BuiltinId::Fold
-            | BuiltinId::SortBy => unreachable!("callback builtins are handled by the VM frame loop"),
+            | BuiltinId::SortBy => {
+                unreachable!("callback builtins are handled by the VM frame loop")
+            }
         }
     }
 }

@@ -24,7 +24,12 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
-    pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), ErrRecorded> {
+    pub(super) fn tick(
+        &mut self,
+        chunk: &Chunk,
+        start: u32,
+        count: u32,
+    ) -> Result<(), ErrRecorded> {
         let remaining = self.steps_left;
         if count as usize > remaining {
             let span = chunk.tick_spans[start as usize + remaining];
@@ -91,7 +96,12 @@ impl<'a, 'p> Runner<'a, 'p> {
     ) -> Result<(), ErrRecorded> {
         if self
             .stack
-            .resize_work(&mut self.pool.work, &mut self.pool.core, new_len, RVal::Void)
+            .resize_work(
+                &mut self.pool.work,
+                &mut self.pool.core,
+                new_len,
+                RVal::Void,
+            )
             .is_none()
         {
             return Err(self.work_oom(span));
@@ -100,7 +110,11 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
-    pub(super) fn stack_reserve(&mut self, additional: usize, span: Span) -> Result<(), ErrRecorded> {
+    pub(super) fn stack_reserve(
+        &mut self,
+        additional: usize,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
         if self
             .stack
             .reserve_work(&mut self.pool.work, &mut self.pool.core, additional)
@@ -216,15 +230,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         ErrRecorded
     }
 
-    pub(super) fn define_top(
-        &mut self,
-        id: u32,
-        val: RVal,
-        span: Span,
-    ) -> Result<(), ErrRecorded> {
+    pub(super) fn define_top(&mut self, id: u32, val: RVal, span: Span) -> Result<(), ErrRecorded> {
         let res = if let Some(mod_id) = self.active_module {
-            self.modules
-                .set_env_slot(self.pool, mod_id, id, val, span)
+            self.modules.set_env_slot(self.pool, mod_id, id, val, span)
         } else {
             self.globals.set(self.pool, id, val, span)
         };
@@ -268,7 +276,11 @@ impl<'a, 'p> Runner<'a, 'p> {
         let mark = self.pool.work.mark(&self.pool.core);
         let mut cap_vals = RawVec::<RVal>::new();
         if cap_vals
-            .reserve_work(&mut self.pool.work, &mut self.pool.core, proto.captures.len())
+            .reserve_work(
+                &mut self.pool.work,
+                &mut self.pool.core,
+                proto.captures.len(),
+            )
             .is_none()
         {
             self.pool.work.rewind(&mut self.pool.core, mark);
@@ -362,7 +374,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 }
                 for &val in args {
                     self.pool.retain_val(val);
-                    let _ = self.stack.push_work(&mut self.pool.work, &mut self.pool.core, val);
+                    let _ = self
+                        .stack
+                        .push_work(&mut self.pool.work, &mut self.pool.core, val);
                 }
                 let _ = self.stack.resize_work(
                     &mut self.pool.work,

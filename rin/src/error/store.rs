@@ -171,7 +171,13 @@ impl ErrorStore {
         self.omitted_frames = 0;
     }
 
-    pub fn set_str(&mut self, rule: &'static str, kind: ErrorKind, at: Span, msg: &str) -> ErrRecorded {
+    pub fn set_str(
+        &mut self,
+        rule: &'static str,
+        kind: ErrorKind,
+        at: Span,
+        msg: &str,
+    ) -> ErrRecorded {
         self.reset_header(rule, kind, at);
         self.msg.push_str(msg);
         ErrRecorded
@@ -190,7 +196,12 @@ impl ErrorStore {
     }
 
     /// メッセージ追記用に `InlineBuf<1024>` への可変参照を返す。
-    pub fn begin_msg(&mut self, rule: &'static str, kind: ErrorKind, at: Span) -> &mut InlineBuf<1024> {
+    pub fn begin_msg(
+        &mut self,
+        rule: &'static str,
+        kind: ErrorKind,
+        at: Span,
+    ) -> &mut InlineBuf<1024> {
         self.reset_header(rule, kind, at);
         &mut self.msg
     }

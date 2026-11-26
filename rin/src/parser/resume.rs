@@ -466,7 +466,12 @@ impl Parser<'_, '_, '_> {
                         pattern: mf.as_ref().pattern,
                         body: mf.as_ref().body,
                     };
-                    if mf.as_mut().arms.push_work(self.work, self.core, arm).is_none() {
+                    if mf
+                        .as_mut()
+                        .arms
+                        .push_work(self.work, self.core, arm)
+                        .is_none()
+                    {
                         return Err(self.oom(arm.span));
                     }
                     let m = *mf.as_ref();

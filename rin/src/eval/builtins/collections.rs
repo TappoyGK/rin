@@ -41,11 +41,7 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_get(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, idx_v] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'get' takes 2 arguments (seq, index)",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'get' takes 2 arguments (seq, index)"));
         };
         let idx = self.expect_int("get", *idx_v, span)?;
         if let RVal::Obj(id) = *list_v
@@ -115,11 +111,7 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_cons(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [item, list_v] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'cons' takes 2 arguments (item, list)",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'cons' takes 2 arguments (item, list)"));
         };
         self.expect_list("cons", *list_v, span)?;
         self.pool.alloc_cons(*item, *list_v, span)
@@ -127,11 +119,7 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_push(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, item] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'push' takes 2 arguments (list, item)",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'push' takes 2 arguments (list, item)"));
         };
         self.expect_list("push", *list_v, span)?;
         let mark = self.pool.work.mark(&self.pool.core);
@@ -164,7 +152,11 @@ impl Runner<'_, '_> {
                 self.expect_list("append", arg, span)?;
                 let sub = self.list_to_work_vec(arg, span)?;
                 if items
-                    .extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, sub.as_slice())
+                    .extend_from_slice_work(
+                        &mut self.pool.work,
+                        &mut self.pool.core,
+                        sub.as_slice(),
+                    )
                     .is_none()
                 {
                     return Err(self.work_oom(span));
@@ -236,20 +228,12 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_take(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, n_v] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'take' takes 2 arguments (list, n)",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'take' takes 2 arguments (list, n)"));
         };
         self.expect_list("take", *list_v, span)?;
         let n = self.expect_int("take", *n_v, span)?;
         if n < 0 {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'take' count cannot be negative",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'take' count cannot be negative"));
         }
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -263,20 +247,12 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_drop(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, n_v] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'drop' takes 2 arguments (list, n)",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'drop' takes 2 arguments (list, n)"));
         };
         self.expect_list("drop", *list_v, span)?;
         let mut n = self.expect_int("drop", *n_v, span)?;
         if n < 0 {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'drop' count cannot be negative",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'drop' count cannot be negative"));
         }
         if !self.try_charge((n as usize).min(self.pool.list_len(*list_v))) {
             return self.step_limit_result(span);
@@ -392,11 +368,7 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_zip(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [a_v, b_v] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'zip' takes 2 arguments (list, list)",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'zip' takes 2 arguments (list, list)"));
         };
         self.expect_list("zip", *a_v, span)?;
         self.expect_list("zip", *b_v, span)?;
@@ -452,10 +424,7 @@ impl Runner<'_, '_> {
             }
             for (i, &x) in items.as_slice().iter().enumerate() {
                 self.pool.retain_val(x);
-                match self
-                    .pool
-                    .alloc_tuple_owned(&[RVal::Int(i as i64), x], span)
-                {
+                match self.pool.alloc_tuple_owned(&[RVal::Int(i as i64), x], span) {
                     Ok(id) => {
                         let _ =
                             out.push_work(&mut self.pool.work, &mut self.pool.core, RVal::Obj(id));
@@ -589,11 +558,7 @@ impl Runner<'_, '_> {
         span: Span,
     ) -> Result<RVal, ErrRecorded> {
         let [v] = args else {
-            return Err(self.err_runtime(
-                "fn.list",
-                span,
-                "'array->list' takes 1 argument",
-            ));
+            return Err(self.err_runtime("fn.list", span, "'array->list' takes 1 argument"));
         };
         let arr_slice = match v {
             RVal::Obj(id) => match *self.pool.get(*id) {

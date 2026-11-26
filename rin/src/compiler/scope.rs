@@ -91,14 +91,9 @@ impl Scope {
                 let hash = fnv1a_bytes(n.as_str().as_bytes());
                 if self
                     .local_names
-                    .insert_work(
-                        &mut pool.work,
-                        &mut pool.core,
-                        hash,
-                        n,
-                        i as u32,
-                        |a, b| a.as_str() == b.as_str(),
-                    )
+                    .insert_work(&mut pool.work, &mut pool.core, hash, n, i as u32, |a, b| {
+                        a.as_str() == b.as_str()
+                    })
                     .is_none()
                 {
                     return Err(pool.core.err_oom(span));
@@ -186,14 +181,9 @@ impl Scope {
             let hash = fnv1a_bytes(name_str.as_bytes());
             if self
                 .capture_names
-                .insert_work(
-                    &mut pool.work,
-                    &mut pool.core,
-                    hash,
-                    name,
-                    idx,
-                    |a, b| a.as_str() == b.as_str(),
-                )
+                .insert_work(&mut pool.work, &mut pool.core, hash, name, idx, |a, b| {
+                    a.as_str() == b.as_str()
+                })
                 .is_none()
             {
                 return Err(pool.core.err_oom(span));
@@ -203,14 +193,9 @@ impl Scope {
                 let hash = fnv1a_bytes(n.as_str().as_bytes());
                 if self
                     .capture_names
-                    .insert_work(
-                        &mut pool.work,
-                        &mut pool.core,
-                        hash,
-                        n,
-                        i as u32,
-                        |a, b| a.as_str() == b.as_str(),
-                    )
+                    .insert_work(&mut pool.work, &mut pool.core, hash, n, i as u32, |a, b| {
+                        a.as_str() == b.as_str()
+                    })
                     .is_none()
                 {
                     return Err(pool.core.err_oom(span));
@@ -235,7 +220,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let mut pending_from = None;
         let mut head = None;
         'scopes: for (scope_index, scope) in self.scopes.as_slice().iter().enumerate().rev() {
-            for (local_index, (_, _, saved, _)) in scope.locals.as_slice().iter().enumerate().rev() {
+            for (local_index, (_, _, saved, _)) in scope.locals.as_slice().iter().enumerate().rev()
+            {
                 if let Some(saved) = saved {
                     head = Some(saved.get() as usize - 1);
                     break 'scopes;
@@ -294,7 +280,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
     // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
     // 再読込で消えるモジュールの束縛は、この判定に含めない。
     #[cold]
-    pub(super) fn record_name_site(&mut self, id: u32, ip: usize, span: Span) -> Result<(), Failed> {
+    pub(super) fn record_name_site(
+        &mut self,
+        id: u32,
+        ip: usize,
+        span: Span,
+    ) -> Result<(), Failed> {
         let scope = self.scopes.last().unwrap();
         // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
         if scope.outer_local_count == 0 && scope.locals.is_empty() {
@@ -323,7 +314,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let site = table.sites.len();
             if self
                 .pool
-                .push_code(self.region, &mut table.sites, NameSite { ip, head, previous })
+                .push_code(
+                    self.region,
+                    &mut table.sites,
+                    NameSite { ip, head, previous },
+                )
                 .is_none()
             {
                 return Err(self.fail_oom(span));

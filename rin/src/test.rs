@@ -299,7 +299,9 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
                         Pattern::Some(name)
                         | Pattern::Ok(name)
                         | Pattern::Err(name)
-                        | Pattern::Variant { binding: name, .. } => name.as_ref().map(|s| s.as_str()),
+                        | Pattern::Variant { binding: name, .. } => {
+                            name.as_ref().map(|s| s.as_str())
+                        }
                         _ => None,
                     };
                     let scope = bound | name.map_or(0, test_name);

@@ -320,17 +320,13 @@ impl SymTable {
         if !pool.perm.is_frozen() {
             let raw = RawStr::from_perm(&mut pool.perm, &mut pool.core, name)?;
             let id = STATIC_SYM_COUNT.checked_add(self.perm_names.len() as u32)?;
-            self.perm_names.push_perm(&mut pool.perm, &mut pool.core, raw)?;
+            self.perm_names
+                .push_perm(&mut pool.perm, &mut pool.core, raw)?;
             if self
                 .perm_ids
-                .insert_perm(
-                    &mut pool.perm,
-                    &mut pool.core,
-                    hash,
-                    raw,
-                    id,
-                    |a, b| a.as_str() == b.as_str(),
-                )
+                .insert_perm(&mut pool.perm, &mut pool.core, hash, raw, id, |a, b| {
+                    a.as_str() == b.as_str()
+                })
                 .is_none()
             {
                 self.perm_names.pop();
@@ -346,17 +342,13 @@ impl SymTable {
             let raw = RawStr::from_work(&mut pool.work, &mut pool.core, name)?;
             let total = self.perm_names.len().checked_add(self.temp_names.len())?;
             let id = STATIC_SYM_COUNT.checked_add(u32::try_from(total).ok()?)?;
-            self.temp_names.push_work(&mut pool.work, &mut pool.core, raw)?;
+            self.temp_names
+                .push_work(&mut pool.work, &mut pool.core, raw)?;
             if self
                 .temp_ids
-                .insert_work(
-                    &mut pool.work,
-                    &mut pool.core,
-                    hash,
-                    raw,
-                    id,
-                    |a, b| a.as_str() == b.as_str(),
-                )
+                .insert_work(&mut pool.work, &mut pool.core, hash, raw, id, |a, b| {
+                    a.as_str() == b.as_str()
+                })
                 .is_none()
             {
                 self.temp_names.pop();
@@ -581,14 +573,9 @@ impl Chunk {
         let raw = pool.alloc_code_str(region, s)?;
         pool.push_code(region, &mut self.strings, raw)?;
         if !string_map.is_empty() {
-            string_map.insert_work(
-                &mut pool.work,
-                &mut pool.core,
-                hash,
-                raw,
-                idx,
-                |a, b| a.as_str() == b.as_str(),
-            )?;
+            string_map.insert_work(&mut pool.work, &mut pool.core, hash, raw, idx, |a, b| {
+                a.as_str() == b.as_str()
+            })?;
         } else if self.strings.len() > 16 {
             for (i, &st) in self.strings.as_slice().iter().enumerate() {
                 let h = fnv1a_bytes(st.as_str().as_bytes());
@@ -659,7 +646,8 @@ impl Chunk {
     /// `WorkArena` 上で構築したチャンクを、`PermArena` へ余剰容量ゼロの密なスライスとしてコピーする。
     #[inline(never)]
     pub fn copy_to_perm(&self, pool: &mut Pool<'_>) -> Option<Self> {
-        let code = RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.code.as_slice())?;
+        let code =
+            RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.code.as_slice())?;
         let spans =
             RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.spans.as_slice())?;
         let tick_spans = RawVec::from_slice_exact_perm(
@@ -751,7 +739,11 @@ impl Chunk {
     }
 }
 
-fn copy_opt_str(pool: &mut Pool<'_>, region: CodeRegion, s: Option<RawStr>) -> Option<Option<RawStr>> {
+fn copy_opt_str(
+    pool: &mut Pool<'_>,
+    region: CodeRegion,
+    s: Option<RawStr>,
+) -> Option<Option<RawStr>> {
     match s {
         None => Some(None),
         Some(raw) => Some(Some(pool.alloc_code_str(region, raw.as_str())?)),

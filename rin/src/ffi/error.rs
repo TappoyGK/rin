@@ -185,16 +185,15 @@ impl StoredError {
     }
 
     pub fn set_host(&mut self, message: &str) {
-        self.set_simple("host.argument", RinErrorKind::Host, Span::default(), message);
+        self.set_simple(
+            "host.argument",
+            RinErrorKind::Host,
+            Span::default(),
+            message,
+        );
     }
 
-    pub fn set_simple(
-        &mut self,
-        rule: &str,
-        kind: RinErrorKind,
-        at: Span,
-        message: &str,
-    ) {
+    pub fn set_simple(&mut self, rule: &str, kind: RinErrorKind, at: Span, message: &str) {
         self.rule.clear();
         self.message.clear();
         self.module.clear();

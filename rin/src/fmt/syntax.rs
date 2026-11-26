@@ -211,13 +211,11 @@ impl<'a> Syntax<'a> {
             ExprKind::Some(x) | ExprKind::Ok(x) | ExprKind::Err(x) => {
                 self.add(start + 1, Style::Call, vec![self.range(x)])
             }
-            ExprKind::Variant(v) if v.data.is_some() => {
-                self.add(
-                    start + 3,
-                    Style::Call,
-                    vec![self.range(v.data.as_ref().unwrap())],
-                )
-            }
+            ExprKind::Variant(v) if v.data.is_some() => self.add(
+                start + 3,
+                Style::Call,
+                vec![self.range(v.data.as_ref().unwrap())],
+            ),
             ExprKind::Index { target, index } => {
                 self.add(self.end(target), Style::Call, vec![self.range(index)])
             }
@@ -248,11 +246,11 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
             }
             (ExprKind::Struct(a), ExprKind::Struct(b)) => {
                 a.name == b.name
-                    && a.fields
+                    && a.fields.as_slice().iter().map(|(n, _)| n).eq(b
+                        .fields
                         .as_slice()
                         .iter()
-                        .map(|(n, _)| n)
-                        .eq(b.fields.as_slice().iter().map(|(n, _)| n))
+                        .map(|(n, _)| n))
             }
             (ExprKind::With { fields: a, .. }, ExprKind::With { fields: b, .. }) => a
                 .as_slice()

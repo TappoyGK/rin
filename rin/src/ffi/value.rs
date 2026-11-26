@@ -97,11 +97,7 @@ pub unsafe extern "C" fn rin_str(machine: *mut Rin, s: *const c_char) -> *mut Ri
 /// # Safety
 /// `machine` は有効な `Rin` ポインタ、`ptr` は `len` 個の `i64` 要素を読み取れる有効なポインタでなければならない（`len == 0` を除く）。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_i64s(
-    machine: *mut Rin,
-    ptr: *const i64,
-    len: usize,
-) -> *mut RinValue {
+pub unsafe extern "C" fn rin_i64s(machine: *mut Rin, ptr: *const i64, len: usize) -> *mut RinValue {
     let Some(m) = (unsafe { machine.as_mut() }) else {
         return std::ptr::null_mut();
     };
@@ -133,11 +129,7 @@ pub unsafe extern "C" fn rin_i64s(
 /// # Safety
 /// `machine` は有効な `Rin` ポインタ、`ptr` は `len` 個の `f64` 要素を読み取れる有効なポインタでなければならない（`len == 0` を除く）。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_f64s(
-    machine: *mut Rin,
-    ptr: *const f64,
-    len: usize,
-) -> *mut RinValue {
+pub unsafe extern "C" fn rin_f64s(machine: *mut Rin, ptr: *const f64, len: usize) -> *mut RinValue {
     let Some(m) = (unsafe { machine.as_mut() }) else {
         return std::ptr::null_mut();
     };
@@ -358,10 +350,7 @@ pub unsafe extern "C" fn rin_variant_name(
 /// # Safety
 /// `machine` と `val` は有効なポインタでなければならない。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_unwrap(
-    machine: *mut Rin,
-    val: *const RinValue,
-) -> *mut RinValue {
+pub unsafe extern "C" fn rin_unwrap(machine: *mut Rin, val: *const RinValue) -> *mut RinValue {
     let (Some(m), Some(v)) = (unsafe { machine.as_mut() }, unsafe { val.as_ref() }) else {
         return std::ptr::null_mut();
     };
@@ -499,8 +488,12 @@ pub unsafe extern "C" fn rin_cons(
         return std::ptr::null_mut();
     };
     let res = match m.state.as_mut().expect("Rin state present") {
-        RinState::Building(b) => b.val_cons(h.0, t.0).map_err(|e| m.last_error.set_from_ref(e)),
-        RinState::Frozen(f) => f.val_cons(h.0, t.0).map_err(|e| m.last_error.set_from_ref(e)),
+        RinState::Building(b) => b
+            .val_cons(h.0, t.0)
+            .map_err(|e| m.last_error.set_from_ref(e)),
+        RinState::Frozen(f) => f
+            .val_cons(h.0, t.0)
+            .map_err(|e| m.last_error.set_from_ref(e)),
     };
     match res {
         Ok(v) => m.alloc_handle(v),
@@ -528,10 +521,7 @@ pub unsafe extern "C" fn rin_none(machine: *mut Rin) -> *mut RinValue {
 /// # Safety
 /// `machine` と `val` は有効なポインタでなければならない。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_some(
-    machine: *mut Rin,
-    val: *const RinValue,
-) -> *mut RinValue {
+pub unsafe extern "C" fn rin_some(machine: *mut Rin, val: *const RinValue) -> *mut RinValue {
     let (Some(m), Some(v)) = (unsafe { machine.as_mut() }, unsafe { val.as_ref() }) else {
         return std::ptr::null_mut();
     };
@@ -589,11 +579,11 @@ pub unsafe extern "C" fn rin_struct_set(
     field: *const c_char,
     val: *const RinValue,
 ) -> bool {
-    let (Some(m), Some(sr), Some(vr)) = (
-        unsafe { machine.as_mut() },
-        unsafe { s.as_mut() },
-        unsafe { val.as_ref() },
-    ) else {
+    let (Some(m), Some(sr), Some(vr)) =
+        (unsafe { machine.as_mut() }, unsafe { s.as_mut() }, unsafe {
+            val.as_ref()
+        })
+    else {
         return false;
     };
     if field.is_null() {
@@ -680,7 +670,9 @@ pub unsafe extern "C" fn rin_car(machine: *mut Rin, val: *const RinValue) -> *mu
     };
     let head = {
         let vr = m.state_ref().value_ref(v.0);
-        vr.as_list().and_then(|mut it| it.next()).map(|x| Val(x.val))
+        vr.as_list()
+            .and_then(|mut it| it.next())
+            .map(|x| Val(x.val))
     };
     let Some(h) = head else {
         return std::ptr::null_mut();

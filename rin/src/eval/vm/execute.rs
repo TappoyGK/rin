@@ -52,9 +52,8 @@ impl Runner<'_, '_> {
                     }
                     Op::Void => self.stack_push(RVal::Void, chunk.spans[ip - 1])?,
                     Op::Int(n) => self.stack_push(RVal::Int(n), chunk.spans[ip - 1])?,
-                    Op::Float(idx) => {
-                        self.stack_push(RVal::Float(chunk.floats[idx as usize]), chunk.spans[ip - 1])?
-                    }
+                    Op::Float(idx) => self
+                        .stack_push(RVal::Float(chunk.floats[idx as usize]), chunk.spans[ip - 1])?,
                     Op::Bool(b) => self.stack_push(RVal::Bool(b), chunk.spans[ip - 1])?,
                     Op::Char(c) => self.stack_push(RVal::Char(c), chunk.spans[ip - 1])?,
                     Op::Str(idx) => {
@@ -72,8 +71,10 @@ impl Runner<'_, '_> {
                     }
                     Op::SetLocal(slot) => {
                         let v = self.stack.pop().expect("stack underflow on SetLocal");
-                        let old =
-                            std::mem::replace(&mut self.stack.as_mut_slice()[base + slot as usize], v);
+                        let old = std::mem::replace(
+                            &mut self.stack.as_mut_slice()[base + slot as usize],
+                            v,
+                        );
                         self.pool.release_val(old);
                     }
                     Op::GetCapture(idx) => {
@@ -173,8 +174,7 @@ impl Runner<'_, '_> {
                                 .iter()
                                 .position(|(k, _)| *k == fname.as_ref())
                             {
-                                let prev =
-                                    std::mem::replace(&mut pairs.as_mut_slice()[pos].1, val);
+                                let prev = std::mem::replace(&mut pairs.as_mut_slice()[pos].1, val);
                                 self.pool.release_val(prev);
                             } else {
                                 let _ = pairs.push_work(
@@ -227,9 +227,9 @@ impl Runner<'_, '_> {
                                 return Err(e);
                             }
                         };
-                        let id = self
-                            .pool
-                            .alloc_struct_owned(desc_ref, field_vals.as_slice(), span);
+                        let id =
+                            self.pool
+                                .alloc_struct_owned(desc_ref, field_vals.as_slice(), span);
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.stack_push(RVal::Obj(id?), span)?;
                     }
@@ -263,7 +263,11 @@ impl Runner<'_, '_> {
                         let Obj::Struct { desc, .. } = *self.pool.get(id) else {
                             unreachable!();
                         };
-                        if self.pool.struct_desc_find_field(desc, fname.as_ref()).is_none() {
+                        if self
+                            .pool
+                            .struct_desc_find_field(desc, fname.as_ref())
+                            .is_none()
+                        {
                             return Err(self.pool.err_struct_missing_field(
                                 "expr.with",
                                 span,
@@ -318,9 +322,7 @@ impl Runner<'_, '_> {
                         self.stack.truncate(val_start - 1);
                         self.pool.struct_desc_retain(desc);
                         self.pool.release_val(base_val);
-                        let new_id = self
-                            .pool
-                            .alloc_struct_owned(desc, updated.as_slice(), span);
+                        let new_id = self.pool.alloc_struct_owned(desc, updated.as_slice(), span);
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.stack_push(RVal::Obj(new_id?), span)?;
                     }
@@ -540,9 +542,7 @@ impl Runner<'_, '_> {
                                 ) =>
                             {
                                 let (proto, cap) = match self.pool.get(id) {
-                                    Obj::Closure { proto, captures } => {
-                                        (*proto, *captures)
-                                    }
+                                    Obj::Closure { proto, captures } => (*proto, *captures),
                                     _ => return Err(self.call_type_error(callee, span)),
                                 };
                                 if proto.arity as usize != argc {
@@ -583,8 +583,7 @@ impl Runner<'_, '_> {
                                         span,
                                     });
                                 }
-                                let res =
-                                    self.call_builtin_from_stack(b, arg_start, argc, span)?;
+                                let res = self.call_builtin_from_stack(b, arg_start, argc, span)?;
                                 self.stack_push(res, span)?;
                             }
                             _ => return Err(self.call_type_error(callee, span)),
@@ -685,11 +684,7 @@ impl Runner<'_, '_> {
                     }
                     Op::MatchFail => {
                         let span = chunk.spans[ip - 1];
-                        return Err(self.err_runtime(
-                            "expr.match",
-                            span,
-                            "non-exhaustive match",
-                        ));
+                        return Err(self.err_runtime("expr.match", span, "non-exhaustive match"));
                     }
                     Op::Import(id) => {
                         let span = chunk.spans[ip - 1];

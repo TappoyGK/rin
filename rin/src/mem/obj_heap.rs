@@ -89,7 +89,12 @@ impl ObjHeap {
     /// `size` バイト・アラインメント `align` のブロックを確保する。
     ///
     /// 成功時は実際に確保されたブロックサイズを `core` の `obj_bytes` へ加算する。
-    pub fn alloc(&mut self, core: &mut AllocCore<'_>, size: usize, align: usize) -> Option<ObjBlock> {
+    pub fn alloc(
+        &mut self,
+        core: &mut AllocCore<'_>,
+        size: usize,
+        align: usize,
+    ) -> Option<ObjBlock> {
         if size == 0 {
             return Some(ObjBlock {
                 ptr: NonNull::dangling(),
@@ -207,7 +212,12 @@ impl ObjHeap {
         true
     }
 
-    fn alloc_large(&mut self, core: &mut AllocCore<'_>, size: usize, align: usize) -> Option<ObjBlock> {
+    fn alloc_large(
+        &mut self,
+        core: &mut AllocCore<'_>,
+        size: usize,
+        align: usize,
+    ) -> Option<ObjBlock> {
         let hdr_size = large_header_size();
         let req_align = SLAB_ALIGN.max(align);
         let data_size = align_up(size, req_align)?;

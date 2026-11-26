@@ -703,7 +703,10 @@ impl Lexer<'_> {
                             "invalid UTF-8 in string literal",
                         ));
                     };
-                    if buf.extend_from_slice_work(work, core, s.as_bytes()).is_none() {
+                    if buf
+                        .extend_from_slice_work(work, core, s.as_bytes())
+                        .is_none()
+                    {
                         return Err(core.err_oom(span));
                     }
                 }

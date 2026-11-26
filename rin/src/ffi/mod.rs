@@ -170,7 +170,8 @@ impl ValueHandles {
             return Some(addr_of_mut!(slot.val));
         }
         // SAFETY: `chunks_head` は NULL または `alloc` から確保した有効な `HandleChunk`。
-        let need_new = self.chunks_head.is_null() || unsafe { (*self.chunks_head).used } == CHUNK_HANDLES;
+        let need_new =
+            self.chunks_head.is_null() || unsafe { (*self.chunks_head).used } == CHUNK_HANDLES;
         if need_new {
             let layout = Layout::new::<HandleChunk>();
             let raw = alloc.alloc(layout)?;
@@ -691,9 +692,7 @@ unsafe fn eval_frozen_inner(
             "env.phase",
             RinErrorKind::Runtime,
             Span::default(),
-            format_args!(
-                "{fn_name} requires a frozen Rin; call rin_freeze first or use rin_build"
-            ),
+            format_args!("{fn_name} requires a frozen Rin; call rin_freeze first or use rin_build"),
         );
         return RinEvalResult::failure();
     }
