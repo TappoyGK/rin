@@ -7,17 +7,17 @@ Rin インタプリタ（`rin` クレート）の評価環境・コンパイラ�
 評価環境は、公開 API を `Builder` と `Machine` の 2 つの型に分け、どちらも同じ内部構造体 `EnvState` を包む構成にしている（型定義は `rin/src/eval/mod.rs`、メソッド実装は `rin/src/eval/machine.rs`）。
 
 - **`EnvState`**（内部状態）: `Pool`（3 領域メモリ管理・値プール・ゼロヒープ `ErrorStore`）、`SymTable`（シンボル番号表）、`globals`（大域スロット `EnvSlots`）、`modules`（モジュール表 `ModuleTable`）、`last_result` のほか、`limits`・`math_fma` を保持する。
-- **`Builder`**（読み込み段階）: `bind` / `bind_val`・`load_module` / `load_module_ref`・`eval` / `eval_ref` で大域環境とモジュールを構築する。`freeze(self)` で永続領域（`PermArena`）を凍結し、`EnvState` の所有権ごと `Machine` へ移行する。
+- **`Builder`**（読み込み段階）: `Builder::new` / `Builder::with_memory_config` で生成し、`bind` / `bind_val`・`load_module` / `load_module_ref`・`eval` / `eval_ref` で大域環境とモジュールを構築する。`into_machine(self)`（または `std-value` 有効時の `freeze(self)`）で永続領域（`PermArena`）を凍結し、`EnvState` の所有権ごと `Machine` へ移行する。
 - **`Machine`**（実行段階・凍結）: `eval` / `eval_ref`・`eval_with` / `eval_with_vals`・`call` / `call_ref`・`call_in` / `call_in_ref`（および `val_*`・`set_math_fma`・`math_fma`・`live_bytes`）を提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
-- **C FFI（`Rin`）**（`rin/src/ffi/mod.rs`）: `Rin` 本体・`ValueHandles` プール・インライン NUL 終端 `StoredError` をすべて `RinAllocator` 上に直接配置するゼロヒープ C ABI ラッパー。ポインタ型 `Rin*` を維持したまま `rin_freeze()` で不可逆に凍結する。
+- **C FFI（`Rin`）**（`rin/src/ffi/mod.rs`）: `Rin` 本体・`ValueHandles` プール・インライン NUL 終端 `StoredError` をすべて `RinAllocator` 上に直接配置するゼロヒープ C ABI ラッパー。ポインタ型 `Rin*` を維持したまま `rin_freeze()` で不可逆に凍結する。`rin_new_with_config` で 3 領域のブロック設定（`RinMemoryConfig`）を指定できる。
 
 ## 1.5 3 領域メモリ管理（`rin/src/mem/`）
 
-`Builder` / `Machine` の内部確保はすべて呼び出し元から渡された単一の `Allocator`（`ArenaAllocator` を含む）上で行い、システムヒープを使用しない。確保の寿命に応じて 3 つの領域に分離している。
+`Builder` / `Machine` の内部確保はすべて呼び出し元から渡された単一の `Allocator`（`ArenaAllocator` を含む）上で行い、システムヒープを使用しない。確保の寿命に応じて 3 つの領域に分離しており、各領域のブロック拡張設定は `MemoryConfig`（`RegionConfig`）で調整できる。
 
-1. **永続領域（`PermArena`）**: `Chunk`・`FnProto`・`NameTable`・`SymTable`・`EnvSlots`・`ModuleTable`・インターン済み `StructDesc` 等を配置する。読み込み段階のみ追記でき、`Builder::freeze()` 以降は読み取り専用になる。
+1. **永続領域（`PermArena`）**: `Chunk`・`FnProto`・`NameTable`・`SymTable`・`EnvSlots`・`ModuleTable`・インターン済み `StructDesc` 等を配置する。読み込み段階のみ追記でき、`Builder::into_machine()` / `freeze()` 以降は読み取り専用になる。
 2. **オブジェクト領域（`ObjHeap` + `Pool`）**: 評価中に生成される `Obj` スロット（侵入型 `Slot::Dying` キューで追加確保なしに反復解放）と可変長ペイロード（文字列・配列・タプル・構造体値・クロージャ捕捉等）を管理する。サイズ別フリーリストにより `dealloc` が何もしない `ArenaAllocator` 上でも解放済みブロックを即座に再利用し、反復評価時の使用量を一定に保つ。
-3. **作業領域（`WorkArena`）**: ストリーミング字句解析・AST・コンパイラ一時構造・VM 値スタック（16 要素超の溢れ）・呼び出しフレームスタック（非再帰 VM と高階組み込み状態機械）・ソート一時バッファ等を配置する。評価終了時（成功・エラー問わず）に `WorkMark` へ一括巻き戻し、チャンクをそのまま再利用する。
+3. **作業領域（`WorkArena`）**: ストリーミング字句解析・AST・コンパイラ一時構造・VM 値スタック（`RawVec<RVal>`）・呼び出しフレームスタック（非再帰 VM `drive_frames` と高階組み込み状態機械）・ソート一時バッファ等を配置する。評価終了時（成功・エラー問わず）に `WorkMark` へ一括巻き戻し、チャンクをそのまま再利用する。
 
 エラー情報と最大 64 段の呼び出し履歴は `AllocCore` にインライン埋め込みされた `ErrorStore` へ直接書き込むため、OOM や Arena 枯渇時を含めエラー生成・`Display` でシステムヒープを一切確保しない。
 
@@ -58,16 +58,16 @@ flowchart TD
 VM の `Op::GetGlobal(id)` は `Runner::lookup_global`（`rin/src/eval/runner.rs`）で次の順に名前を解決する。
 
 1. **ローカルな最優先スコープ**:
-   - モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `module_envs[mod_id]` を参照する（ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない：`[env.modules]`・`[env.isolation]`）。
+   - モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `modules.env(mod_id)`（`ModuleTable` 内）を参照する（ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない：`[env.modules]`・`[env.isolation]`）。
    - モジュール外（`active_module = None`）なら、`eval_with` の一時束縛（`EvalBindings`）があれば参照する。
-2. **大域環境**: `globals[id]`（組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
-3. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール一覧 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
+2. **大域環境**: `globals`（`EnvSlots`：組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
+3. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール表 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
 4. **未定義エラー**: どれにも無ければ `unknown_name`（`[expr.name]`）を返し、その時点で可視な名前だけを候補として提示する。
 
 ```mermaid
 flowchart TD
     A["GetGlobal"] --> B{"モジュール内?"}
-    B -->|"Yes"| C["1. module_envs"]
+    B -->|"Yes"| C["1. modules.env(mod_id)"]
     B -->|"No"| D["1. EvalBindings"]
     C --> E["2. globals"]
     D --> E
@@ -79,4 +79,4 @@ flowchart TD
 
 ### 補足: `lookup_global` のインライン展開について
 
-`lookup_global` は `exec_frame` のホットパスから呼ばれるため、`#[inline(never)]` で切り離すと大域参照ごとの呼び出し費用が `fib`・`tail`・`recur` に直接表れる。そのためインライン展開可能な形を維持し、`unknown_name` のエラー構築だけを `#[cold]` で分離している。
+`lookup_global` は `exec_rin_frame` のホットパスから呼ばれるため、`#[inline(never)]` で切り離すと大域参照ごとの呼び出し費用が `fib`・`tail`・`recur` に直接表れる。そのため `#[inline(always)]` を維持し、`unknown_name` のエラー構築だけを `#[cold]` で分離している。

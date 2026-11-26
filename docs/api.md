@@ -8,7 +8,9 @@ Rin をホストプログラム（Rust および C / FFI）から利用するた
 
 クレート名：`rin`
 
-### 1.1 簡易評価関数
+### 1.1 簡易評価関数（`std-value` フィーチャ）
+
+> 既定で有効な Cargo フィーチャ `std-value` を前提とする便利 API である（システムヒープ上に所有型 `Value` / `Error` を構築する）。`--no-default-features` でゼロヒープ構成にする場合は 1.2.1 の `Val` / `ValueRef` / `ErrorRef` API を使用する。
 
 ```rust
 pub fn eval(source: &str) -> Result<Value, Error>
@@ -28,35 +30,45 @@ pub fn eval_with_allocator(
 
 ### 1.2 読み込み環境 `Builder<'a>` と凍結環境 `Machine<'a>`
 
-大域環境とモジュールの構築（読み込みの段階）は `Builder<'a>` で行い、`freeze` によって実行専用の `Machine<'a>`（実行の段階）へ移行する。
+大域環境とモジュールの構築（読み込みの段階）は `Builder<'a>` で行い、`into_machine`（または `std-value` 有効時の `freeze`）によって実行専用の `Machine<'a>`（実行の段階）へ移行する。
 
 ```rust
 impl<'a> Builder<'a> {
+    // 常に利用可能（ゼロヒープ）
     pub fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self
-    pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error>
-    pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error>
-    pub fn eval(&mut self, source: &str) -> Result<Value, Error>
+    pub fn with_memory_config(limits: Limits, memory: MemoryConfig, alloc: &'a mut dyn Allocator) -> Self
     pub fn set_math_fma(&mut self, mode: MathFma)
     pub fn math_fma(&self) -> MathFma
     pub fn live_bytes(&self) -> usize
+    pub fn into_machine(self) -> Machine<'a>
+
+    // std-value フィーチャ有効時（所有型 Value / Error を使用）
+    pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error>
+    pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error>
+    pub fn eval(&mut self, source: &str) -> Result<Value, Error>
     pub fn freeze(self) -> Result<Machine<'a>, Error>
 }
 
 impl<'a> Machine<'a> {
+    // 常に利用可能（ゼロヒープ）
+    pub fn set_math_fma(&mut self, mode: MathFma)
+    pub fn math_fma(&self) -> MathFma
+    pub fn live_bytes(&self) -> usize
+
+    // std-value フィーチャ有効時（所有型 Value / Error を使用）
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
     pub fn eval_with(&mut self, source: &str, bindings: &[(&str, Value)]) -> Result<Value, Error>
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error>
     pub fn call_in(&mut self, mod_name: &str, fn_name: &str, args: &[Value]) -> Result<Value, Error>
-    pub fn set_math_fma(&mut self, mode: MathFma)
-    pub fn math_fma(&self) -> MathFma
-    pub fn live_bytes(&self) -> usize
 }
 ```
 
+- `Builder::new` / `Builder::with_memory_config`：読み込み段階の環境を生成する。`with_memory_config` で 3 領域（永続・オブジェクト・作業）のチャンクサイズ設定 `MemoryConfig` を指定できる。
 - `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。
 - `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。
-- `Builder::freeze`：大域環境と読み込み済みモジュールを凍結し、実行段階の `Machine` を返す。将来の永続領域確定エラーに備えて `Result` を返す（現行実装では常に `Ok` を返す）。
+- **永続領域の追記特性**：読み込み段階で関数やモジュールを再定義した場合、新しいバイトコード・シンボルは永続領域（`PermArena`）へ追記され、古い永続領域エントリは `Builder` / `Machine` が破棄されるまで回収されない（古い値スロットは解放される）。同じ `Builder` 上で何度も再定義を繰り返さず、ホットリロード時は新しい `Builder` を作り直すこと。
+- `Builder::into_machine` / `Builder::freeze`：大域環境と読み込み済みモジュール、および永続領域（`PermArena`）を凍結し、実行段階の `Machine` を返す。`into_machine` は失敗しないゼロヒープ API、`freeze` は `std-value` フィーチャ有効時の `Result` ラッパー（現行実装では常に `Ok` を返す）。
 - 凍結後の `Machine` から読み込みの段階には戻れない。Mod を読み直す場合は、新しい `Builder` を作って読み込み・凍結し、ホスト側で `Machine` を差し替える（ホットリロードは組み込む側が担う）。
 - `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効で、評価するソースとそこから呼ばれるモジュール外の関数から参照でき（モジュール内の関数からは参照されない）、評価終了時に解放する。`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。名前解決の優先順位は、局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛 → 読み込み済みモジュール名とする。
 - Rust API では `call` / `call_in` は凍結後の `Machine` のみ提供する（C FFI では同一ハンドル上で `rin_call` / `rin_call_in` を凍結前・凍結後のどちらでも呼び出せる）。
@@ -65,7 +77,7 @@ impl<'a> Machine<'a> {
 
 ### 1.2.1 ゼロヒープ・ホスト境界 API（`Val` / `ValueRef` / `ErrorRef`）
 
-`Builder` / `Machine` は、Rust のシステムヒープを一切使わず呼び出し元が渡した `Allocator` の上だけで完結する API を提供する（Cargo フィーチャ `std-value` を無効化した `--no-default-features` でも利用可能）。
+`Builder` / `Machine` は、Rust のシステムヒープを一切使わず呼び出し元が渡した `Allocator` の上だけで完結する API を提供する（Cargo フィーチャ `std-value` を無効化した `--no-default-features` でもすべて利用可能）。
 
 ```rust
 // 値ハンドルの構築・解放（Builder / Machine 共通）
@@ -99,9 +111,17 @@ pub fn call_ref(&mut self, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, 
 pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
 ```
 
-- `Val`：マシン所有のプール値への不透明ハンドル。使い終わったら同じマシンの `release_val` へ返却する。
-- `ValueRef<'_>`：プール上の値を複製せずに直接読み取る借用ビュー（`tag`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`・`as_array`・`as_tuple`・`as_struct`・`as_variant`・`as_some`・`as_ok`・`as_err`）。`Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
-- `ErrorRef<'_>`：マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。`Display` を含めシステムヒープを一切使わない。`to_error(&self) -> Error` で所有型 `Error` へ変換できる。
+- **`Val` の所有権規約**：
+  - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_str` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
+  - コンテナ構築（`val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）および `bind_val` / `call_ref` / `call_in_ref` / `eval_with_vals` は渡された `Val` を内部で retain して共有参照する。**所有権は移動しない**ため、呼び出し元は自分が生成した `Val` を使い終わったタイミングで必ず同じマシンの `release_val` へ返却する。
+  - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり動作未定義（パニックまたは不正参照）となる。
+- **`ValueRef<'_>` と補助借用ビュー**：
+  - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
+  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `field_at` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
+  - 主なメソッド：`tag`・`is_void`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
+  - `Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
+- **`ErrorRef<'_>`**：
+  - マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。次の可変操作まで有効。`Display` を含めシステムヒープを一切使わない。`std-value` フィーチャ有効時は `to_error(&self) -> Error` で所有型 `Error` へ変換できる。
 
 ### 数学関数の直接呼び出しと `MathFma`
 
@@ -121,26 +141,38 @@ pub fn rin::math::cos(x: f64, mode: MathFma) -> f64
 - `MathFma::Fused`：[数学関数の決定的な計算手順](math-spec.md) で定めた位置に限り `f64::mul_add` を使う。
 - `rin::math::sin` / `rin::math::cos` は Rin 評価器が用いる決定的な実装を直接呼び出す。
 
-### 1.3 カスタムアロケータ `Allocator`
+### 1.3 カスタムアロケータ `Allocator` と領域設定 `MemoryConfig`
 
 ```rust
 pub trait Allocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>>;
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout);
 }
+
+pub struct RegionConfig {
+    pub initial_block: usize, // 既定: 4 * 1024（内部最小値 256）
+    pub max_block: usize,     // 既定: 64 * 1024
+}
+
+pub struct MemoryConfig {
+    pub perm: RegionConfig, // 永続領域
+    pub obj: RegionConfig,  // オブジェクト領域
+    pub work: RegionConfig, // 作業領域
+}
 ```
 
 組み込み実装：
 - `HeapAllocator`：Rust 標準ヒープを使うデフォルト実装。
 - `ArenaAllocator<'a>`：`ArenaAllocator::new(buf: &'a mut [u8])` で渡したバイト列をバンプ確保する実装（`dealloc` は何もしない）。`used()` / `capacity()` で使用量を確認できる。
+- `MemoryConfig::default()` は 3 領域すべて `initial_block = 4 KiB`、`max_block = 64 KiB` とする（既定設定では初回ブロック確保に各領域あたり 4 KiB 程度を要する）。極小の `memory_bytes` や小さな `ArenaAllocator` を使う場合は、`Builder::with_memory_config`（C FFI では `rin_new_with_config`）で `initial_block` / `max_block` を小さく調整できる。
 
 ### 1.4 資源上限 `Limits` とエラー `Error`
 
 ```rust
 pub struct Limits {
     pub steps: usize,        // 既定: 100_000
-    pub depth: usize,        // 既定: 200（2 MiB のスレッドスタックで検証）
-    pub memory_bytes: usize, // 既定: 16 * 1024 * 1024
+    pub depth: usize,        // 既定: 200（WorkArena 上の非再帰フレームで管理）
+    pub memory_bytes: usize, // 既定: 16 * 1024 * 1024（3 領域合計の実確保バイト数）
 }
 
 pub enum ErrorKind {
@@ -184,24 +216,24 @@ impl Error {
 
 名前解決に失敗したときは、候補名やフィールド・公開シンボル一覧を `Error.message` に含める。表示順・件数上限・候補の選択規則は [言語仕様の `[eval.hints]`](spec.md) に従う。C FFI の `RinError.message` / `text` にも含まれる。
 
-`depth` は、ユーザー定義関数の呼び出しの入れ子の深さを制限する。組み込み関数からの呼び出しも含めるが、末尾呼び出し最適化が適用された呼び出しは深さを増やさない。既定値の 200 は Debug / Release ともに 2 MiB のスレッドスタックで検証している。上限を増やす場合や、より小さいスタックのスレッドから実行する場合は、利用する環境でスタック容量を確認する。
+`depth` は、ユーザー定義関数の呼び出しの入れ子の深さを制限する。組み込み関数からの呼び出しも含めるが、末尾呼び出し最適化が適用された呼び出しは深さを増やさない。VM と高階組み込みコールバックは `WorkArena` 上の明示フレームスタックで非再帰に実行するため、ネイティブスタック容量に依存せず、`depth` 上限と利用可能なメモリ（`memory_bytes`）の範囲内で任意の深さまで実行できる（256 KiB スレッドスタック上で深さ 100,000 の非末尾再帰を検証済み）。
 
-### 1.5 深い値の処理
+### 1.5 深い値の処理（`std-value` 側の `Value` とゼロヒープ経路）
 
-ホスト側のコンテナは `Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
+`std-value` フィーチャ有効時のホスト側所有コンテナは `Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
 
 解放処理はこれらの所有データと `ListNode` に実装している。`Value` 自身は独自の `Drop` を持たないため、パターンマッチで所有データを取り出せる。共有参照の解放では参照カウントを減らすだけで、最後の所有者になったときだけ子を処理する。
 
-ソースの構文入れ子上限とは別に、繰り返し処理やホストから渡す値は深く入れ子になり得る。次の処理は明示的な作業スタックを使い、値の深さに比例してネイティブスタックを消費しない。
+ソースの構文入れ子上限とは別に、繰り返し処理やホストから渡す値は深く入れ子になり得る。次の処理は明示的な作業スタックまたは侵入型キューを使い、値の深さに比例してネイティブスタックを消費しない。
 
-- ホストと内部プールの値変換（import / export）。`bind`・評価結果・関数の引数と戻り値を含む。
-- `Value` の `Display`・`Debug`・`PartialEq`・`approx_bytes`、`ListNode` の `Debug`・等値比較、および Rin 内の `==` / `!=`。
-- `Schema::check`（C FFI の `rin_check` / `rin_check_str` を含む）。値を消費せず同じ参照を巡回するスキーマは検証エラーとなる。
-- `Value` / `ListNode` の解放。共有された子は残し、最後の強参照を解放する際に子を分解する。Weak 参照が残る場合も扱う。
+- ホストと内部プールの値変換（`std-value` の import / export）。`bind`・評価結果・関数の引数と戻り値を含む。
+- `Value` の `Display`・`Debug`・`PartialEq`・`approx_bytes`、`ListNode` の `Debug`・等値比較、および Rin 内の `==` / `!=` と `ValueRef` の `Display`。
+- `Schema::check`（`std-value` 有効時の C FFI `rin_check` / `rin_check_str` を含む）。値を消費せず同じ参照を巡回するスキーマは検証エラーとなる。
+- `Value` / `ListNode` の解放および内部プールオブジェクトの解放（侵入型 `Slot::Dying` キューによる O(1) 追加メモリ反復解放）。共有された子は残し、最後の強参照を解放する際に子を分解する。Weak 参照が残る場合も扱う。
 
-import がメモリ上限・アロケータの確保失敗・取り込めない値で失敗した場合、生成途中の値を回収する。既存の束縛は保持し、同じ `Builder` または `Machine` を引き続き使える。C FFI の値操作は同じ値表現・解放処理を使用する。
+import がメモリ上限・アロケータの確保失敗・取り込めない値で失敗した場合、生成途中の値を回収する。既存の束縛は保持し、同じ `Builder` または `Machine` を引き続き使える。一方、ゼロヒープ経路（Rust の `Val` / `ValueRef` および C FFI の `RinValue`）は `Value` を経由せず、渡された `Allocator` 上のプール値を直接操作する。
 
-変換と解放は深さ 32、比較と書式化は深さ 16 まで直接処理し、それ以降は反復処理だけで進める。反復処理から深さをリセットして再帰へ戻ることはない。作業スタックの小さい部分は固定長領域に置き、必要な場合だけシステムヒープへ拡張する。この一時領域とホスト側の `Value` は `memory_bytes` の計数対象ではない。すべての確保を指定アロケータへ統合する変更は別途行う。評価器の関数呼び出し深度に関する制約は 1.4 の `depth` と同じである。
+`std-value` の所有型 `Value` に関する変換・解放・比較・書式化はホストのシステムヒープを使用し、`memory_bytes` の計数対象外である（変換・解放は深さ 32、比較・書式化は深さ 16 まで直接処理し、それ以降は反復処理で進める）。一方、ゼロヒープ経路（`Val` / `ValueRef` / `ErrorRef` / C FFI）の確保はすべて渡された `Allocator` 上で行い、`memory_bytes` の管理下にある。
 
 `Debug` は入れ子を省略せず、`{:#?}` は浅い部分を字下げして出力する。書式化の深さはリストの各セル（tail 方向）も 1 段と数えるため、平らな長いリストも途中で切り替わる。書式化の深さ上限に達した部分木は、スタック消費を抑えるためコンパクトな形式で出力する。
 
@@ -295,19 +327,23 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 
 - `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_STR`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`
 - `RinLimits`：`{ size_t steps; size_t depth; size_t memory_bytes; }`
+- `RinRegionConfig`：`{ size_t initial_block; size_t max_block; }`
+- `RinMemoryConfig`：`{ RinRegionConfig perm; RinRegionConfig obj; RinRegionConfig work; }`
 - `RinMathFma`：`RIN_MATH_FMA_STRICT = 0`, `RIN_MATH_FMA_FUSED = 1`
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
   - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
 - `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
 - `RinBinding`：`{ const char *name; const RinValue *value; }`
-- `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。ホスト側で解放しない）
+- `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。**`rin_drop` へ渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等への入力引数として渡せる）
 
 ### 2.2 `Rin` 操作
 
 | 関数 | 説明 |
 |---|---|
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
+| `RinMemoryConfig rin_memory_config_default(void)` | 既定の `RinMemoryConfig`（各領域 `initial_block = 4 KiB`、`max_block = 64 KiB`）を返す |
 | `Rin *rin_new(RinLimits limits, RinAllocator alloc)` | 読み込み段階の `Rin` を `alloc` 上に生成する（確保失敗時は `NULL`） |
+| `Rin *rin_new_with_config(RinLimits limits, RinMemoryConfig memory, RinAllocator alloc)` | 3 領域のブロック設定 `memory` を指定して `Rin` を `alloc` 上に生成する（確保失敗時は `NULL`） |
 | `void rin_free(Rin *rin)` | `Rin` と保持中の全ハンドル・プールを `alloc` へ解放する（`NULL` 可） |
 | `bool rin_freeze(Rin *rin)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`rin == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(Rin *rin, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
@@ -348,10 +384,10 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 対象操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数である。同じ `Rin` への次の対象操作、または `rin_free` まで、返却ポインタと文字列が有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の対象操作・解放と並行して参照してはならない。
-- 対象操作は引数検査の前に前回の情報をクリアする。有効な `Rin` への操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
+- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_str` / `rin_cons` / `rin_struct` 等）および `rin_struct_set` も失敗時（OOM・NULL 引数・不正 UTF-8 等）に `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
+- 有効な `Rin` への状態変更・評価操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
-- `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（ホスト側での解放は不要）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
+- `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（**ホスト側で `rin_drop` に渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等の入力値として渡せる）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
 
 凍結済みの有効な `r` に対する利用例：
 
@@ -366,6 +402,9 @@ if (!result.ok) {
 ### 2.3 値の生成と解放
 
 生成関数は `Rin *rin` を第 1 引数に取り、`rin` のアロケータ上で値ハンドルを確保して返す。使い終わったら同じ `rin` に対して `rin_drop(rin, val)` で返却する。
+
+- **失敗時の挙動**：`rin == NULL`、必須引数の `NULL`、不正 UTF-8 文字列、メモリ上限（`memory_bytes`）超過、またはアロケータの確保失敗時は `NULL`（`rin_struct_set` は `false`）を返し、`rin != NULL` であれば `rin_last_error(rin)` にエラー（`RIN_ERR_HOST` または `RIN_ERR_TOO_MUCH_MEMORY`）を記録する。
+- **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_call` / `rin_eval_with` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` へ渡してはならない。
 
 | 関数 | 説明 |
 |---|---|
@@ -426,31 +465,31 @@ if (!result.ok) {
 
 ### 3.2 環境・評価・呼び出しの対応
 
-| 操作 | C FFI API | Rust API | 備考 |
+| 操作 | C FFI API | Rust API（ゼロヒープ / `std-value`） | 備考 |
 |---|---|---|---|
 | ハンドル型 | `Rin *`（1 型） | `Builder<'a>` / `Machine<'a>`（2 型） | C は状態遷移、Rust は型遷移 |
-| 既定上限 | `rin_limits_default()` | `Limits::default()` | |
-| 生成 | `rin_new(limits, alloc)` | `Builder::new(limits, &mut alloc)` | 読み込み段階で開始 |
+| 既定上限・領域設定 | `rin_limits_default()` / `rin_memory_config_default()` | `Limits::default()` / `MemoryConfig::default()` | |
+| 生成 | `rin_new` / `rin_new_with_config` | `Builder::new` / `Builder::with_memory_config` | 読み込み段階で開始 |
 | 破棄 | `rin_free(rin)` | `Drop` | |
-| 凍結 | `rin_freeze(rin)` | `builder.freeze()` | 読み込み → 実行段階へ不可逆遷移 |
+| 凍結 | `rin_freeze(rin)` | `builder.into_machine()` / `builder.freeze()` | 読み込み → 実行段階へ不可逆遷移 |
 | FMA 設定 | `rin_set_math_fma(rin, mode)` | `builder.set_math_fma` / `machine.set_math_fma` | 両段階で利用可 |
 | FMA 取得 | `rin_math_fma(rin)` | `builder.math_fma` / `machine.math_fma` | 両段階で利用可 |
-| 大域束縛 | `rin_bind(rin, name, val)` | `builder.bind(name, &val)` | C は凍結後 `[env.frozen]` |
-| モジュール読込 | `rin_load(rin, mod_name, src)` | `builder.load_module(name, src)` | C は凍結後 `[env.frozen]` |
-| 読み込み段階の評価 | `rin_build(rin, src)` | `builder.eval(src)` | C は凍結後 `[env.frozen]` |
-| 実行段階の評価 | `rin_eval(rin, src)` | `machine.eval(src)` | C は凍結前 `[env.phase]` |
-| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` | `machine.eval_with(src, bindings)` | C は凍結前 `[env.phase]` |
-| 関数直接呼出 | `rin_call(rin, fn_name, args, argc)` | `machine.call(fn_name, args)` | C は凍結前も呼べる |
-| モジュール関数呼出 | `rin_call_in(rin, mod, fn_name, args, argc)` | `machine.call_in(mod, fn_name, args)` | C は凍結前も呼べる |
-| エラー取得 | `rin_last_error(rin)` | 各メソッドの `Result<_, Error>` | C は直前エラーを `Rin` 内に保持 |
-| 評価結果の解放 | 不要（借用ポインタ） | `ValueRef` は借用、`Value` は `Drop` | |
+| 大域束縛 | `rin_bind(rin, name, val)` | `builder.bind_val` / `builder.bind` | C は凍結後 `[env.frozen]` |
+| モジュール読込 | `rin_load(rin, mod_name, src)` | `builder.load_module_ref` / `builder.load_module` | C は凍結後 `[env.frozen]` |
+| 読み込み段階の評価 | `rin_build(rin, src)` | `builder.eval_ref` / `builder.eval` | C は凍結後 `[env.frozen]` |
+| 実行段階の評価 | `rin_eval(rin, src)` | `machine.eval_ref` / `machine.eval` | C は凍結前 `[env.phase]` |
+| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` | `machine.eval_with_vals` / `machine.eval_with` | C は凍結前 `[env.phase]` |
+| 関数直接呼出 | `rin_call(rin, fn_name, args, argc)` | `machine.call_ref` / `machine.call` | C は凍結前も呼べる |
+| モジュール関数呼出 | `rin_call_in(rin, mod, fn_name, args, argc)` | `machine.call_in_ref` / `machine.call_in` | C は凍結前も呼べる |
+| エラー取得 | `rin_last_error(rin)` | `Result<_, ErrorRef<'_>>` / `Result<_, Error>` | C は直前エラーを `Rin` 内に保持 |
+| 評価結果の解放 | 不要（借用ポインタ、`rin_drop` 禁止） | `ValueRef` は借用、`Value` は `Drop` | |
 | 生存バイト数 | （未提供） | `builder.live_bytes` / `machine.live_bytes` | Rust のみ |
 
 ### 3.3 値・スキーマ・その他
 
 | 分類 | C FFI API | Rust API |
 |---|---|---|
-| 値の生成・破棄 | `rin_int` / `rin_float` / `rin_bool` / `rin_str` / `rin_i64s` / `rin_f64s` / `rin_nil` / `rin_cons` / `rin_none` / `rin_some` / `rin_struct` + `rin_struct_set` / `rin_variant` / `rin_drop` | `Value` コンストラクタ・`Drop` |
-| 値の読み取り | `rin_tag` / `rin_as_*` / `rin_len` / `rin_car` / `rin_cdr` / `rin_field` / `rin_variant_name` / `rin_unwrap` / `rin_tuple_get` / `rin_copy_*` | `Value` パターンマッチ・各メソッド |
-| スキーマ検証 | `rin_schema` / `rin_schema_free` / `rin_check` / `rin_check_str` | `Schema::parse` / `Schema::check` |
-| Rust のみ | （なし） | `rin::eval` / `rin::eval_with` / `rin::eval_with_allocator` / `rin::fmt::format` / `rin::test` / `Error::render` |
+| 値の生成・破棄 | `rin_int` / `rin_float` / `rin_bool` / `rin_str` / `rin_i64s` / `rin_f64s` / `rin_nil` / `rin_cons` / `rin_none` / `rin_some` / `rin_struct` + `rin_struct_set` / `rin_variant` / `rin_drop` | ゼロヒープ: `val_*` / `release_val`、`std-value`: `Value` コンストラクタ・`Drop` |
+| 値の読み取り | `rin_tag` / `rin_as_*` / `rin_len` / `rin_car` / `rin_cdr` / `rin_field` / `rin_variant_name` / `rin_unwrap` / `rin_tuple_get` / `rin_copy_*` | ゼロヒープ: `value_ref`（`ValueRef` / `ListIter` / `SliceView` / `StructRef` / `VariantRef`）、`std-value`: `Value` パターンマッチ・各メソッド |
+| スキーマ検証（`std-value`） | `rin_schema` / `rin_schema_free` / `rin_check` / `rin_check_str` | `Schema::parse` / `Schema::check` |
+| Rust のみ（`std-value`） | （なし） | `rin::eval` / `rin::eval_with` / `rin::eval_with_allocator` / `rin::fmt::format` / `rin::test` / `Error::render` |

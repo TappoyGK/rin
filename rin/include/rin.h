@@ -117,17 +117,23 @@ RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source);
 RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc);
 RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
 /* 直近の対象操作のエラー。エラーなし、または rin == NULL なら NULL。
- * ポインタと文字列は同じ rin の次の rin_build / rin_eval / rin_eval_with /
- * rin_load / rin_call / rin_call_in / rin_bind / rin_freeze / rin_set_math_fma、
- * または rin_free まで有効。
- * 対象操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
+ * ポインタと文字列は同じ rin の次の評価・呼び出し・状態変更操作（rin_build / rin_eval /
+ * rin_eval_with / rin_load / rin_call / rin_call_in / rin_bind / rin_freeze /
+ * rin_set_math_fma）、値構築失敗（rin_int 等 / rin_struct_set）、または rin_free まで有効。
+ * 状態変更・評価操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
+ * 値構築関数（rin_int 等）および rin_struct_set は失敗時（OOM・NULL 引数・不正 UTF-8 等）に
+ * NULL / false を返してエラーを記録する。
  * rin_last_error は無効化しない。
  * NULL rin には記録できない。それ以外の引数エラーは RIN_ERR_HOST、位置は 0。
- * 同じ rin の対象操作・解放と並行して参照してはならない。
+ * 同じ rin の操作・解放と並行して参照してはならない。
  */
 const RinError *rin_last_error(const Rin *rin);
 
-/* 値ハンドル構築・解放（すべて Rin のアロケータ上で確保される。使い終わったら rin_drop で返却）。 */
+/* 値ハンドル構築・解放（すべて Rin のアロケータ上で確保される。使い終わったら rin_drop で返却）。
+ * 確保失敗・NULL 引数・不正 UTF-8 等のエラー時は NULL（rin_struct_set は false）を返し、
+ * rin_last_error を更新する。
+ * 注意: RinEvalResult.value で返された借用ポインタを rin_drop に渡してはならない。
+ */
 RinValue *rin_int(Rin *rin, int64_t n);
 RinValue *rin_float(Rin *rin, double x);
 RinValue *rin_bool(Rin *rin, bool b);

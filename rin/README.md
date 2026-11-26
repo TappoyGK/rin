@@ -35,6 +35,8 @@ cargo run -p rin-cli -- fmt path/to/source.rin
 
 | 対象 | 主なファイル |
 |---|---|
+| 3 領域メモリ管理 | `src/mem/` に `AllocCore`・`PermArena`・`ObjHeap`・`WorkArena`・自前コンテナ（`RawVec`・`RawStr`・`RawMap`・`WorkBox`）と `MemoryConfig` を置く |
+| ゼロヒープ値・エラー境界 | `src/value_ref.rs` に `Val`・`ValueRef`・各種借用ビュー、`src/error/store.rs` にインライン `ErrorStore` と `ErrorRef`、`src/eval/host_vals.rs` に `val_*` / `eval_ref` 等を置く |
 | クレート内テスト | `src/tests.rs` で登録し、`src/tests/` 以下で評価・コレクション・FFI・モジュール・スキーマ・資源制限・診断を検証する |
 | スキーマ | `src/schema.rs` に公開型を置き、`schema/` 以下で型表現・解析・照合・複製・表示・解放を扱う |
 | フォーマッタ | `src/fmt/mod.rs` が整形とAST保存検査を組み立てる。`fmt/syntax.rs` が書式を選び、`fmt/cst/` が構文木の構築・幅計算・出力を担う |
