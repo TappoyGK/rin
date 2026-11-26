@@ -4,9 +4,8 @@ mod syntax;
 
 use cst::{Cst, Output};
 
-use crate::ast::Expr;
 use crate::lexer::tokenize_lossless;
-use crate::parser::{parse_owned, parse_tests};
+use crate::parser::{OwnedAst, parse_owned, parse_tests};
 use crate::{Error, Span};
 use syntax::{Syntax, equivalent};
 
@@ -18,7 +17,7 @@ const WIDTH: usize = 100;
 pub fn format(source: &str) -> Result<String, Error> {
     let before = parse(source)?;
     let tokens = tokenize_lossless(source)?;
-    let syntax = Syntax::new(&tokens, &before);
+    let syntax = Syntax::new(&tokens, before.exprs());
     let cst = Cst::build(source, &syntax);
     drop(syntax);
     let mut out = Output::default();
@@ -33,7 +32,7 @@ pub fn format(source: &str) -> Result<String, Error> {
             "formatting changed the source syntax",
         )
     })?;
-    if !equivalent(&before, &after) {
+    if !equivalent(before.exprs(), after.exprs()) {
         return Err(Error::parse(
             "fmt.preserve",
             Span::default(),
@@ -43,7 +42,7 @@ pub fn format(source: &str) -> Result<String, Error> {
     Ok(output)
 }
 
-fn parse(source: &str) -> Result<Vec<Expr>, Error> {
+fn parse(source: &str) -> Result<OwnedAst, Error> {
     match parse_owned(source, false) {
         Ok(exprs) => Ok(exprs),
         Err(error) if matches!(error.rule(), "test.deftest" | "test.check") => {

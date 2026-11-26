@@ -35,15 +35,24 @@ fn schema_validation_strict_open_recursive_and_ffi() {
     assert!(rec.check(&tree).is_ok());
 
     unsafe {
-        let v = ffi::rin_i64s([1, 2, 3].as_ptr(), 3);
+        let m = ffi::rin_new(
+            ffi::rin_limits_default(),
+            ffi::RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: None,
+                dealloc: None,
+            },
+        );
+        let v = ffi::rin_i64s(m, [1, 2, 3].as_ptr(), 3);
         let sc_src = CString::new("(array i64)").unwrap();
         let bad_src = CString::new("(list i64)").unwrap();
         let sc = ffi::rin_schema(sc_src.as_ptr());
         assert!(!sc.is_null());
-        assert!(ffi::rin_check(v, sc));
-        assert!(ffi::rin_check_str(v, sc_src.as_ptr()));
-        assert!(!ffi::rin_check_str(v, bad_src.as_ptr()));
+        assert!(ffi::rin_check(m, v, sc));
+        assert!(ffi::rin_check_str(m, v, sc_src.as_ptr()));
+        assert!(!ffi::rin_check_str(m, v, bad_src.as_ptr()));
         ffi::rin_schema_free(sc);
-        ffi::rin_drop(v);
+        ffi::rin_drop(m, v);
+        ffi::rin_free(m);
     }
 }

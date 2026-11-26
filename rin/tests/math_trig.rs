@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use rin::ffi::{
     RinAllocator, RinErrorKind, RinMathFma, rin_as_float, rin_bind, rin_drop, rin_eval, rin_float,
-    rin_free, rin_freeze, rin_last_error, rin_limits_default, rin_math_fma, rin_new, rin_res_free,
+    rin_free, rin_freeze, rin_last_error, rin_limits_default, rin_math_fma, rin_new,
     rin_set_math_fma,
 };
 use rin::math::{self, MathFma};
@@ -155,27 +155,25 @@ fn c_ffi_math_fma_api() {
         assert_eq!(rin_math_fma(m), RinMathFma::Fused);
 
         // Strict と Fused で結果が 1 bit 分かれる入力を bind して、設定が評価に効くことを確かめる。
-        let input = rin_float(f64::from_bits(0x3fcb_a7ce_3783_fd35));
+        let input = rin_float(m, f64::from_bits(0x3fcb_a7ce_3783_fd35));
         assert!(rin_bind(m, c"x".as_ptr(), input));
-        rin_drop(input);
+        rin_drop(m, input);
         assert!(rin_freeze(m));
 
-        let mut res_fused = rin_eval(m, c"(sin x)".as_ptr());
+        let res_fused = rin_eval(m, c"(sin x)".as_ptr());
         assert!(res_fused.ok);
         assert!(rin_last_error(m).is_null());
         let mut out_fused = 0.0;
-        assert!(rin_as_float(res_fused.value, &mut out_fused));
+        assert!(rin_as_float(m, res_fused.value, &mut out_fused));
         assert_eq!(out_fused.to_bits(), 0x3fcb_70d9_ff96_56af);
-        rin_res_free(&mut res_fused);
 
         assert!(rin_set_math_fma(m, RinMathFma::Strict as i32));
         assert_eq!(rin_math_fma(m), RinMathFma::Strict);
-        let mut res_strict = rin_eval(m, c"(sin x)".as_ptr());
+        let res_strict = rin_eval(m, c"(sin x)".as_ptr());
         assert!(res_strict.ok);
         let mut out_strict = 0.0;
-        assert!(rin_as_float(res_strict.value, &mut out_strict));
+        assert!(rin_as_float(m, res_strict.value, &mut out_strict));
         assert_eq!(out_strict.to_bits(), 0x3fcb_70d9_ff96_56ae);
-        rin_res_free(&mut res_strict);
 
         rin_free(m);
     }

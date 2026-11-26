@@ -95,27 +95,28 @@ pub(crate) struct AllocBuf<T> {
 }
 
 impl<T> AllocBuf<T> {
-    pub fn empty() -> Self {
+    pub fn from_raw(ptr: NonNull<T>, cap: usize) -> Self {
         Self {
-            ptr: NonNull::dangling(),
-            cap: 0,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn with_capacity(alloc: &mut dyn Allocator, cap: usize) -> Option<Self> {
-        if cap == 0 || std::mem::size_of::<T>() == 0 {
-            return Some(Self::empty());
-        }
-        let layout = Layout::array::<T>(cap).ok()?;
-        let raw = alloc.alloc(layout)?;
-        Some(Self {
-            ptr: raw.cast::<T>(),
+            ptr,
             cap,
             _marker: PhantomData,
-        })
+        }
     }
 
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    pub fn into_raw_ptr(self) -> NonNull<T> {
+        self.ptr
+    }
+
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr.as_ptr()
+    }
+
+    #[inline(always)]
     pub fn as_slice(&self, len: usize) -> &[T] {
         debug_assert!(len <= self.cap);
         if len == 0 {
@@ -123,15 +124,6 @@ impl<T> AllocBuf<T> {
         }
         // SAFETY: `len <= self.cap` かつ `0..len` が初期化済み。
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), len) }
-    }
-
-    pub fn as_mut_slice(&mut self, len: usize) -> &mut [T] {
-        debug_assert!(len <= self.cap);
-        if len == 0 {
-            return &mut [];
-        }
-        // SAFETY: `len <= self.cap` かつ `0..len` が初期化済み。
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), len) }
     }
 
     /// 未初期化の位置 `idx` に `value` を書き込む。
@@ -142,23 +134,5 @@ impl<T> AllocBuf<T> {
         debug_assert!(idx < self.cap);
         // SAFETY: 呼び出し側が `idx < self.cap` と未初期化を保証する。
         unsafe { self.ptr.as_ptr().add(idx).write(value) };
-    }
-
-    /// 初期化済みの `0..len` 要素を破棄した後、`alloc` 経由で領域を解放する。
-    pub fn destroy(&mut self, alloc: &mut dyn Allocator, len: usize) {
-        debug_assert!(len <= self.cap);
-        if self.cap == 0 || std::mem::size_of::<T>() == 0 {
-            return;
-        }
-        for i in 0..len {
-            // SAFETY: `0..len` は初期化済み。
-            unsafe { std::ptr::drop_in_place(self.ptr.as_ptr().add(i)) };
-        }
-        if let Ok(layout) = Layout::array::<T>(self.cap) {
-            // SAFETY: `self.ptr` は `alloc` から `layout` で確保した領域。
-            unsafe { alloc.dealloc(self.ptr.cast::<u8>(), layout) };
-        }
-        self.ptr = NonNull::dangling();
-        self.cap = 0;
     }
 }

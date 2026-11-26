@@ -52,19 +52,17 @@ fn modules_import_export_isolation_and_ffi_call_in() {
     let src_base = CString::new("(defn double (x) (* x 2))").unwrap();
     let fn_double = CString::new("double").unwrap();
     unsafe {
-        let mut lr = ffi::rin_load(m, mod_base.as_ptr(), src_base.as_ptr());
+        let lr = ffi::rin_load(m, mod_base.as_ptr(), src_base.as_ptr());
         assert!(lr.ok);
-        ffi::rin_res_free(&mut lr);
 
-        let arg = ffi::rin_int(21);
+        let arg = ffi::rin_int(m, 21);
         let args = [arg as *const ffi::RinValue];
-        let mut cr = ffi::rin_call_in(m, mod_base.as_ptr(), fn_double.as_ptr(), args.as_ptr(), 1);
-        ffi::rin_drop(arg);
+        let cr = ffi::rin_call_in(m, mod_base.as_ptr(), fn_double.as_ptr(), args.as_ptr(), 1);
+        ffi::rin_drop(m, arg);
         assert!(cr.ok);
         let mut out = 0;
-        assert!(ffi::rin_as_int(cr.value, &mut out));
+        assert!(ffi::rin_as_int(m, cr.value, &mut out));
         assert_eq!(out, 42);
-        ffi::rin_res_free(&mut cr);
         ffi::rin_free(m);
     }
 }

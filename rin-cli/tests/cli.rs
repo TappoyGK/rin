@@ -82,7 +82,7 @@ fn limits_diagnostics_and_exit_codes() {
     assert!(text.contains('^'));
     assert!(text.contains("1 errors"));
     let out = f.run(&[
-        "test", "--steps", "0", "--depth", "3", "--memory", "1024", "--format", "json",
+        "test", "--steps", "0", "--depth", "3", "--memory", "4096", "--format", "json",
     ]);
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8(out.stdout).unwrap();

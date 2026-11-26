@@ -6,10 +6,20 @@ Rin インタプリタ（`rin` クレート）の評価環境・コンパイラ�
 
 評価環境は、公開 API を `Builder` と `Machine` の 2 つの型に分け、どちらも同じ内部構造体 `EnvState` を包む構成にしている（型定義は `rin/src/eval/mod.rs`、メソッド実装は `rin/src/eval/machine.rs`）。
 
-- **`EnvState`**（内部状態）: 主に `Pool`（値プールとメモリ上限管理）、`SymTable`（シンボル番号表）、`globals`（大域スロット）、`modules`（公開済みモジュール）、`module_envs`（モジュール固有環境）、`ParseScratch`（再利用パーサ作業領域）のほか、`limits`・`math_fma`・`module_ids`・`module_names` を保持する。
-- **`Builder`**（読み込み段階）: `bind`・`load_module`・`eval` で大域環境とモジュールを構築する。`freeze(self)` で `EnvState` の所有権ごと `Machine` へ移行する。
-- **`Machine`**（実行段階・凍結）: `eval`・`eval_with`・`call`・`call_in`（および `set_math_fma`・`math_fma`・`live_bytes`）を提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
-- **C FFI（`Rin`）**（`rin/src/ffi/mod.rs`）: 内部で `Builder`（`Building`）または `Machine`（`Frozen`）を包み、評価処理をすべて委譲する C ABI 用ラッパー。ポインタ型 `Rin*` を維持したまま `rin_freeze()` で不可逆に凍結し（凍結後の `rin_bind` / `rin_load` / `rin_build` は `[env.frozen]`、凍結前の `rin_eval` / `rin_eval_with` は `[env.phase]` で拒否）、直前エラー（`last_error`）と C アロケータの寿命も管理する。
+- **`EnvState`**（内部状態）: `Pool`（3 領域メモリ管理・値プール・ゼロヒープ `ErrorStore`）、`SymTable`（シンボル番号表）、`globals`（大域スロット `EnvSlots`）、`modules`（モジュール表 `ModuleTable`）、`last_result` のほか、`limits`・`math_fma` を保持する。
+- **`Builder`**（読み込み段階）: `Builder::new` / `Builder::with_memory_config` で生成し、`bind` / `bind_val`・`load_module` / `load_module_ref`・`eval` / `eval_ref` で大域環境とモジュールを構築する。`into_machine(self)`（または `std-value` 有効時の `freeze(self)`）で永続領域（`PermArena`）を凍結し、`EnvState` の所有権ごと `Machine` へ移行する。
+- **`Machine`**（実行段階・凍結）: `eval` / `eval_ref`・`eval_with` / `eval_with_vals`・`call` / `call_ref`・`call_in` / `call_in_ref`（および `val_*`・`set_math_fma`・`math_fma`・`live_bytes`）を提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
+- **C FFI（`Rin`）**（`rin/src/ffi/mod.rs`）: `Rin` 本体・`ValueHandles` プール・インライン NUL 終端 `StoredError` をすべて `RinAllocator` 上に直接配置するゼロヒープ C ABI ラッパー。ポインタ型 `Rin*` を維持したまま `rin_freeze()` で不可逆に凍結する。`rin_new_with_config` で 3 領域のブロック設定（`RinMemoryConfig`）を指定できる。
+
+## 1.5 3 領域メモリ管理（`rin/src/mem/`）
+
+`Builder` / `Machine` の内部確保はすべて呼び出し元から渡された単一の `Allocator`（`ArenaAllocator` を含む）上で行い、システムヒープを使用しない。確保の寿命に応じて 3 つの領域に分離しており、各領域のブロック拡張設定は `MemoryConfig`（`RegionConfig`）で調整できる。
+
+1. **永続領域（`PermArena`）**: `Chunk`・`FnProto`・`NameTable`・`SymTable`・`EnvSlots`・`ModuleTable`・インターン済み `StructDesc` 等を配置する。読み込み段階のみ追記でき、`Builder::into_machine()` / `freeze()` 以降は読み取り専用になる。
+2. **オブジェクト領域（`ObjHeap` + `Pool`）**: 評価中に生成される `Obj` スロットと可変長ペイロード（文字列・配列・タプル・構造体値・クロージャ捕捉等）を管理する。解放時は追加確保なし・非再帰で反復解放し、解放の起点になったオブジェクト（種類を問わない）と `Obj::Cons` の鎖の続きは直接 `Slot::Free` へ戻し、それ以外の子のうち参照が 0 になったものは侵入型 `Slot::Dying` キューへ積む 2 経路を用いる。サイズ別フリーリストにより `dealloc` が何もしない `ArenaAllocator` 上でも解放済みブロックを即座に再利用し、反復評価時の使用量を一定に保つ。
+3. **作業領域（`WorkArena`）**: ストリーミング字句解析・AST・コンパイラ一時構造・VM 値スタック（`RawVec<RVal>`）・呼び出しフレームスタック（非再帰 VM `drive_frames` と高階組み込み状態機械）・ソート一時バッファ等を配置する。評価終了時（成功・エラー問わず）に `WorkMark` へ一括巻き戻し、チャンクをそのまま再利用する。
+
+エラー情報と最大 64 段の呼び出し履歴は `AllocCore` にインライン埋め込みされた `ErrorStore` へ直接書き込むため、OOM や Arena 枯渇時を含めエラー生成・`Display` でシステムヒープを一切確保しない。
 
 ```mermaid
 flowchart TD
@@ -28,7 +38,7 @@ flowchart TD
 
 - **読み込み段階（`frozen = false`）**: トップレベルにある宣言のみバイトコードへ落とす。関数本体や式の中の入れ子宣言は構文エラー（`[expr.def]`・`[expr.defn]`・`[expr.module]`）として拒否する。これにより、凍結前に定義した関数を凍結後に呼び出して大域環境やモジュールを書き換える経路を根本から塞いでいる。
 - **実行段階（`frozen = true`）**: トップレベル・入れ子を問わず宣言 4 形式をすべて `[env.frozen]` の構文エラーとし、評価を始める前に拒否する。
-- **VM の防御ガード**（`rin/src/eval/vm/execute.rs`）: 実行時の多重防御として `Op::DefGlobal`・`Op::DefFn`・`Op::Import`・`Op::Export` にも `if self.frozen` の実行時エラーを残している。
+- **VM の防御ガード**（`rin/src/eval/vm/execute.rs`、`rin/src/eval/vm/ops_exec.rs`）: 実行時の多重防御として `Op::DefGlobal`・`Op::DefFn`・`Op::Import`・`Op::Export` にも `if self.frozen` の実行時エラーを残している。
 
 ## 3. 評価単位 `Runner` と `eval_with` の一時束縛
 
@@ -39,7 +49,7 @@ flowchart TD
 一時束縛の格納には `EvalBindingValues`（`rin/src/eval/mod.rs`）の 2 経路を使う。
 
 - **8 個以下（`Inline`）**: スタック上の固定長配列 `[(u32, RVal); 8]` に格納し、ヒープ確保を避ける。
-- **9 個以上（`Map`）**: `BTreeMap<u32, RVal>` に格納し、取り込み O(N log N)・参照 O(log N) を保つ。
+- **9 個以上（`Map`）**: 作業領域（`WorkArena`）上の `RawMap<u32, RVal>` に格納し、評価終了時に一括巻き戻しする。
 
 ソース中で参照されない束縛も `Pool::import` によるメモリ上限検査を行ってから即座に解放する。また、同名キーが重複した場合は後ろの束縛が有効になり、上書きされた旧値はその場で解放する。
 
@@ -48,16 +58,16 @@ flowchart TD
 VM の `Op::GetGlobal(id)` は `Runner::lookup_global`（`rin/src/eval/runner.rs`）で次の順に名前を解決する。
 
 1. **ローカルな最優先スコープ**:
-   - モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `module_envs[mod_id]` を参照する（ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない：`[env.modules]`・`[env.isolation]`）。
+   - モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `modules.env(mod_id)`（`ModuleTable` 内）を参照する（ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない：`[env.modules]`・`[env.isolation]`）。
    - モジュール外（`active_module = None`）なら、`eval_with` の一時束縛（`EvalBindings`）があれば参照する。
-2. **大域環境**: `globals[id]`（組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
-3. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール一覧 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
+2. **大域環境**: `globals`（`EnvSlots`：組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
+3. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール表 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
 4. **未定義エラー**: どれにも無ければ `unknown_name`（`[expr.name]`）を返し、その時点で可視な名前だけを候補として提示する。
 
 ```mermaid
 flowchart TD
     A["GetGlobal"] --> B{"モジュール内?"}
-    B -->|"Yes"| C["1. module_envs"]
+    B -->|"Yes"| C["1. modules.env(mod_id)"]
     B -->|"No"| D["1. EvalBindings"]
     C --> E["2. globals"]
     D --> E
@@ -69,4 +79,4 @@ flowchart TD
 
 ### 補足: `lookup_global` のインライン展開について
 
-`lookup_global` は `exec_frame` のホットパスから呼ばれるため、`#[inline(never)]` で切り離すと大域参照ごとの呼び出し費用が `fib`・`tail`・`recur` に直接表れる。そのためインライン展開可能な形を維持し、`unknown_name` のエラー構築だけを `#[cold]` で分離している。
+`lookup_global` は `exec_rin_frame` のホットパスから呼ばれるため、`#[inline(never)]` で切り離すと大域参照ごとの呼び出し費用が `fib`・`tail`・`recur` に直接表れる。そのため `#[inline(always)]` を維持し、`unknown_name` のエラー構築だけを `#[cold]` で分離している。

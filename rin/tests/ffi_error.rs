@@ -22,14 +22,12 @@ impl Drop for Machine {
     }
 }
 
-// 戻り値の所有物を処理し、エラーは machine から別途読む。
-unsafe fn finish(mut result: RinEvalResult, ok: bool) {
+// 戻り値を確認し、エラーは machine から別途読む。
+unsafe fn finish(result: RinEvalResult, ok: bool) {
     assert_eq!(result.ok, ok);
     if !ok {
         assert!(result.value.is_null());
     }
-    unsafe { rin_res_free(&mut result) };
-    assert!(result.value.is_null());
 }
 unsafe fn check_error(m: *mut Rin, kind: RinErrorKind) {
     unsafe {
@@ -73,15 +71,14 @@ fn kinds_modules_and_borrowed_lifetime() {
             assert_eq!(CStr::from_ptr(e.module), c"mod");
             assert!(e.line > 0 && e.col > 0);
         }
-        let mut loaded = rin_load(
+        let loaded = rin_load(
             m.0,
             c"mod".as_ptr(),
             c"(defn fail () (/ 1 0)) (defn good () 42)".as_ptr(),
         );
         assert!(loaded.ok && loaded.value.is_null());
-        rin_res_free(&mut loaded);
         assert!(rin_last_error(m.0).is_null());
-        let mut result = rin_call_in(m.0, c"mod".as_ptr(), c"fail".as_ptr(), null(), 0);
+        let result = rin_call_in(m.0, c"mod".as_ptr(), c"fail".as_ptr(), null(), 0);
         assert!(!result.ok);
         let p = rin_last_error(m.0);
         check_error(m.0, RinErrorKind::Runtime);
@@ -90,8 +87,6 @@ fn kinds_modules_and_borrowed_lifetime() {
         assert_eq!(rule.as_c_str(), c"op.arith");
         assert!(!(*p).backtrace.is_null());
         assert_eq!(CStr::from_ptr((*p).module), c"mod");
-        assert_eq!(p, rin_last_error(m.0));
-        rin_res_free(&mut result);
         assert_eq!(p, rin_last_error(m.0));
         assert_eq!(text.as_c_str(), CStr::from_ptr((*p).text));
         assert_eq!(rule.as_c_str(), CStr::from_ptr((*p).rule));
@@ -152,23 +147,12 @@ fn resource_errors_and_bind_failures_preserve_kind() {
             memory_bytes: 0,
             ..rin_limits_default()
         });
-        let v = rin_str(c"value".as_ptr());
+        assert!(rin_str(m.0, c"value".as_ptr()).is_null());
+        check_error(m.0, RinErrorKind::TooMuchMemory);
+        let v = rin_int(m.0, 1);
         assert!(!rin_bind(m.0, c"x".as_ptr(), v));
         check_error(m.0, RinErrorKind::TooMuchMemory);
-        rin_drop(v);
-        let m = Machine::new(rin_limits_default());
-        let v = RinValue(rin::Value::Builtin("unknown\0builtin"));
-        assert!(!rin_bind(m.0, c"x".as_ptr(), &v));
-        check_error(m.0, RinErrorKind::Runtime);
-        assert_eq!(CStr::from_ptr((*rin_last_error(m.0)).rule), c"host.value");
-        for s in [(*rin_last_error(m.0)).message, (*rin_last_error(m.0)).text] {
-            assert!(
-                CStr::from_ptr(s)
-                    .to_str()
-                    .unwrap()
-                    .contains("unknown\\0builtin")
-            );
-        }
+        rin_drop(m.0, v);
     }
 }
 
@@ -178,7 +162,7 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
         let m = Machine::new(rin_limits_default());
         let bad = [0xff_u8, 0];
         let bad = bad.as_ptr().cast();
-        let v = rin_int(1);
+        let v = rin_int(m.0, 1);
         let missing = [null()];
         let missing_bind_name = [RinBinding {
             name: null(),
@@ -232,7 +216,7 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
             assert!(rin_bind(m.0, c"x".as_ptr(), v));
             assert!(rin_last_error(m.0).is_null());
         }
-        rin_drop(v);
+        rin_drop(m.0, v);
         assert!(rin_last_error(null()).is_null());
         finish(rin_build(null_mut(), null()), false);
         finish(rin_eval(null_mut(), null()), false);
@@ -300,5 +284,60 @@ fn hints_are_in_ffi_message_and_text_with_original_rule() {
                 expected.to_string()
             );
         }
+    }
+}
+
+#[test]
+fn foreign_and_non_owned_handles_are_rejected_in_struct_set_and_drop() {
+    unsafe {
+        let m1 = Machine::new(rin_limits_default());
+        let m2 = Machine::new(rin_limits_default());
+
+        // m2 の構造体ハンドルと整数ハンドルを用意
+        let s2 = rin_struct(m2.0, c"Point".as_ptr());
+        assert!(!s2.is_null());
+        let v2 = rin_int(m2.0, 10);
+        assert!(rin_struct_set(m2.0, s2, c"x".as_ptr(), v2));
+        rin_drop(m2.0, v2);
+
+        // m1 の整数ハンドルを用意
+        let v1 = rin_int(m1.0, 99);
+
+        // 別 Rin (m2) の struct ハンドルを m1 の rin_struct_set に渡すと拒否され、m2 側の値は変わらない
+        assert!(!rin_struct_set(m1.0, s2, c"x".as_ptr(), v1));
+        check_error(m1.0, RinErrorKind::Host);
+        let got = rin_field(m2.0, s2, c"x".as_ptr());
+        assert!(!got.is_null());
+        let mut x = 0;
+        assert!(rin_as_int(m2.0, got, &mut x));
+        assert_eq!(x, 10);
+        rin_drop(m2.0, got);
+
+        // 別 Rin (m2) のハンドルを m1 の rin_drop に渡しても無視され、m2 側で引き続き読める
+        rin_drop(m1.0, s2);
+        let got2 = rin_field(m2.0, s2, c"x".as_ptr());
+        assert!(!got2.is_null());
+        let mut x2 = 0;
+        assert!(rin_as_int(m2.0, got2, &mut x2));
+        assert_eq!(x2, 10);
+        rin_drop(m2.0, got2);
+
+        // RinEvalResult.value（所有ハンドルではない）を rin_struct_set / rin_drop に渡しても安全に拒否・無視される
+        let eval_res = rin_build(m1.0, c"Point{x: 7}".as_ptr());
+        assert!(eval_res.ok && !eval_res.value.is_null());
+        let eval_mut = eval_res.value as *mut RinValue;
+        assert!(!rin_struct_set(m1.0, eval_mut, c"x".as_ptr(), v1));
+        check_error(m1.0, RinErrorKind::Host);
+        rin_drop(m1.0, eval_mut);
+
+        // 解放済みハンドルを rin_struct_set に渡すと拒否される
+        let s1 = rin_struct(m1.0, c"Point".as_ptr());
+        assert!(!s1.is_null());
+        rin_drop(m1.0, s1);
+        assert!(!rin_struct_set(m1.0, s1, c"x".as_ptr(), v1));
+        check_error(m1.0, RinErrorKind::Host);
+
+        rin_drop(m1.0, v1);
+        rin_drop(m2.0, s2);
     }
 }

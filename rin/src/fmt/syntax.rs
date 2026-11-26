@@ -70,10 +70,10 @@ impl<'a> Syntax<'a> {
         match &e.kind {
             ExprKind::Field { target, .. } => self.end(target) + 2,
             ExprKind::Index { target, .. } => self.ends[self.end(target)],
-            ExprKind::Struct { .. } => self.ends[start + 1],
+            ExprKind::Struct(_) => self.ends[start + 1],
             ExprKind::Some(_) | ExprKind::Ok(_) | ExprKind::Err(_) => self.ends[start + 1],
-            ExprKind::Variant { data, .. } => {
-                if data.is_some() {
+            ExprKind::Variant(v) => {
+                if v.data.is_some() {
                     self.ends[start + 3]
                 } else {
                     start + 3
@@ -89,7 +89,7 @@ impl<'a> Syntax<'a> {
     fn add(&mut self, start: usize, style: Style, parts: Vec<Range<usize>>) {
         self.plans.insert(start, Plan { style, parts });
     }
-    fn fields(&mut self, start: usize, fields: &[(String, Expr)]) {
+    fn fields(&mut self, start: usize, fields: &[(crate::mem::RawStr, Expr)]) {
         self.add(
             start,
             Style::Fields,
@@ -109,10 +109,11 @@ impl<'a> Syntax<'a> {
                 } else {
                     Style::Data
                 },
-                xs.iter().map(|e| self.range(e)).collect(),
+                xs.as_slice().iter().map(|e| self.range(e)).collect(),
             ),
             ExprKind::Call { callee, args } => {
-                let style = if matches!(&callee.kind, ExprKind::Ident(n) if n == "deftest") {
+                let style = if matches!(&callee.kind, ExprKind::Ident(n) if n.as_str() == "deftest")
+                {
                     Style::Body(2)
                 } else {
                     Style::Call
@@ -121,33 +122,34 @@ impl<'a> Syntax<'a> {
                     start,
                     style,
                     std::iter::once(callee.as_ref())
-                        .chain(args)
+                        .chain(args.as_slice())
                         .map(|e| self.range(e))
                         .collect(),
                 );
             }
             ExprKind::Def { value, .. } => self.add(start, Style::Call, vec![self.range(value)]),
-            ExprKind::Defn { body, .. } => {
+            ExprKind::Defn(d) => {
                 self.add(start + 3, Style::Params, vec![]);
                 self.add(
                     start,
                     Style::Body(3),
-                    body.iter().map(|e| self.range(e)).collect(),
+                    d.body.as_slice().iter().map(|e| self.range(e)).collect(),
                 );
             }
-            ExprKind::Fn { body, .. } => {
+            ExprKind::Fn(f) => {
                 self.add(start + 2, Style::Params, vec![]);
                 self.add(
                     start,
                     Style::Body(2),
-                    body.iter().map(|e| self.range(e)).collect(),
+                    f.body.as_slice().iter().map(|e| self.range(e)).collect(),
                 );
             }
-            ExprKind::Let { bindings, body } => {
+            ExprKind::Let(l) => {
                 self.add(
                     start + 2,
                     Style::Bindings,
-                    bindings
+                    l.bindings
+                        .as_slice()
                         .iter()
                         .map(|(_, e)| self.start(e) - 1..self.end(e))
                         .collect(),
@@ -155,7 +157,7 @@ impl<'a> Syntax<'a> {
                 self.add(
                     start,
                     Style::Body(2),
-                    body.iter().map(|e| self.range(e)).collect(),
+                    l.body.as_slice().iter().map(|e| self.range(e)).collect(),
                 );
             }
             ExprKind::If {
@@ -174,11 +176,12 @@ impl<'a> Syntax<'a> {
                 start,
                 Style::Body(2),
                 std::iter::once(cond.as_ref())
-                    .chain(body)
+                    .chain(body.as_slice())
                     .map(|e| self.range(e))
                     .collect(),
             ),
             ExprKind::Match { scrutinee, arms } => {
+                let arms = arms.as_slice();
                 let parts = std::iter::once(self.range(scrutinee))
                     .chain(arms.iter().map(|a| {
                         let i = self.positions[&(a.span.line, a.span.col)];
@@ -188,16 +191,17 @@ impl<'a> Syntax<'a> {
                 self.add(start, Style::Body(2), parts);
                 for arm in arms {
                     let i = self.positions[&(arm.span.line, arm.span.col)];
-                    let mut parts = Vec::with_capacity(arm.body.len() + 1);
-                    parts.push(i + 1..self.start(&arm.body[0]));
-                    parts.extend(arm.body.iter().map(|e| self.range(e)));
+                    let body = arm.body.as_slice();
+                    let mut parts = Vec::with_capacity(body.len() + 1);
+                    parts.push(i + 1..self.start(&body[0]));
+                    parts.extend(body.iter().map(|e| self.range(e)));
                     self.add(i, Style::Arm, parts);
                 }
             }
-            ExprKind::Struct { fields, .. } => self.fields(start + 1, fields),
+            ExprKind::Struct(s) => self.fields(start + 1, s.fields.as_slice()),
             ExprKind::With { target, fields } => {
                 let brace = self.end(target);
-                self.fields(brace, fields);
+                self.fields(brace, fields.as_slice());
                 self.add(
                     start,
                     Style::Call,
@@ -207,9 +211,11 @@ impl<'a> Syntax<'a> {
             ExprKind::Some(x) | ExprKind::Ok(x) | ExprKind::Err(x) => {
                 self.add(start + 1, Style::Call, vec![self.range(x)])
             }
-            ExprKind::Variant { data: Some(x), .. } => {
-                self.add(start + 3, Style::Call, vec![self.range(x)])
-            }
+            ExprKind::Variant(v) if v.data.is_some() => self.add(
+                start + 3,
+                Style::Call,
+                vec![self.range(v.data.as_ref().unwrap())],
+            ),
             ExprKind::Index { target, index } => {
                 self.add(self.end(target), Style::Call, vec![self.range(index)])
             }
@@ -238,52 +244,41 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
             (ExprKind::Str(a), ExprKind::Str(b)) | (ExprKind::Ident(a), ExprKind::Ident(b)) => {
                 a == b
             }
-            (
-                ExprKind::Struct {
-                    name: a,
-                    fields: af,
-                },
-                ExprKind::Struct {
-                    name: b,
-                    fields: bf,
-                },
-            ) => a == b && af.iter().map(|(n, _)| n).eq(bf.iter().map(|(n, _)| n)),
-            (ExprKind::With { fields: a, .. }, ExprKind::With { fields: b, .. }) => {
-                a.iter().map(|(n, _)| n).eq(b.iter().map(|(n, _)| n))
+            (ExprKind::Struct(a), ExprKind::Struct(b)) => {
+                a.name == b.name
+                    && a.fields.as_slice().iter().map(|(n, _)| n).eq(b
+                        .fields
+                        .as_slice()
+                        .iter()
+                        .map(|(n, _)| n))
             }
-            (
-                ExprKind::Variant {
-                    type_name: a,
-                    variant: av,
-                    ..
-                },
-                ExprKind::Variant {
-                    type_name: b,
-                    variant: bv,
-                    ..
-                },
-            ) => a == b && av == bv,
+            (ExprKind::With { fields: a, .. }, ExprKind::With { fields: b, .. }) => a
+                .as_slice()
+                .iter()
+                .map(|(n, _)| n)
+                .eq(b.as_slice().iter().map(|(n, _)| n)),
+            (ExprKind::Variant(a), ExprKind::Variant(b)) => {
+                a.type_name == b.type_name && a.variant == b.variant
+            }
             (ExprKind::Field { field: a, .. }, ExprKind::Field { field: b, .. }) => a == b,
             (ExprKind::Def { name: a, .. }, ExprKind::Def { name: b, .. })
             | (ExprKind::Import { name: a }, ExprKind::Import { name: b }) => a == b,
-            (ExprKind::Export { names: a }, ExprKind::Export { names: b }) => a == b,
-            (
-                ExprKind::Defn {
-                    name: a,
-                    params: ap,
-                    ..
-                },
-                ExprKind::Defn {
-                    name: b,
-                    params: bp,
-                    ..
-                },
-            ) => a == b && ap == bp,
-            (ExprKind::Fn { params: a, .. }, ExprKind::Fn { params: b, .. }) => a == b,
-            (ExprKind::Let { bindings: a, .. }, ExprKind::Let { bindings: b, .. }) => {
-                a.iter().map(|(n, _)| n).eq(b.iter().map(|(n, _)| n))
+            (ExprKind::Export { names: a }, ExprKind::Export { names: b }) => {
+                a.as_slice() == b.as_slice()
             }
+            (ExprKind::Defn(a), ExprKind::Defn(b)) => {
+                a.name == b.name && a.params.as_slice() == b.params.as_slice()
+            }
+            (ExprKind::Fn(a), ExprKind::Fn(b)) => a.params.as_slice() == b.params.as_slice(),
+            (ExprKind::Let(a), ExprKind::Let(b)) => a
+                .bindings
+                .as_slice()
+                .iter()
+                .map(|(n, _)| n)
+                .eq(b.bindings.as_slice().iter().map(|(n, _)| n)),
             (ExprKind::Match { arms: a, .. }, ExprKind::Match { arms: b, .. }) => {
+                let a = a.as_slice();
+                let b = b.as_slice();
                 a.len() == b.len()
                     && a.iter()
                         .zip(b)
@@ -330,13 +325,16 @@ mod tests {
             ("(match x (1 2 3) (_ 4))", "(match x (1 2) (_ 3 4))"),
         ] {
             assert!(
-                !equivalent(&parse_tests(before).unwrap(), &parse_tests(after).unwrap()),
+                !equivalent(
+                    parse_tests(before).unwrap().exprs(),
+                    parse_tests(after).unwrap().exprs()
+                ),
                 "{before} -> {after}"
             );
         }
         assert!(equivalent(
-            &parse_tests("[nan 1]").unwrap(),
-            &parse_tests("\n[ nan,\n 1 ]\n").unwrap()
+            parse_tests("[nan 1]").unwrap().exprs(),
+            parse_tests("\n[ nan,\n 1 ]\n").unwrap().exprs()
         ));
     }
 }

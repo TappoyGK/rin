@@ -1,6 +1,12 @@
 //! ソース位置、資源上限、エラー型、および呼び出し履歴フレームを定義する。
 
+#[cfg(feature = "std-value")]
 mod render;
+mod store;
+
+pub use store::ErrorRef;
+#[allow(unused_imports)]
+pub(crate) use store::{ErrRecorded, ErrorStore, FrameInput, InlineBuf};
 
 use std::fmt;
 
@@ -52,6 +58,7 @@ pub enum ErrorKind {
 }
 
 /// 実行時エラーまたは資源上限超過の展開時に記録する呼び出しフレーム。
+#[cfg(feature = "std-value")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackFrame {
     pub module: Option<String>,
@@ -87,6 +94,7 @@ fn fmt_site(f: &mut fmt::Formatter<'_>, caller_module: Option<&str>, at: Span) -
     }
 }
 
+#[cfg(all(test, feature = "std-value"))]
 impl StackFrame {
     fn same_site(&self, other: &Self) -> bool {
         self.module == other.module
@@ -101,6 +109,7 @@ impl StackFrame {
     }
 }
 
+#[cfg(feature = "std-value")]
 impl fmt::Display for StackFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.tail_calls > 0 {
@@ -147,6 +156,7 @@ impl fmt::Display for StackFrame {
 const MAX_BACKTRACE_SIDE: usize = 32;
 
 /// 字句解析・構文解析・コンパイル・評価で返すエラー。
+#[cfg(feature = "std-value")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -159,6 +169,7 @@ pub struct Error {
     omitted_frames: usize,
 }
 
+#[cfg(feature = "std-value")]
 impl Error {
     /// 規則名を指定してエラーを作る。
     ///
@@ -244,6 +255,7 @@ impl Error {
         write!(f, " [{}]", self.rule)
     }
 
+    #[cfg(test)]
     pub(crate) fn push_frame(&mut self, frame: StackFrame) {
         if let Some(last) = self.backtrace.last_mut()
             && last.same_site(&frame)
@@ -259,6 +271,7 @@ impl Error {
     }
 }
 
+#[cfg(feature = "std-value")]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.write_header(f)?;
@@ -270,4 +283,5 @@ impl fmt::Display for Error {
     }
 }
 
+#[cfg(feature = "std-value")]
 impl std::error::Error for Error {}

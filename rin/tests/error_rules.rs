@@ -37,9 +37,36 @@ fn all_implementation_rules_are_documented() {
             "Error::lex(",
             "Error::parse(",
             "Error::runtime(",
+            ".err_str(",
+            ".err_fmt(",
+            ".err_runtime(",
+            ".err_runtime_fmt(",
+            ".begin_msg(",
+            ".err_lex(",
+            ".err_lex_fmt(",
+            ".err_parse(",
+            ".err_parse_fmt(",
         ] {
             for rest in source.split(constructor).skip(1) {
                 let rest = rest.trim_start();
+                if path.ends_with("error/store.rs") && rest.starts_with("self.rule") {
+                    continue;
+                }
+                if !rest.starts_with('"')
+                    && matches!(
+                        constructor,
+                        ".err_str("
+                            | ".err_fmt("
+                            | ".err_runtime("
+                            | ".err_runtime_fmt("
+                            | ".begin_msg("
+                    )
+                {
+                    // 転送ラッパー (例: `self.pool.core.err_str(rule, ...)`) はスキップする。
+                    if rest.starts_with("rule") {
+                        continue;
+                    }
+                }
                 let literal = rest.strip_prefix('"').unwrap_or_else(|| {
                     panic!(
                         "{}: {constructor} must specify a literal rule",
@@ -55,13 +82,19 @@ fn all_implementation_rules_are_documented() {
                 sites += 1;
             }
         }
-        // C API の Host エラーは Rust Error を介さず保存する。
-        if path.ends_with("ffi/error.rs") {
-            for rest in source.split("Self::new(").skip(1) {
-                if let Some(literal) = rest.trim_start().strip_prefix('"') {
-                    let (rule, _) = literal.split_once('"').unwrap();
-                    assert!(rules.contains(rule), "undocumented FFI rule {rule}");
-                    sites += 1;
+        // C API の Host / phase エラーは Rust Error を介さず保存する。
+        if path.ends_with("ffi/error.rs") || path.ends_with("ffi/mod.rs") {
+            for pat in [
+                "set_simple(",
+                "record_simple_error(",
+                "record_simple_error_fmt(",
+            ] {
+                for rest in source.split(pat).skip(1) {
+                    if let Some(literal) = rest.trim_start().strip_prefix('"') {
+                        let (rule, _) = literal.split_once('"').unwrap();
+                        assert!(rules.contains(rule), "undocumented FFI rule {rule}");
+                        sites += 1;
+                    }
                 }
             }
         }

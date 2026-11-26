@@ -1,11 +1,23 @@
 //! `Builder`・`Machine` の生成・凍結・評価・ホスト呼び出しと後始末。
+#[cfg(feature = "std-value")]
+use std::fmt::Write;
+
 use super::*;
 
 impl<'a> Builder<'a> {
     /// 読み込み段階の新しい環境を生成する。
     pub fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
+        Self::with_memory_config(limits, MemoryConfig::default(), alloc)
+    }
+
+    /// 3 領域のブロック設定 (`MemoryConfig`) を指定して読み込み段階の環境を生成する。
+    pub fn with_memory_config(
+        limits: Limits,
+        memory: MemoryConfig,
+        alloc: &'a mut dyn Allocator,
+    ) -> Self {
         Self {
-            inner: EnvState::new(limits, alloc),
+            inner: EnvState::with_memory_config(limits, memory, alloc),
         }
     }
 
@@ -20,16 +32,19 @@ impl<'a> Builder<'a> {
     }
 
     /// ホストの値を大域変数として束縛する（同名があれば上書きし、旧値を解放する）。
+    #[cfg(feature = "std-value")]
     pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
         self.inner.bind(name, value)
     }
 
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
+    #[cfg(feature = "std-value")]
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         self.inner.load_module(name, source)
     }
 
     /// 読み込み段階の環境でソースを評価する（`def`・`defn`・`import` 等を許可する）。
+    #[cfg(feature = "std-value")]
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         self.inner.eval_building(source)
     }
@@ -39,16 +54,25 @@ impl<'a> Builder<'a> {
         self.inner.pool.live_bytes()
     }
 
-    /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
-    pub fn freeze(self) -> Result<Machine<'a>, Error> {
-        self.check_freeze()?;
-        Ok(Machine { inner: self.inner })
+    /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する（失敗しない・システムヒープ不使用）。
+    pub fn into_machine(mut self) -> Machine<'a> {
+        self.inner.pool.freeze_perm();
+        Machine { inner: self.inner }
     }
 
+    /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
+    #[cfg(feature = "std-value")]
+    pub fn freeze(self) -> Result<Machine<'a>, Error> {
+        self.check_freeze()?;
+        Ok(self.into_machine())
+    }
+
+    #[cfg(feature = "std-value")]
     pub(crate) fn check_freeze(&self) -> Result<(), Error> {
         Ok(())
     }
 
+    #[cfg(feature = "std-value")]
     pub(crate) fn run_test(
         &mut self,
         setup: &[crate::ast::Expr],
@@ -57,10 +81,7 @@ impl<'a> Builder<'a> {
         self.inner.run_test(setup, body)
     }
 
-    pub(crate) fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
-        self.inner.call(fn_name, args, false)
-    }
-
+    #[cfg(all(test, feature = "std-value"))]
     pub(crate) fn call_in(
         &mut self,
         mod_name: &str,
@@ -86,6 +107,7 @@ impl<'a> Machine<'a> {
     ///
     /// `def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。
     /// 読み込み済みのすべてのモジュールは `import` なしで `mod_name.symbol` として参照できる。
+    #[cfg(feature = "std-value")]
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         self.eval_with(source, &[])
     }
@@ -93,16 +115,19 @@ impl<'a> Machine<'a> {
     /// 凍結した環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する。
     ///
     /// 評価の成否にかかわらず、大域環境・読み込み済みモジュールは変更せず、一時束縛は終了時に解放する。
+    #[cfg(feature = "std-value")]
     pub fn eval_with(&mut self, source: &str, bindings: &[(&str, Value)]) -> Result<Value, Error> {
         self.inner.eval_frozen(source, bindings)
     }
 
     /// 定義済みの大域関数をソース再解析なしで直接呼び出す。
+    #[cfg(feature = "std-value")]
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
         self.inner.call(fn_name, args, true)
     }
 
     /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
+    #[cfg(feature = "std-value")]
     pub fn call_in(
         &mut self,
         mod_name: &str,
@@ -119,93 +144,151 @@ impl<'a> Machine<'a> {
 }
 
 impl<'a> EnvState<'a> {
-    pub(super) fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
-        let mut syms = SymTable::default();
-        let mut globals = Vec::new();
-        for &b in BuiltinId::ALL {
-            let id = syms.intern(b.name());
-            set_slot(&mut globals, id, RVal::Builtin(b));
-        }
-        let pi_id = syms.intern("pi");
-        set_slot(&mut globals, pi_id, RVal::Float(std::f64::consts::PI));
+    pub(super) fn with_memory_config(
+        limits: Limits,
+        memory: MemoryConfig,
+        alloc: &'a mut dyn Allocator,
+    ) -> Self {
         Self {
             limits,
             math_fma: MathFma::default(),
-            pool: Pool::new(alloc, limits.memory_bytes),
-            syms,
-            globals,
-            modules: BTreeMap::new(),
-            module_ids: BTreeMap::new(),
-            module_names: Vec::new(),
-            module_envs: Vec::new(),
-            parse_scratch: ParseScratch::new(),
+            pool: Pool::with_config(alloc, limits.memory_bytes, memory),
+            syms: SymTable::new(),
+            globals: EnvSlots::new(),
+            modules: ModuleTable::new(),
+            last_result: RVal::Void,
         }
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
-        let rval = self.pool.import(value, Span::default())?;
-        let id = self.syms.intern(name);
-        if let Some(prev) = set_slot(&mut self.globals, id, rval) {
-            self.pool.release_val(prev);
+        let rval = self
+            .pool
+            .import(value, Span::default())
+            .map_err(|_| self.pool.core.error.to_owned_error())?;
+        let Some(id) = self.syms.intern(&mut self.pool, name) else {
+            self.pool.release_val(rval);
+            return Err(Error::new(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        };
+        match self.globals.set(&mut self.pool, id, rval, Span::default()) {
+            Ok(Some(prev)) => self.pool.release_val(prev),
+            Ok(None) => {}
+            Err(_) => {
+                self.pool.release_val(rval);
+                return Err(self.pool.core.error.to_owned_error());
+            }
         }
         Ok(())
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn eval_building(&mut self, source: &str) -> Result<Value, Error> {
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals, false)?
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let exprs =
+                parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            let chunk = compile_program(
+                exprs.as_slice(),
+                None,
+                &mut self.syms,
+                &mut self.pool,
+                &self.globals,
+                false,
+            )?;
+            let mut runner = self.runner(None, false);
+            runner.run_top_chunk(&chunk)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let last = match res {
+            Ok(v) => v,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
         };
-        let mut runner = self.runner(None, false);
-        let last = runner.run_top_chunk(&chunk)?;
-        let exported = runner.pool.export(last);
-        runner.pool.release_val(last);
+        let exported = self.pool.export(last);
+        self.pool.release_val(last);
         Ok(exported)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn eval_frozen(
         &mut self,
         source: &str,
         bindings: &[(&str, Value)],
     ) -> Result<Value, Error> {
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals, true)?
+        let outer_mark = self.pool.work.mark(&self.pool.core);
+        let res = self.eval_frozen_inner(source, bindings);
+        self.syms.clear_temp();
+        self.pool.work.rewind(&mut self.pool.core, outer_mark);
+        res
+    }
+
+    #[cfg(feature = "std-value")]
+    fn eval_frozen_inner(
+        &mut self,
+        source: &str,
+        bindings: &[(&str, Value)],
+    ) -> Result<Value, Error> {
+        let chunk = match (|| {
+            let exprs =
+                parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            compile_program(
+                exprs.as_slice(),
+                None,
+                &mut self.syms,
+                &mut self.pool,
+                &self.globals,
+                true,
+            )
+        })() {
+            Ok(c) => c,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
         };
 
         if bindings.is_empty() {
-            let mut runner = self.runner(None, true);
-            let last = runner.run_top_chunk(&chunk)?;
-            let exported = runner.pool.export(last);
-            runner.pool.release_val(last);
+            let res = {
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk(&chunk)
+            };
+            let last = match res {
+                Ok(v) => v,
+                Err(_) => return Err(self.pool.core.error.to_owned_error()),
+            };
+            let exported = self.pool.export(last);
+            self.pool.release_val(last);
             return Ok(exported);
         }
 
         // 一時束縛を取り込み、失敗時は取り込み済みをすべて解放する。
-        // 少数の束縛はスタック配列に格納し、多数は BTreeMap で O(log N) 参照を保つ。
+        // 少数の束縛はスタック配列に格納し、多数は WorkArena 上の RawMap を使う。
         let mut values = EvalBindingValues::new(bindings.len());
         for (name, value) in bindings {
             if let Some(id) = self.syms.get(name) {
                 match self.pool.import(value, Span::default()) {
-                    Ok(rval) => {
-                        if let Some(prev) = values.insert(id, rval) {
-                            self.pool.release_val(prev);
+                    Ok(rval) => match values.insert(&mut self.pool, id, rval) {
+                        Ok(Some(prev)) => self.pool.release_val(prev),
+                        Ok(None) => {}
+                        Err(_) => {
+                            self.pool.release_val(rval);
+                            values.release_all(&mut self.pool);
+                            return Err(self.pool.core.error.to_owned_error());
                         }
-                    }
-                    Err(e) => {
+                    },
+                    Err(_) => {
                         values.release_all(&mut self.pool);
-                        return Err(e);
+                        return Err(self.pool.core.error.to_owned_error());
                     }
                 }
             } else {
                 // ソース中で参照されない束縛もメモリ上限検査だけは行うため、取り込んで即解放する。
                 match self.pool.import(value, Span::default()) {
                     Ok(rval) => self.pool.release_val(rval),
-                    Err(e) => {
+                    Err(_) => {
                         values.release_all(&mut self.pool);
-                        return Err(e);
+                        return Err(self.pool.core.error.to_owned_error());
                     }
                 }
             }
@@ -213,7 +296,7 @@ impl<'a> EnvState<'a> {
 
         let eval_bindings = EvalBindings {
             values,
-            raw: bindings,
+            names: EvalBindingNames::Values(bindings),
         };
         let res = {
             let mut runner = self.runner(None, true);
@@ -221,29 +304,50 @@ impl<'a> EnvState<'a> {
             runner.run_top_chunk(&chunk)
         };
         eval_bindings.values.release_all(&mut self.pool);
-        let last = res?;
+        let last = match res {
+            Ok(v) => v,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
+        };
         let exported = self.pool.export(last);
         self.pool.release_val(last);
         Ok(exported)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn run_test(
         &mut self,
         setup: &[crate::ast::Expr],
         body: &[crate::ast::Expr],
     ) -> (Vec<crate::test::CheckFailure>, Result<(), Error>) {
-        let chunk =
-            match compile_program_parts(setup, body, None, &mut self.syms, &self.globals, false) {
-                Ok(chunk) => chunk,
-                Err(error) => return (Vec::new(), Err(error)),
-            };
-        let mut runner = self.runner(None, false);
-        let result = runner
-            .run_top_chunk(&chunk)
-            .map(|value| runner.pool.release_val(value));
-        (std::mem::take(&mut runner.check_failures), result)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let chunk = match compile_program_parts(
+            setup,
+            body,
+            None,
+            &mut self.syms,
+            &mut self.pool,
+            &self.globals,
+            false,
+        ) {
+            Ok(chunk) => chunk,
+            Err(_) => {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return (Vec::new(), Err(self.pool.core.error.to_owned_error()));
+            }
+        };
+        let (failures, result) = {
+            let mut runner = self.runner(None, false);
+            let result = runner
+                .run_top_chunk(&chunk)
+                .map(|value| runner.pool.release_val(value));
+            (std::mem::take(&mut runner.check_failures), result)
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let result = result.map_err(|_| self.pool.core.error.to_owned_error());
+        (failures, result)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn call(
         &mut self,
         fn_name: &str,
@@ -253,47 +357,109 @@ impl<'a> EnvState<'a> {
         let Some(callee) = self
             .syms
             .get(fn_name)
-            .and_then(|id| self.globals.get(id as usize).copied().flatten())
+            .and_then(|id| global_slot(&self.globals, id))
         else {
-            return Err(Error::runtime(
-                "expr.name",
-                Span::default(),
-                suggest(
-                    format!("unknown function '{fn_name}'"),
-                    fn_name,
-                    bound_names(&self.syms, &self.globals),
-                ),
-            ));
+            let out =
+                self.pool
+                    .core
+                    .error
+                    .begin_msg("expr.name", ErrorKind::Runtime, Span::default());
+            let _ = write!(out, "unknown function '{fn_name}'");
+            write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
+            return Err(self.pool.core.error.to_owned_error());
         };
         self.call_rval(callee, args, frozen)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn call_rval(
         &mut self,
         callee: RVal,
         args: &[Value],
         frozen: bool,
     ) -> Result<Value, Error> {
-        let mut r_args = Vec::with_capacity(args.len());
-        for arg in args {
-            match self.pool.import(arg, Span::default()) {
-                Ok(rv) => r_args.push(rv),
-                Err(e) => {
-                    for v in r_args {
-                        self.pool.release_val(v);
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut inline_args = [RVal::Void; 4];
+        let mut overflow_args = RawVec::new();
+        let args_len = args.len();
+        if args_len <= inline_args.len() {
+            for (idx, arg) in args.iter().enumerate() {
+                match self.pool.import(arg, Span::default()) {
+                    Ok(rv) => inline_args[idx] = rv,
+                    Err(_) => {
+                        for &v in &inline_args[..idx] {
+                            self.pool.release_val(v);
+                        }
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        return Err(self.pool.core.error.to_owned_error());
                     }
-                    return Err(e);
+                }
+            }
+        } else {
+            if overflow_args
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, args_len)
+                .is_none()
+            {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Err(Error::new(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    Span::default(),
+                    "memory limit exceeded",
+                ));
+            }
+            for arg in args {
+                match self.pool.import(arg, Span::default()) {
+                    Ok(rv) => {
+                        if overflow_args
+                            .push_work(&mut self.pool.work, &mut self.pool.core, rv)
+                            .is_none()
+                        {
+                            self.pool.release_val(rv);
+                            for &v in overflow_args.as_slice() {
+                                self.pool.release_val(v);
+                            }
+                            self.pool.work.rewind(&mut self.pool.core, mark);
+                            return Err(Error::new(
+                                "eval.limits",
+                                ErrorKind::TooMuchMemory,
+                                Span::default(),
+                                "memory limit exceeded",
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        for &v in overflow_args.as_slice() {
+                            self.pool.release_val(v);
+                        }
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        return Err(self.pool.core.error.to_owned_error());
+                    }
                 }
             }
         }
+        let r_args: &[RVal] = if args_len <= inline_args.len() {
+            &inline_args[..args_len]
+        } else {
+            overflow_args.as_slice()
+        };
         self.pool.retain_val(callee);
-        let mut runner = self.runner(None, frozen);
-        let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
-        runner.pool.release_val(callee);
-        runner.release_all(r_args);
-        let val = res?;
-        let exported = runner.pool.export(val);
-        runner.pool.release_val(val);
+        let res = {
+            let mut runner = self.runner(None, frozen);
+            let res = runner.apply(callee, r_args, Span::default(), CallOrigin::Host);
+            runner.pool.release_val(callee);
+            for &v in r_args {
+                runner.pool.release_val(v);
+            }
+            res
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let val = match res {
+            Ok(v) => v,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
+        };
+        let exported = self.pool.export(val);
+        self.pool.release_val(val);
         Ok(exported)
     }
 
@@ -308,32 +474,21 @@ impl<'a> EnvState<'a> {
             pool: &mut self.pool,
             syms: &self.syms,
             globals: &mut self.globals,
-            modules: &self.modules,
-            module_names: &self.module_names,
-            module_envs: &mut self.module_envs,
+            modules: &mut self.modules,
             active_module,
             export_list: None,
+            #[cfg(feature = "std-value")]
             check_failures: Vec::new(),
-            stack: Vec::with_capacity(64),
+            stack: ValueStack::new(),
         }
     }
 }
 
 impl Drop for EnvState<'_> {
     fn drop(&mut self) {
-        let old_mods = std::mem::take(&mut self.modules);
-        for v in old_mods.into_values() {
-            self.pool.release_val(v);
-        }
-        let old_mod_envs = std::mem::take(&mut self.module_envs);
-        for env in old_mod_envs {
-            for v in env.into_iter().flatten() {
-                self.pool.release_val(v);
-            }
-        }
-        let old = std::mem::take(&mut self.globals);
-        for v in old.into_iter().flatten() {
-            self.pool.release_val(v);
-        }
+        let last = std::mem::replace(&mut self.last_result, RVal::Void);
+        self.pool.release_val(last);
+        self.modules.release_all(&mut self.pool);
+        self.globals.clear(&mut self.pool);
     }
 }

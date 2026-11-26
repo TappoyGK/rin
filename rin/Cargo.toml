@@ -5,3 +5,119 @@ edition = "2024"
 
 [lib]
 crate-type = ["rlib", "staticlib"]
+
+[features]
+default = ["std-value"]
+std-value = []
+
+[[test]]
+name = "builtin_cost_limits"
+required-features = ["std-value"]
+
+[[test]]
+name = "builtin_cost_timing"
+required-features = ["std-value"]
+
+[[test]]
+name = "builtin_costs"
+required-features = ["std-value"]
+
+[[test]]
+name = "comments"
+required-features = ["std-value"]
+
+[[test]]
+name = "compile_memory"
+required-features = ["std-value"]
+
+[[test]]
+name = "compiler_names"
+required-features = ["std-value"]
+
+[[test]]
+name = "deep_values"
+required-features = ["std-value"]
+
+[[test]]
+name = "error_hints"
+required-features = ["std-value"]
+
+[[test]]
+name = "error_render"
+required-features = ["std-value"]
+
+[[test]]
+name = "error_rules"
+required-features = ["std-value"]
+
+[[test]]
+name = "ffi_error"
+required-features = ["std-value"]
+
+[[test]]
+name = "formatter"
+required-features = ["std-value"]
+
+[[test]]
+name = "formatter_memory"
+required-features = ["std-value"]
+
+[[test]]
+name = "frozen_env"
+required-features = ["std-value"]
+
+[[test]]
+name = "hint_allocations"
+required-features = ["std-value"]
+
+[[test]]
+name = "math_trig"
+required-features = ["std-value"]
+
+[[test]]
+name = "nesting_limit"
+required-features = ["std-value"]
+
+[[test]]
+name = "spec_cases"
+required-features = ["std-value"]
+
+[[test]]
+name = "step_locations"
+required-features = ["std-value"]
+
+[[test]]
+name = "tail_call_captures"
+required-features = ["std-value"]
+
+[[test]]
+name = "test_runner"
+required-features = ["std-value"]
+
+[[test]]
+name = "vm_stack"
+required-features = ["std-value"]
+
+[[example]]
+name = "call_bench"
+required-features = ["std-value"]
+
+[[example]]
+name = "compile_bench"
+required-features = ["std-value"]
+
+[[example]]
+name = "cost_bench"
+required-features = ["std-value"]
+
+[[example]]
+name = "diagnostic_allocations"
+required-features = ["std-value"]
+
+[[example]]
+name = "diagnostic_bench"
+required-features = ["std-value"]
+
+[[example]]
+name = "value_bench"
+required-features = ["std-value"]

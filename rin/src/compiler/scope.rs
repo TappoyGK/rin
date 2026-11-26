@@ -1,133 +1,213 @@
-//! 束縛・キャプチャの解決と名前診断の記録。
+//! 束縛・キャプチャの解決と名前診断の記録（`WorkArena` + `CodeRegion` 完結）。
 use super::*;
-use std::collections::BTreeMap;
-use std::num::NonZeroU32;
 
-// 少数の束縛では確保を避ける。線形走査は常にこの定数以内に限る。
+// 少数の束縛ではハッシュ表の確保を避ける。線形走査は常にこの定数以内に限る。
 const INLINE_NAMES: usize = 8;
+const REMOVED_LOCAL: u32 = u32::MAX;
 
-pub(super) struct Scope<'a> {
+pub(super) struct Scope {
     pub(super) module: Option<u32>,
-    // AST の名前を借用し、診断に必要になった束縛だけノードの添字 + 1 を記録する。
-    // NonZero により未記録状態も 1 ワードに収める。
-    pub(super) locals: Vec<(&'a str, u32, Option<NonZeroUsize>, Option<NonZeroU32>)>,
-    // Scope自体を小さく保ち、小さい関数のコンパイルで表の管理領域を持ち回らない。
-    // Boxの確保は固定個数を超えたスコープだけで行う。
-    #[allow(clippy::box_collection)]
-    local_names: Option<Box<BTreeMap<&'a str, usize>>>,
-    #[allow(clippy::box_collection)]
-    capture_names: Option<Box<BTreeMap<Rc<str>, u32>>>,
+    // AST の RawStr をそのまま保持し、診断に必要になった束縛だけノードの添字 + 1 を記録する。
+    pub(super) locals: RawVec<(RawStr, u32, Option<NonZeroU32>, Option<NonZeroU32>)>,
+    local_names: RawMap<RawStr, u32>,
+    capture_names: RawMap<RawStr, u32>,
+    pub(super) string_map: RawMap<RawStr, u32>,
     pub(super) outer_local_count: usize,
     pub(super) next_slot: u32,
     pub(super) max_slots: u32,
-    pub(super) captures: Vec<(Rc<str>, Capture)>,
+    pub(super) captures: RawVec<(RawStr, Capture)>,
     // 未発行の Tick が参照する範囲の開始位置。位置情報は最終格納先へ直接書く。
     pub(super) pending_tick_start: usize,
     pub(super) chunk: Chunk,
 }
 
-impl<'a> Scope<'a> {
+impl Scope {
     pub(super) fn new(module: Option<u32>) -> Self {
         Self {
             module,
-            locals: Vec::new(),
-            local_names: None,
-            capture_names: None,
+            locals: RawVec::new(),
+            local_names: RawMap::new(),
+            capture_names: RawMap::new(),
+            string_map: RawMap::new(),
             outer_local_count: 0,
             next_slot: 0,
             max_slots: 0,
-            captures: Vec::new(),
+            captures: RawVec::new(),
             pending_tick_start: 0,
             chunk: Chunk::default(),
         }
     }
 
-    pub(super) fn alloc_slot(&mut self, name: &'a str, span: Span) -> Result<u32, Error> {
+    pub(super) fn alloc_slot(
+        &mut self,
+        pool: &mut Pool<'_>,
+        name: RawStr,
+        span: Span,
+    ) -> Result<u32, ErrRecorded> {
         let slot = self.next_slot;
-        self.next_slot = self
-            .next_slot
-            .checked_add(1)
-            .ok_or_else(|| Error::parse("compile.capacity", span, "too many local variables"))?;
+        let Some(next_slot) = self.next_slot.checked_add(1) else {
+            return Err(pool.core.err_str(
+                "compile.capacity",
+                ErrorKind::Parse,
+                span,
+                "too many local variables",
+            ));
+        };
+        self.next_slot = next_slot;
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
-        let index = self.locals.len();
-        let previous = if let Some(names) = &mut self.local_names {
-            names.insert(name, index)
+        let index = self.locals.len() as u32;
+        let previous = if !self.local_names.is_empty() {
+            let hash = fnv1a_bytes(name.as_str().as_bytes());
+            let Some(prev) = self.local_names.insert_work(
+                &mut pool.work,
+                &mut pool.core,
+                hash,
+                name,
+                index,
+                |a, b| a.as_str() == b.as_str(),
+            ) else {
+                return Err(pool.core.err_oom(span));
+            };
+            prev.filter(|&p| p != REMOVED_LOCAL)
         } else {
-            self.locals.iter().rposition(|(n, _, _, _)| *n == name)
+            self.locals
+                .as_slice()
+                .iter()
+                .rposition(|(n, _, _, _)| n.as_str() == name.as_str())
+                .map(|i| i as u32)
         };
-        // 局所スロット数はu32以内。添字+1を使い、未記録を含め4バイトに収める。
-        let previous = previous.and_then(|i| NonZeroU32::new(i as u32 + 1));
-        self.locals.push((name, slot, None, previous));
-        if self.local_names.is_none() && self.locals.len() > INLINE_NAMES {
-            let mut names = BTreeMap::new();
-            for (i, (name, _, _, _)) in self.locals.iter().enumerate() {
-                names.insert(*name, i);
+        let previous = previous.and_then(|i| NonZeroU32::new(i + 1));
+        if self
+            .locals
+            .push_work(&mut pool.work, &mut pool.core, (name, slot, None, previous))
+            .is_none()
+        {
+            return Err(pool.core.err_oom(span));
+        }
+        if self.local_names.is_empty() && self.locals.len() > INLINE_NAMES {
+            for (i, &(n, _, _, _)) in self.locals.as_slice().iter().enumerate() {
+                let hash = fnv1a_bytes(n.as_str().as_bytes());
+                if self
+                    .local_names
+                    .insert_work(&mut pool.work, &mut pool.core, hash, n, i as u32, |a, b| {
+                        a.as_str() == b.as_str()
+                    })
+                    .is_none()
+                {
+                    return Err(pool.core.err_oom(span));
+                }
             }
-            self.local_names = Some(Box::new(names));
         }
         Ok(slot)
     }
 
-    pub(super) fn truncate_locals(&mut self, len: usize) {
+    pub(super) fn truncate_locals(&mut self, pool: &mut Pool<'_>, len: usize) {
         while self.locals.len() > len {
             let (name, _, _, previous) = self.locals.pop().unwrap();
-            if let Some(names) = &mut self.local_names {
-                if let Some(previous) = previous {
-                    names.insert(name, previous.get() as usize - 1);
-                } else {
-                    names.remove(name);
-                }
+            if !self.local_names.is_empty() {
+                let hash = fnv1a_bytes(name.as_str().as_bytes());
+                let val = previous.map_or(REMOVED_LOCAL, |p| p.get() - 1);
+                // 既に存在するキーの上書きなので確保は起きない。
+                let _ = self.local_names.insert_work(
+                    &mut pool.work,
+                    &mut pool.core,
+                    hash,
+                    name,
+                    val,
+                    |a, b| a.as_str() == b.as_str(),
+                );
             }
         }
     }
 
     fn find_local(&self, name: &str) -> Option<u32> {
-        if let Some(names) = &self.local_names {
-            names.get(name).map(|&i| self.locals[i].1)
+        if !self.local_names.is_empty() {
+            let hash = fnv1a_bytes(name.as_bytes());
+            let idx = self.local_names.get_by(hash, |k| k.as_str() == name)?;
+            if idx == REMOVED_LOCAL {
+                None
+            } else {
+                Some(self.locals.as_slice()[idx as usize].1)
+            }
         } else {
             self.locals
+                .as_slice()
                 .iter()
                 .rev()
-                .find(|(n, _, _, _)| *n == name)
+                .find(|(n, _, _, _)| n.as_str() == name)
                 .map(|(_, slot, _, _)| *slot)
         }
     }
 
-    fn find_or_add_capture(&mut self, name: &str, cap: Capture, span: Span) -> Result<u32, Error> {
-        let found = if let Some(names) = &self.capture_names {
-            names.get(name).copied()
+    fn find_or_add_capture(
+        &mut self,
+        pool: &mut Pool<'_>,
+        name: RawStr,
+        cap: Capture,
+        span: Span,
+    ) -> Result<u32, ErrRecorded> {
+        let name_str = name.as_str();
+        let found = if !self.capture_names.is_empty() {
+            let hash = fnv1a_bytes(name_str.as_bytes());
+            self.capture_names.get_by(hash, |k| k.as_str() == name_str)
         } else {
             self.captures
+                .as_slice()
                 .iter()
-                .position(|(n, _)| n.as_ref() == name)
+                .position(|(n, _)| n.as_str() == name_str)
                 .map(|i| i as u32)
         };
         if let Some(index) = found {
             return Ok(index);
         }
-        let idx = u32::try_from(self.captures.len())
-            .map_err(|_| Error::parse("compile.capacity", span, "too many captured variables"))?;
-        let name: Rc<str> = Rc::from(name);
-        self.captures.push((Rc::clone(&name), cap));
-        if let Some(names) = &mut self.capture_names {
-            names.insert(name, idx);
-        } else if self.captures.len() > INLINE_NAMES {
-            self.capture_names = Some(Box::new(
-                self.captures
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, _))| (Rc::clone(name), i as u32))
-                    .collect(),
+        let Ok(idx) = u32::try_from(self.captures.len()) else {
+            return Err(pool.core.err_str(
+                "compile.capacity",
+                ErrorKind::Parse,
+                span,
+                "too many captured variables",
             ));
+        };
+        if self
+            .captures
+            .push_work(&mut pool.work, &mut pool.core, (name, cap))
+            .is_none()
+        {
+            return Err(pool.core.err_oom(span));
+        }
+        if !self.capture_names.is_empty() {
+            let hash = fnv1a_bytes(name_str.as_bytes());
+            if self
+                .capture_names
+                .insert_work(&mut pool.work, &mut pool.core, hash, name, idx, |a, b| {
+                    a.as_str() == b.as_str()
+                })
+                .is_none()
+            {
+                return Err(pool.core.err_oom(span));
+            }
+        } else if self.captures.len() > INLINE_NAMES {
+            for (i, &(n, _)) in self.captures.as_slice().iter().enumerate() {
+                let hash = fnv1a_bytes(n.as_str().as_bytes());
+                if self
+                    .capture_names
+                    .insert_work(&mut pool.work, &mut pool.core, hash, n, i as u32, |a, b| {
+                        a.as_str() == b.as_str()
+                    })
+                    .is_none()
+                {
+                    return Err(pool.core.err_oom(span));
+                }
+            }
         }
         Ok(idx)
     }
 }
 
-impl<'a> Compiler<'a> {
-    pub(super) fn new_scope(&self) -> Scope<'a> {
+impl<'a, 'p> Compiler<'a, 'p> {
+    pub(super) fn new_scope(&self) -> Scope {
         let parent = self.scopes.last().unwrap();
         let mut inner = Scope::new(self.module);
         inner.outer_local_count = parent.outer_local_count + parent.locals.len();
@@ -136,75 +216,128 @@ impl<'a> Compiler<'a> {
 
     // 最後に記録したノードまで戻り、増えた束縛だけを追加する。
     // 兄弟の関数・クロージャは同じ親ノードを参照する。
-    fn visible_name_head(&mut self) -> Option<usize> {
+    fn visible_name_head(&mut self, span: Span) -> Result<Option<usize>, Failed> {
         let mut pending_from = None;
         let mut head = None;
-        'scopes: for (scope_index, scope) in self.scopes.iter().enumerate().rev() {
-            for (local_index, (_, _, saved, _)) in scope.locals.iter().enumerate().rev() {
+        'scopes: for (scope_index, scope) in self.scopes.as_slice().iter().enumerate().rev() {
+            for (local_index, (_, _, saved, _)) in scope.locals.as_slice().iter().enumerate().rev()
+            {
                 if let Some(saved) = saved {
-                    head = Some(saved.get() - 1);
+                    head = Some(saved.get() as usize - 1);
                     break 'scopes;
                 }
                 pending_from = Some((scope_index, local_index));
             }
         }
         if let Some((first_scope, first_local)) = pending_from {
-            for (index, scope) in self.scopes.iter_mut().enumerate().skip(first_scope) {
+            let mut table_ptr = self.name_table.expect("name table initialized");
+            let region = self.region;
+            for (index, scope) in self
+                .scopes
+                .as_mut_slice()
+                .iter_mut()
+                .enumerate()
+                .skip(first_scope)
+            {
                 let start = if index == first_scope { first_local } else { 0 };
-                for (name, _, saved, _) in &mut scope.locals[start..] {
+                for (name, _, saved, _) in &mut scope.locals.as_mut_slice()[start..] {
                     debug_assert!(saved.is_none());
-                    let table = &mut self.name_table;
-                    let index = table.nodes.len();
-                    let start = table.text.len();
-                    table.text.push_str(name);
-                    table.nodes.push(NameNode {
-                        start,
-                        end: table.text.len(),
-                        parent: head,
-                    });
-                    *saved = NonZeroUsize::new(index + 1);
-                    head = Some(index);
+                    // SAFETY: コンパイル中は `Compiler` が `table_ptr` を排他的に所有している。
+                    let table = unsafe { table_ptr.as_mut() };
+                    let node_index = table.nodes.len();
+                    let text_start = table.text.len();
+                    if self
+                        .pool
+                        .extend_code_slice(region, &mut table.text, name.as_str().as_bytes())
+                        .is_none()
+                    {
+                        return Err(self.fail_oom(span));
+                    }
+                    let text_end = table.text.len();
+                    if self
+                        .pool
+                        .push_code(
+                            region,
+                            &mut table.nodes,
+                            NameNode {
+                                start: text_start,
+                                end: text_end,
+                                parent: head,
+                            },
+                        )
+                        .is_none()
+                    {
+                        return Err(self.fail_oom(span));
+                    }
+                    *saved = NonZeroU32::new(node_index as u32 + 1);
+                    head = Some(node_index);
                 }
             }
         }
-        head
+        Ok(head)
     }
 
     // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
     // 再読込で消えるモジュールの束縛は、この判定に含めない。
-    // 通常の emit を小さく保ち、診断記録の処理を分離する。
     #[cold]
-    pub(super) fn record_name_site(&mut self, id: u32, ip: usize) {
+    pub(super) fn record_name_site(
+        &mut self,
+        id: u32,
+        ip: usize,
+        span: Span,
+    ) -> Result<(), Failed> {
         let scope = self.scopes.last().unwrap();
         // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
         if scope.outer_local_count == 0 && scope.locals.is_empty() {
-            return;
+            return Ok(());
         }
-        if !needs_name_candidates(&self.syms.names[id as usize]) {
-            return;
+        let Some(sym_name) = self.syms.name(id) else {
+            return Ok(());
+        };
+        if !needs_name_candidates(sym_name) {
+            return Ok(());
         }
-        if self.shared_names.is_none() {
-            self.shared_names = Some(Rc::new(OnceCell::new()));
-        }
-        if let Some(head) = self.visible_name_head() {
-            let previous = self.chunk().names.as_ref().map(|names| names.last_site);
-            let site = self.name_table.sites.len();
-            self.name_table.sites.push(NameSite { ip, head, previous });
+        let mut table_ptr = match self.name_table {
+            Some(ptr) => ptr,
+            None => {
+                let Some(ptr) = self.pool.alloc_code_val(self.region, NameTable::default()) else {
+                    return Err(self.fail_oom(span));
+                };
+                self.name_table = Some(ptr);
+                ptr
+            }
+        };
+        if let Some(head) = self.visible_name_head(span)? {
+            let previous = self.chunk().names.map(|names| names.last_site);
+            // SAFETY: コンパイル中は `Compiler` が `table_ptr` を排他的に所有している。
+            let table = unsafe { table_ptr.as_mut() };
+            let site = table.sites.len();
+            if self
+                .pool
+                .push_code(
+                    self.region,
+                    &mut table.sites,
+                    NameSite { ip, head, previous },
+                )
+                .is_none()
+            {
+                return Err(self.fail_oom(span));
+            }
             if let Some(names) = &mut self.chunk().names {
                 names.last_site = site;
             } else {
-                let table = Rc::clone(self.shared_names.as_ref().unwrap());
                 self.chunk().names = Some(NameInfo {
-                    table,
+                    table: table_ptr,
                     last_site: site,
                 });
             }
         }
+        Ok(())
     }
 
-    pub(super) fn resolve_var(&mut self, name: &str, span: Span) -> Result<Op, Error> {
+    pub(super) fn resolve_var(&mut self, name: RawStr, span: Span) -> Result<Op, Failed> {
         let top = self.scopes.len() - 1;
-        if let Some(slot) = self.scopes[top].find_local(name) {
+        if let Some(slot) = self.scopes[top].find_local(name.as_str()) {
             return Ok(Op::GetLocal(slot));
         }
         if top > 0
@@ -212,35 +345,44 @@ impl<'a> Compiler<'a> {
         {
             return Ok(Op::GetCapture(cap_idx));
         }
-        let id = self.syms.intern(name);
+        let id = self.intern_sym(name.as_str(), span)?;
         Ok(Op::GetGlobal(id))
     }
 
     fn resolve_capture(
         &mut self,
         scope_idx: usize,
-        name: &str,
+        name: RawStr,
         span: Span,
-    ) -> Result<Option<u32>, Error> {
-        if scope_idx == 0 {
+    ) -> Result<Option<u32>, Failed> {
+        // 内側から外側へ定義元のスコープを非再帰で探し、戻りながら各中間スコープへキャプチャを伝播する。
+        let mut owner = None;
+        let mut cur = scope_idx;
+        while cur > 0 {
+            let parent = cur - 1;
+            if let Some(slot) = self.scopes[parent].find_local(name.as_str()) {
+                owner = Some((cur, slot));
+                break;
+            }
+            cur = parent;
+        }
+        let Some((first_capture_scope, slot)) = owner else {
             return Ok(None);
-        }
-        let parent = scope_idx - 1;
-        if let Some(slot) = self.scopes[parent].find_local(name) {
-            let cap_idx =
-                self.scopes[scope_idx].find_or_add_capture(name, Capture::Local(slot), span)?;
-            return Ok(Some(cap_idx));
-        }
-        if parent > 0
-            && let Some(parent_cap) = self.resolve_capture(parent, name, span)?
-        {
-            let cap_idx = self.scopes[scope_idx].find_or_add_capture(
+        };
+        let mut cap_idx = self.scopes[first_capture_scope].find_or_add_capture(
+            self.pool,
+            name,
+            Capture::Local(slot),
+            span,
+        )?;
+        for s in (first_capture_scope + 1)..=scope_idx {
+            cap_idx = self.scopes[s].find_or_add_capture(
+                self.pool,
                 name,
-                Capture::Upvalue(parent_cap),
+                Capture::Upvalue(cap_idx),
                 span,
             )?;
-            return Ok(Some(cap_idx));
         }
-        Ok(None)
+        Ok(Some(cap_idx))
     }
 }

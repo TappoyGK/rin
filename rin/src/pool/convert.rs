@@ -10,7 +10,7 @@ enum ImportTask<'a> {
 }
 
 impl Pool<'_> {
-    pub fn import(&mut self, value: &Value, span: Span) -> Result<RVal, Error> {
+    pub fn import(&mut self, value: &Value, span: Span) -> Result<RVal, ErrRecorded> {
         match value {
             Value::Void => return Ok(RVal::Void),
             Value::Int(n) => return Ok(RVal::Int(*n)),
@@ -24,7 +24,7 @@ impl Pool<'_> {
     }
 
     #[inline(never)]
-    pub(super) fn import_deep(&mut self, value: &Value, span: Span) -> Result<RVal, Error> {
+    pub(super) fn import_deep(&mut self, value: &Value, span: Span) -> Result<RVal, ErrRecorded> {
         let mut tasks = crate::work::Work::<_, 16>::with(ImportTask::Visit(value));
         let mut values = Vec::new();
         let result = (|| {
@@ -44,16 +44,15 @@ impl Pool<'_> {
                                     .copied()
                                     .find(|b| b.name() == *name)
                                     .ok_or_else(|| {
-                                        Error::runtime(
+                                        self.core.err_fmt(
                                             "host.value",
+                                            ErrorKind::Runtime,
                                             span,
-                                            format!("cannot import '{name}'"),
+                                            format_args!("cannot import '{name}'"),
                                         )
                                     })?,
                             )),
-                            Value::Str(s) => Some(RVal::Obj(
-                                self.alloc_obj(Obj::Str(Rc::from(s.as_str())), span)?,
-                            )),
+                            Value::Str(s) => Some(RVal::Obj(self.alloc_str(s.as_str(), span)?)),
                             _ => None,
                         };
                         if let Some(v) = scalar {
@@ -102,32 +101,62 @@ impl Pool<'_> {
                         ));
                     }
                     ImportTask::Finish(v, base) => {
-                        let obj = match v {
-                            Value::Array(_) => Obj::Array(values.drain(base..).collect()),
-                            Value::Tuple(_) => Obj::Tuple(values.drain(base..).collect()),
-                            Value::Struct { name, fields } => Obj::Struct {
-                                name: Rc::from(name.as_str()),
-                                fields: fields
-                                    .keys()
-                                    .map(|k| Rc::from(k.as_str()))
-                                    .zip(values.drain(base..))
-                                    .collect(),
-                            },
-                            Value::Some(_) => Obj::Some(values.pop().unwrap()),
-                            Value::Ok(_) => Obj::Ok(values.pop().unwrap()),
-                            Value::Err(_) => Obj::Err(values.pop().unwrap()),
+                        let id = match v {
+                            Value::Array(_) => {
+                                let slice: Vec<RVal> = values.drain(base..).collect();
+                                self.alloc_array_owned(&slice, span)?
+                            }
+                            Value::Tuple(_) => {
+                                let slice: Vec<RVal> = values.drain(base..).collect();
+                                self.alloc_tuple_owned(&slice, span)?
+                            }
+                            Value::Struct { name, fields } => {
+                                let field_names: Vec<&str> =
+                                    fields.keys().map(String::as_str).collect();
+                                let field_vals: Vec<RVal> = values.drain(base..).collect();
+                                let desc = match self.intern_struct_desc(
+                                    name.as_str(),
+                                    &field_names,
+                                    span,
+                                ) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        for rv in field_vals {
+                                            self.release_val(rv);
+                                        }
+                                        return Err(e);
+                                    }
+                                };
+                                self.alloc_struct_owned(desc, &field_vals, span)?
+                            }
+                            Value::Some(_) => {
+                                let inner = values.pop().unwrap();
+                                self.alloc_obj(Obj::Some(inner), span)?
+                            }
+                            Value::Ok(_) => {
+                                let inner = values.pop().unwrap();
+                                self.alloc_obj(Obj::Ok(inner), span)?
+                            }
+                            Value::Err(_) => {
+                                let inner = values.pop().unwrap();
+                                self.alloc_obj(Obj::Err(inner), span)?
+                            }
                             Value::Variant {
                                 type_name,
                                 variant,
                                 data,
-                            } => Obj::Variant {
-                                type_name: Rc::from(type_name.as_str()),
-                                variant: Rc::from(variant.as_str()),
-                                data: data.as_ref().map(|_| values.pop().unwrap()),
-                            },
+                            } => {
+                                let d = data.as_ref().map(|_| values.pop().unwrap());
+                                self.alloc_variant_owned(
+                                    type_name.as_str(),
+                                    variant.as_str(),
+                                    d,
+                                    span,
+                                )?
+                            }
                             _ => unreachable!(),
                         };
-                        values.push(RVal::Obj(self.alloc_obj(obj, span)?));
+                        values.push(RVal::Obj(id));
                     }
                 }
             }
@@ -176,7 +205,7 @@ impl Pool<'_> {
                         RVal::EmptyList => Some(Value::empty_list()),
                         RVal::Builtin(b) => Some(Value::Builtin(b.name())),
                         RVal::Obj(id) => match self.get(id) {
-                            Obj::Str(s) => Some(Value::str(s.as_ref())),
+                            Obj::Str(s) => Some(Value::str(s.as_str())),
                             Obj::Closure { proto, .. } => {
                                 Some(Value::Builtin(if proto.name.is_some() {
                                     "<defn>"
@@ -195,8 +224,9 @@ impl Pool<'_> {
                                     Obj::Array(xs) | Obj::Tuple(xs) => {
                                         tasks.extend(xs.iter().rev().copied().map(Task::Visit))
                                     }
-                                    Obj::Struct { fields, .. } => tasks
-                                        .extend(fields.values().rev().copied().map(Task::Visit)),
+                                    Obj::Struct { values: vals, .. } => {
+                                        tasks.extend(vals.iter().rev().copied().map(Task::Visit))
+                                    }
                                     Obj::Some(v) | Obj::Ok(v) | Obj::Err(v) => {
                                         tasks.push(Task::Visit(*v))
                                     }
@@ -227,14 +257,16 @@ impl Pool<'_> {
                         }
                         Obj::Array(_) => Value::array(values.drain(base..).collect()),
                         Obj::Tuple(_) => Value::tuple(values.drain(base..).collect()),
-                        Obj::Struct { name, fields } => Value::structure(
-                            name.as_ref(),
-                            fields
-                                .keys()
-                                .map(|k| k.to_string())
+                        Obj::Struct { desc, .. } => {
+                            let desc = *desc;
+                            let name = self.struct_desc_name(desc);
+                            let count = self.struct_desc_field_count(desc);
+                            let fields = (0..count)
+                                .map(|i| self.struct_desc_field_name(desc, i).to_string())
                                 .zip(values.drain(base..))
-                                .collect(),
-                        ),
+                                .collect();
+                            Value::structure(name, fields)
+                        }
                         Obj::Some(_) => Value::some(values.pop().unwrap()),
                         Obj::Ok(_) => Value::ok(values.pop().unwrap()),
                         Obj::Err(_) => Value::err(values.pop().unwrap()),
@@ -243,8 +275,8 @@ impl Pool<'_> {
                             variant,
                             data,
                         } => Value::variant(
-                            type_name.as_ref(),
-                            variant.as_ref(),
+                            type_name.as_str(),
+                            variant.as_str(),
                             data.map(|_| values.pop().unwrap()),
                         ),
                         _ => unreachable!(),
