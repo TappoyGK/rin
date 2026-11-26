@@ -185,6 +185,47 @@ impl PermArena {
         Some(ptr)
     }
 
+    /// `ptr` が末尾チャンクの直前にある場合、インプレースで `old_size` → `new_size` へ拡張する。
+    ///
+    /// # Safety
+    /// `ptr` はこの `PermArena` から `old_size` バイトで確保された有効なポインタでなければならない。
+    pub unsafe fn try_grow_in_place(
+        &mut self,
+        core: &mut AllocCore<'_>,
+        ptr: NonNull<u8>,
+        old_size: usize,
+        new_size: usize,
+    ) -> bool {
+        if self.frozen {
+            return false;
+        }
+        if new_size <= old_size {
+            return true;
+        }
+        let Some(mut tail_ptr) = self.tail else {
+            return false;
+        };
+        // SAFETY: `tail_ptr` はこのアリーナが所有する有効なチャンク。
+        let chunk = unsafe { tail_ptr.as_mut() };
+        let data_base = unsafe { chunk_data_ptr(tail_ptr) } as usize;
+        let p = ptr.as_ptr() as usize;
+        if p < data_base || p.saturating_add(old_size) != data_base + chunk.used {
+            return false;
+        }
+        let delta = new_size - old_size;
+        let Some(new_used) = chunk.used.checked_add(delta) else {
+            return false;
+        };
+        if new_used > chunk.data_cap {
+            return false;
+        }
+        if !core.charge_perm(delta) {
+            return false;
+        }
+        chunk.used = new_used;
+        true
+    }
+
     /// 確保した全チャンクを `Allocator` へ返却する。
     pub fn destroy(&mut self, core: &mut AllocCore<'_>) {
         let head = self.head.take();

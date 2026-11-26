@@ -205,15 +205,13 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     pub(super) fn build_closure(
         &mut self,
-        proto: &Rc<FnProto>,
+        proto: FnProtoPtr,
         captures: &[RVal],
         base: usize,
         span: Span,
     ) -> Result<RVal, Error> {
         if proto.captures.is_empty() {
-            let id = self
-                .pool
-                .alloc_closure_owned(Rc::clone(proto), &[], span)?;
+            let id = self.pool.alloc_closure_owned(proto, &[], span)?;
             return Ok(RVal::Obj(id));
         }
         let mark = self.pool.work.mark(&self.pool.core);
@@ -225,7 +223,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.pool.work.rewind(&mut self.pool.core, mark);
             return Err(self.work_oom(span));
         }
-        for cap in &proto.captures {
+        for cap in proto.captures.as_slice() {
             let v = match cap {
                 Capture::Local(slot) => self.stack.as_slice()[base + *slot as usize],
                 Capture::Upvalue(idx) => captures[*idx as usize],
@@ -235,7 +233,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         let res = self
             .pool
-            .alloc_closure_owned(Rc::clone(proto), cap_vals.as_slice(), span);
+            .alloc_closure_owned(proto, cap_vals.as_slice(), span);
         self.pool.work.rewind(&mut self.pool.core, mark);
         Ok(RVal::Obj(res?))
     }
@@ -290,7 +288,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         match callee {
             RVal::Obj(id) => {
                 let (proto, captures) = match self.pool.get(id) {
-                    Obj::Closure { proto, captures } => (Rc::clone(proto), *captures),
+                    Obj::Closure { proto, captures } => (*proto, *captures),
                     _ => return Err(self.call_type_error(callee, span)),
                 };
                 if proto.arity as usize != args.len() {

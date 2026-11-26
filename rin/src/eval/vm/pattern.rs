@@ -9,7 +9,7 @@ impl Runner<'_, '_> {
             (Pattern::Bool(a), RVal::Bool(b)) if *a == b => Some(None),
             (Pattern::Char(a), RVal::Char(b)) if *a == b => Some(None),
             (Pattern::Str(a), RVal::Obj(id)) => match self.pool.get(id) {
-                Obj::Str(s) if a == s.as_ref() => Some(None),
+                Obj::Str(s) if a.as_str() == s.as_str() => Some(None),
                 _ => None,
             },
             (Pattern::None, RVal::None) => Some(None),
@@ -37,11 +37,13 @@ impl Runner<'_, '_> {
                     type_name: vt,
                     variant: vv,
                     data,
-                } if type_name == vt.as_ref() && variant == vv.as_ref() => match (binding, data) {
-                    (Some(_), Some(d)) => Some(Some(*d)),
-                    (None, _) => Some(None),
-                    (Some(_), None) => None,
-                },
+                } if type_name.as_str() == vt.as_str() && variant.as_str() == vv.as_str() => {
+                    match (binding, data) {
+                        (Some(_), Some(d)) => Some(Some(*d)),
+                        (None, _) => Some(None),
+                        (Some(_), None) => None,
+                    }
+                }
                 _ => None,
             },
             _ => None,

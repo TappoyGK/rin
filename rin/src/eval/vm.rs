@@ -1,8 +1,6 @@
 //! バイトコード命令の非再帰実行ループとスタックフレーム巻き戻し処理を実装する。
 
-use std::rc::Rc;
-
-use crate::ast::OwnedPattern as Pattern;
+use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, Span, StackFrame};
@@ -311,7 +309,7 @@ impl<'a> Runner<'a, '_> {
             match callee {
                 RVal::Obj(id) => {
                     let (proto, captures) = match self.pool.get(id) {
-                        Obj::Closure { proto, captures } => (Rc::clone(proto), *captures),
+                        Obj::Closure { proto, captures } => (*proto, *captures),
                         _ => return Err(self.call_type_error(callee, span)),
                     };
                     if proto.arity as usize != argc {
@@ -472,7 +470,7 @@ impl<'a> Runner<'a, '_> {
             return Err(self.call_type_error(callee, span));
         };
         let (proto, captures) = match self.pool.get(id) {
-            Obj::Closure { proto, captures } => (Rc::clone(proto), *captures),
+            Obj::Closure { proto, captures } => (*proto, *captures),
             _ => return Err(self.call_type_error(callee, span)),
         };
         if proto.arity as usize != argc {

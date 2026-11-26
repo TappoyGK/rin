@@ -135,52 +135,6 @@ pub enum Pattern {
     Var(RawStr),
 }
 
-/// バイトコード側が一時的に所有するパターン（ステップ 4 で永続領域 `Pattern` へ統合予定）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OwnedPattern {
-    Wildcard,
-    Int(i64),
-    Bool(bool),
-    Char(char),
-    Str(String),
-    None,
-    Some(Option<String>),
-    Ok(Option<String>),
-    Err(Option<String>),
-    Variant {
-        type_name: String,
-        variant: String,
-        binding: Option<String>,
-    },
-    Var(String),
-}
-
-impl Pattern {
-    pub(crate) fn to_owned_pattern(self) -> OwnedPattern {
-        match self {
-            Pattern::Wildcard => OwnedPattern::Wildcard,
-            Pattern::Int(n) => OwnedPattern::Int(n),
-            Pattern::Bool(b) => OwnedPattern::Bool(b),
-            Pattern::Char(c) => OwnedPattern::Char(c),
-            Pattern::Str(s) => OwnedPattern::Str(s.as_str().to_owned()),
-            Pattern::None => OwnedPattern::None,
-            Pattern::Some(b) => OwnedPattern::Some(b.map(|s| s.as_str().to_owned())),
-            Pattern::Ok(b) => OwnedPattern::Ok(b.map(|s| s.as_str().to_owned())),
-            Pattern::Err(b) => OwnedPattern::Err(b.map(|s| s.as_str().to_owned())),
-            Pattern::Variant {
-                type_name,
-                variant,
-                binding,
-            } => OwnedPattern::Variant {
-                type_name: type_name.as_str().to_owned(),
-                variant: variant.as_str().to_owned(),
-                binding: binding.map(|s| s.as_str().to_owned()),
-            },
-            Pattern::Var(s) => OwnedPattern::Var(s.as_str().to_owned()),
-        }
-    }
-}
-
 pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match &expr.kind {
         ExprKind::List(xs) | ExprKind::Tuple(xs) => out.extend(xs.as_slice()),

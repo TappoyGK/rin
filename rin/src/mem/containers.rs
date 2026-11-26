@@ -83,6 +83,22 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RawVec<T> {
     }
 }
 
+impl<T> std::ops::Index<usize> for RawVec<T> {
+    type Output = T;
+
+    #[inline(always)]
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.as_slice()[index]
+    }
+}
+
+impl<T> std::ops::IndexMut<usize> for RawVec<T> {
+    #[inline(always)]
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.as_mut_slice()[index]
+    }
+}
+
 impl<T> Default for RawVec<T> {
     fn default() -> Self {
         Self::new()
@@ -268,6 +284,15 @@ impl<T> RawVec<T> {
             return Some(());
         }
         let layout = Layout::array::<T>(new_cap).ok()?;
+        if self.cap > 0 {
+            let old_size = (self.cap as usize) * std::mem::size_of::<T>();
+            // SAFETY: `self.ptr` はこの `PermArena` から `old_size` バイト確保された領域。
+            if unsafe { perm.try_grow_in_place(core, self.ptr.cast::<u8>(), old_size, layout.size()) }
+            {
+                self.cap = new_cap as u32;
+                return Some(());
+            }
+        }
         let raw = perm.alloc_raw(core, layout)?;
         let new_ptr = raw.cast::<T>();
         if self.len > 0 {
@@ -369,6 +394,25 @@ impl<T: Copy> RawVec<T> {
         }
         self.len += src.len() as u32;
         Some(())
+    }
+
+    /// ちょうど `src.len()` 要素分の領域を永続領域へ確保してコピーする（余剰容量ゼロ）。
+    pub fn from_slice_exact_perm(
+        perm: &mut PermArena,
+        core: &mut AllocCore<'_>,
+        src: &[T],
+    ) -> Option<Self> {
+        if src.is_empty() {
+            return Some(Self::new());
+        }
+        let len = u32::try_from(src.len()).ok()?;
+        let ptr = perm.alloc_copy_slice(core, src)?;
+        Some(Self {
+            ptr,
+            len,
+            cap: len,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -507,6 +551,28 @@ impl PartialEq for RawStr {
 }
 
 impl Eq for RawStr {}
+
+impl AsRef<str> for RawStr {
+    #[inline(always)]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::ops::Deref for RawStr {
+    type Target = str;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RawStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 impl std::fmt::Debug for RawStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

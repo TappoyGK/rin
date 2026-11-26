@@ -10,7 +10,7 @@ impl EnvState<'_> {
         };
         let mod_id = self.modules.ensure_module(&mut self.pool, name).map_err(with_mod)?;
         let mark = self.pool.work.mark(&self.pool.core);
-        let chunk = (|| {
+        let chunk = match (|| {
             let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)
                 .map_err(with_mod)?;
             compile_program(
@@ -22,11 +22,14 @@ impl EnvState<'_> {
                 false,
             )
             .map_err(with_mod)
-        })();
-        self.pool.work.rewind(&mut self.pool.core, mark);
-        let chunk = chunk?;
+        })() {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Err(e);
+            }
+        };
         self.modules.clear_env(mod_id, &mut self.pool);
-        let mark = self.pool.work.mark(&self.pool.core);
         let (v, export_filter) = {
             let mut runner = self.runner(Some(mod_id), false);
             match runner.run_top_chunk(&chunk) {

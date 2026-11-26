@@ -27,7 +27,7 @@ impl Runner<'_, '_> {
         {
             (
                 tp.module.map(|id| self.modules.name(id).to_owned()),
-                tp.name.clone(),
+                tp.name.map(|s| s.as_str().to_owned()),
             )
         } else {
             (None, None)
@@ -39,7 +39,7 @@ impl Runner<'_, '_> {
         };
         err.push_frame(StackFrame {
             module,
-            name: proto.name.clone(),
+            name: proto.name.map(|s| s.as_str().to_owned()),
             caller_module,
             at,
             tail_calls,

@@ -2,10 +2,9 @@
 
 use std::alloc::Layout;
 use std::ptr::NonNull;
-use std::rc::Rc;
 
 use crate::alloc::{AllocBuf, Allocator};
-use crate::bytecode::{BuiltinId, FnProto};
+use crate::bytecode::{BuiltinId, FnProtoPtr};
 use crate::error::{Error, ErrorKind, Span};
 use crate::mem::{AllocCore, MemoryConfig, ObjBlock, ObjHeap, PermArena, RawMap, RawStr, RawVec, WorkArena};
 use crate::value::Value;
@@ -16,6 +15,55 @@ mod release_tests;
 mod shallow;
 
 const CHUNK_SLOTS: usize = 256;
+
+/// コンパイル出力（`Chunk`・`FnProto`・`NameTable` 等）の配置先領域。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeRegion {
+    /// 読み込み段階：永続領域 (`PermArena`) に配置する。
+    Perm,
+    /// 凍結後の評価：作業領域 (`WorkArena`) に配置し、評価終了時に一括巻き戻しする。
+    Work,
+}
+
+impl<'a> Pool<'a> {
+    pub(crate) fn alloc_code_str(&mut self, region: CodeRegion, s: &str) -> Option<RawStr> {
+        match region {
+            CodeRegion::Perm => RawStr::from_perm(&mut self.perm, &mut self.core, s),
+            CodeRegion::Work => RawStr::from_work(&mut self.work, &mut self.core, s),
+        }
+    }
+
+    pub(crate) fn alloc_code_val<T>(&mut self, region: CodeRegion, val: T) -> Option<NonNull<T>> {
+        match region {
+            CodeRegion::Perm => self.perm.alloc_val(&mut self.core, val),
+            CodeRegion::Work => self.work.alloc_val(&mut self.core, val),
+        }
+    }
+
+    pub(crate) fn push_code<T>(
+        &mut self,
+        region: CodeRegion,
+        vec: &mut RawVec<T>,
+        val: T,
+    ) -> Option<()> {
+        match region {
+            CodeRegion::Perm => vec.push_perm(&mut self.perm, &mut self.core, val),
+            CodeRegion::Work => vec.push_work(&mut self.work, &mut self.core, val),
+        }
+    }
+
+    pub(crate) fn extend_code_slice<T: Copy>(
+        &mut self,
+        region: CodeRegion,
+        vec: &mut RawVec<T>,
+        src: &[T],
+    ) -> Option<()> {
+        match region {
+            CodeRegion::Perm => vec.extend_from_slice_perm(&mut self.perm, &mut self.core, src),
+            CodeRegion::Work => vec.extend_from_slice_work(&mut self.work, &mut self.core, src),
+        }
+    }
+}
 
 /// 内部プール内の参照カウント付きオブジェクトへのハンドル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,11 +210,6 @@ impl ObjStr {
             let bytes = std::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
             std::str::from_utf8_unchecked(bytes)
         }
-    }
-
-    #[inline]
-    pub fn as_ref(&self) -> &str {
-        self.as_str()
     }
 
     #[inline]
@@ -317,7 +360,7 @@ pub(crate) enum Obj {
     Ok(RVal),
     Err(RVal),
     Closure {
-        proto: Rc<FnProto>,
+        proto: FnProtoPtr,
         captures: ObjSlice<RVal>,
     },
     Module {
@@ -414,23 +457,12 @@ impl ChunkTable {
         Some(())
     }
 
-    fn destroy(&mut self, core: &mut AllocCore<'_>, last_chunk_len: usize) {
-        let last_idx = self.len.saturating_sub(1);
+    fn destroy(&mut self, core: &mut AllocCore<'_>, _last_chunk_len: usize) {
         for idx in 0..self.len {
-            let len = if idx == last_idx {
-                last_chunk_len
-            } else {
-                CHUNK_SLOTS
-            };
             // SAFETY: `idx < self.len` は初期化済み。
-            let mut chunk = unsafe { self.ptr.as_ptr().add(idx).read() };
+            let chunk = unsafe { self.ptr.as_ptr().add(idx).read() };
             let chunk_cap = chunk.capacity();
             let chunk_layout = Layout::array::<Slot>(chunk_cap).ok();
-            // スロット内の `Obj` は `ObjHeap` 破棄前に `drop_in_place`（`Rc<FnProto>` 用）だけ走らせる。
-            for i in 0..len {
-                // SAFETY: `0..len` は初期化済み。
-                unsafe { std::ptr::drop_in_place(chunk.as_mut_slice(len).as_mut_ptr().add(i)) };
-            }
             if let Some(layout) = chunk_layout
                 && chunk_cap > 0
             {
@@ -884,7 +916,7 @@ impl<'a> Pool<'a> {
     /// 所有権を引き受けた `captures` から `Obj::Closure` を確保する。失敗時は全捕捉値を解放する。
     pub fn alloc_closure_owned(
         &mut self,
-        proto: Rc<FnProto>,
+        proto: FnProtoPtr,
         captures: &[RVal],
         span: Span,
     ) -> Result<ObjId, Error> {

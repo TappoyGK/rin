@@ -104,7 +104,7 @@ impl Runner<'_, '_> {
                                 "'defn' is not allowed in a frozen environment",
                             ));
                         }
-                        let proto = &chunk.protos[proto_idx as usize];
+                        let proto = chunk.protos[proto_idx as usize];
                         let closure =
                             self.build_closure(proto, frame.captures.as_slice(), base, span)?;
                         self.define_top(name_id, closure, span)?;
@@ -112,7 +112,7 @@ impl Runner<'_, '_> {
                     }
                     Op::MakeClosure(proto_idx) => {
                         let span = chunk.spans[ip - 1];
-                        let proto = &chunk.protos[proto_idx as usize];
+                        let proto = chunk.protos[proto_idx as usize];
                         let closure =
                             self.build_closure(proto, frame.captures.as_slice(), base, span)?;
                         self.stack_push(closure, span)?;
@@ -161,7 +161,7 @@ impl Runner<'_, '_> {
                             self.release_stack_from(start);
                             return Err(self.work_oom(span));
                         }
-                        for (idx, fname) in desc.fields.iter().enumerate() {
+                        for (idx, fname) in desc.fields.as_slice().iter().enumerate() {
                             let val = self.stack.as_slice()[start + idx];
                             if let Some(pos) = pairs
                                 .as_slice()
@@ -306,7 +306,7 @@ impl Runner<'_, '_> {
                         for &v in updated.as_slice() {
                             self.pool.retain_val(v);
                         }
-                        for (idx, fname) in patch_desc.fields.iter().enumerate() {
+                        for (idx, fname) in patch_desc.fields.as_slice().iter().enumerate() {
                             let val = self.stack.as_slice()[val_start + idx];
                             let fpos = self
                                 .pool
@@ -545,7 +545,7 @@ impl Runner<'_, '_> {
                             {
                                 let (proto, cap) = match self.pool.get(id) {
                                     Obj::Closure { proto, captures } => {
-                                        (Rc::clone(proto), *captures)
+                                        (*proto, *captures)
                                     }
                                     _ => return Err(self.call_type_error(callee, span)),
                                 };
@@ -611,13 +611,13 @@ impl Runner<'_, '_> {
                         ));
                     }
                     Op::Jump(target) => {
-                        ip = target;
+                        ip = target as usize;
                     }
                     Op::JumpIfFalse(target) => {
                         let cond = self.stack.pop().expect("stack underflow on JumpIfFalse");
                         match cond {
                             RVal::Bool(true) => {}
-                            RVal::Bool(false) => ip = target,
+                            RVal::Bool(false) => ip = target as usize,
                             other => {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
@@ -639,7 +639,7 @@ impl Runner<'_, '_> {
                             RVal::Bool(true) => {
                                 self.stack.pop();
                             }
-                            RVal::Bool(false) => ip = target,
+                            RVal::Bool(false) => ip = target as usize,
                             other => {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
@@ -660,7 +660,7 @@ impl Runner<'_, '_> {
                             RVal::Bool(false) => {
                                 self.stack.pop();
                             }
-                            RVal::Bool(true) => ip = target,
+                            RVal::Bool(true) => ip = target as usize,
                             other => {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
@@ -684,7 +684,7 @@ impl Runner<'_, '_> {
                                 self.stack_push(bound, chunk.spans[ip - 1])?;
                             }
                             Some(None) => {}
-                            None => ip = fail_ip,
+                            None => ip = fail_ip as usize,
                         }
                     }
                     Op::MatchFail => {
@@ -734,11 +734,11 @@ impl Runner<'_, '_> {
                         }
                         let names = &chunk.export_lists[idx as usize];
                         let list = self.export_list.get_or_insert_with(RawVec::new);
-                        for sym in names {
+                        for &sym in names.as_slice() {
                             let Some(raw) = crate::mem::RawStr::from_work(
                                 &mut self.pool.work,
                                 &mut self.pool.core,
-                                sym,
+                                sym.as_str(),
                             ) else {
                                 return Err(Error::new(
                                     "eval.limits",

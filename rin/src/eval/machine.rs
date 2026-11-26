@@ -158,24 +158,20 @@ impl<'a> EnvState<'a> {
 
     pub(super) fn eval_building(&mut self, source: &str) -> Result<Value, Error> {
         let mark = self.pool.work.mark(&self.pool.core);
-        let chunk = (|| {
-            let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
-            compile_program(
+        let res = (|| {
+            let exprs =
+                parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            let chunk = compile_program(
                 exprs.as_slice(),
                 None,
                 &mut self.syms,
                 &mut self.pool,
                 &self.globals,
                 false,
-            )
-        })();
-        self.pool.work.rewind(&mut self.pool.core, mark);
-        let chunk = chunk?;
-        let mark = self.pool.work.mark(&self.pool.core);
-        let res = {
+            )?;
             let mut runner = self.runner(None, false);
             runner.run_top_chunk(&chunk)
-        };
+        })();
         self.pool.work.rewind(&mut self.pool.core, mark);
         let last = res?;
         let exported = self.pool.export(last);
@@ -276,6 +272,7 @@ impl<'a> EnvState<'a> {
         setup: &[crate::ast::Expr],
         body: &[crate::ast::Expr],
     ) -> (Vec<crate::test::CheckFailure>, Result<(), Error>) {
+        let mark = self.pool.work.mark(&self.pool.core);
         let chunk = match compile_program_parts(
             setup,
             body,
@@ -286,9 +283,11 @@ impl<'a> EnvState<'a> {
             false,
         ) {
             Ok(chunk) => chunk,
-            Err(error) => return (Vec::new(), Err(error)),
+            Err(error) => {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return (Vec::new(), Err(error));
+            }
         };
-        let mark = self.pool.work.mark(&self.pool.core);
         let (failures, result) = {
             let mut runner = self.runner(None, false);
             let result = runner

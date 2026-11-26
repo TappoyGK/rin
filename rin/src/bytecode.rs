@@ -1,13 +1,12 @@
 //! バイトコード VM の命令列、定数チャンク、関数プロトタイプ、シンボルテーブルを定義する。
 
-use std::cell::{Cell, OnceCell};
-use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::cell::Cell;
+use std::ptr::NonNull;
 
-use crate::ast::OwnedPattern as Pattern;
+use crate::ast::Pattern;
 use crate::error::Span;
 use crate::mem::{RawMap, RawStr, RawVec, fnv1a_bytes};
-use crate::pool::Pool;
+use crate::pool::{CodeRegion, Pool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -399,31 +398,63 @@ pub(crate) enum Capture {
     Upvalue(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct StructDesc {
-    pub name: Rc<str>,
-    pub fields: Vec<Rc<str>>,
+    pub name: RawStr,
+    pub fields: RawVec<RawStr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct FnProto {
-    pub name: Option<String>,
+    pub name: Option<RawStr>,
     pub module: Option<u32>,
     pub arity: u32,
     pub local_count: u32,
-    pub captures: Vec<Capture>,
+    pub captures: RawVec<Capture>,
     pub chunk: Chunk,
 }
 
+/// `PermArena` または `WorkArena` 上に配置された `FnProto` へのコピー可能な不変ポインタ。
+#[derive(Clone, Copy)]
+pub(crate) struct FnProtoPtr(NonNull<FnProto>);
+
+impl FnProtoPtr {
+    #[inline(always)]
+    pub(crate) const fn new(ptr: NonNull<FnProto>) -> Self {
+        Self(ptr)
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_ref(&self) -> &FnProto {
+        // SAFETY: `FnProto` は対応する `PermArena` / `WorkArena` が生存する間、不変かつ有効。
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl std::ops::Deref for FnProtoPtr {
+    type Target = FnProto;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl std::fmt::Debug for FnProtoPtr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_ref().fmt(f)
+    }
+}
+
 /// 名前と親ノードの添字。平坦な配列で共有し、解放も再帰させない。
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct NameNode {
     pub start: usize,
     pub end: usize,
     pub parent: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct NameSite {
     pub ip: usize,
     pub head: usize,
@@ -432,18 +463,34 @@ pub(crate) struct NameSite {
 
 /// プログラム全体で文字列・ノード・参照位置を共有する。
 /// バッファは実際に記録する情報に応じて伸長する。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct NameTable {
-    pub text: String,
-    pub nodes: Vec<NameNode>,
-    pub sites: Vec<NameSite>,
+    pub text: RawVec<u8>,
+    pub nodes: RawVec<NameNode>,
+    pub sites: RawVec<NameSite>,
 }
 
-/// チャンクは共有表への参照と最後の参照位置の添字だけを持つ。
-#[derive(Debug, Clone)]
+impl NameTable {
+    #[inline]
+    pub fn text_str(&self) -> &str {
+        // SAFETY: `text` には有効な UTF-8 文字列バイト列のみ追記する。
+        unsafe { std::str::from_utf8_unchecked(self.text.as_slice()) }
+    }
+}
+
+/// チャンクは共有表へのポインタと最後の参照位置の添字だけを持つ。
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct NameInfo {
-    pub table: Rc<OnceCell<NameTable>>,
+    pub table: NonNull<NameTable>,
     pub last_site: usize,
+}
+
+impl NameInfo {
+    #[inline(always)]
+    pub fn table_ref(&self) -> &NameTable {
+        // SAFETY: `table` はコンパイル完了後に不変となり、アリーナ生存中は有効。
+        unsafe { self.table.as_ref() }
+    }
 }
 
 struct VisibleNames<'a> {
@@ -462,26 +509,25 @@ impl<'a> Iterator for VisibleNames<'a> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Chunk {
     pub local_count: u32,
-    pub code: Vec<Op>,
-    pub spans: Vec<Span>,
-    pub tick_spans: Vec<Span>,
-    pub strings: Vec<Rc<str>>,
-    string_map: Option<BTreeMap<Rc<str>, u32>>,
-    pub floats: Vec<f64>,
-    pub structs: Vec<StructDesc>,
-    pub patterns: Vec<Pattern>,
-    pub protos: Vec<Rc<FnProto>>,
-    pub export_lists: Vec<Vec<String>>,
+    pub code: RawVec<Op>,
+    pub spans: RawVec<Span>,
+    pub tick_spans: RawVec<Span>,
+    pub strings: RawVec<RawStr>,
+    pub floats: RawVec<f64>,
+    pub structs: RawVec<StructDesc>,
+    pub patterns: RawVec<Pattern>,
+    pub protos: RawVec<FnProtoPtr>,
+    pub export_lists: RawVec<RawVec<RawStr>>,
     pub names: Option<NameInfo>,
 }
 
 impl Chunk {
     pub fn visible_names(&self, ip: usize) -> impl Iterator<Item = &str> {
         let (text, nodes, head) = self.names.as_ref().map_or(("", &[][..], None), |names| {
-            let table = names.table.get().expect("name table finalized");
+            let table = names.table_ref();
             let mut site = Some(names.last_site);
             let mut head = None;
             while let Some(index) = site {
@@ -495,72 +541,248 @@ impl Chunk {
                 }
                 site = entry.previous;
             }
-            (table.text.as_str(), table.nodes.as_slice(), head)
+            (table.text_str(), table.nodes.as_slice(), head)
         });
         VisibleNames { text, nodes, head }
     }
 
-    pub fn emit(&mut self, op: Op, span: Span) -> usize {
+    pub fn emit(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        op: Op,
+        span: Span,
+    ) -> Option<usize> {
         let idx = self.code.len();
-        self.code.push(op);
-        self.spans.push(span);
-        idx
+        pool.push_code(region, &mut self.code, op)?;
+        if pool.push_code(region, &mut self.spans, span).is_none() {
+            self.code.pop();
+            return None;
+        }
+        Some(idx)
     }
 
-    pub fn add_string(&mut self, s: &str) -> u32 {
-        if let Some(map) = &self.string_map {
-            if let Some(&idx) = map.get(s) {
-                return idx;
+    pub fn add_string(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        string_map: &mut RawMap<RawStr, u32>,
+        s: &str,
+    ) -> Option<u32> {
+        let hash = fnv1a_bytes(s.as_bytes());
+        if !string_map.is_empty() {
+            if let Some(idx) = string_map.get_by(hash, |k| k.as_str() == s) {
+                return Some(idx);
             }
-        } else {
-            if let Some(pos) = self.strings.iter().position(|x| x.as_ref() == s) {
-                return pos as u32;
-            }
+        } else if let Some(pos) = self.strings.as_slice().iter().position(|x| x.as_str() == s) {
+            return Some(pos as u32);
         }
         let idx = self.strings.len() as u32;
-        let rc: Rc<str> = Rc::from(s);
-        self.strings.push(Rc::clone(&rc));
-        if let Some(map) = &mut self.string_map {
-            map.insert(rc, idx);
+        let raw = pool.alloc_code_str(region, s)?;
+        pool.push_code(region, &mut self.strings, raw)?;
+        if !string_map.is_empty() {
+            string_map.insert_work(
+                &mut pool.work,
+                &mut pool.core,
+                hash,
+                raw,
+                idx,
+                |a, b| a.as_str() == b.as_str(),
+            )?;
         } else if self.strings.len() > 16 {
-            let mut map = BTreeMap::new();
-            for (i, st) in self.strings.iter().enumerate() {
-                map.insert(Rc::clone(st), i as u32);
+            for (i, &st) in self.strings.as_slice().iter().enumerate() {
+                let h = fnv1a_bytes(st.as_str().as_bytes());
+                string_map.insert_work(
+                    &mut pool.work,
+                    &mut pool.core,
+                    h,
+                    st,
+                    i as u32,
+                    |a, b| a.as_str() == b.as_str(),
+                )?;
             }
-            self.string_map = Some(map);
         }
-        idx
+        Some(idx)
     }
 
-    pub fn add_float(&mut self, x: f64) -> u32 {
+    pub fn add_float(&mut self, pool: &mut Pool<'_>, region: CodeRegion, x: f64) -> Option<u32> {
         let idx = self.floats.len() as u32;
-        self.floats.push(x);
-        idx
+        pool.push_code(region, &mut self.floats, x)?;
+        Some(idx)
     }
 
-    pub fn add_struct(&mut self, desc: StructDesc) -> u32 {
+    pub fn add_struct(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        desc: StructDesc,
+    ) -> Option<u32> {
         let idx = self.structs.len() as u32;
-        self.structs.push(desc);
-        idx
+        pool.push_code(region, &mut self.structs, desc)?;
+        Some(idx)
     }
 
-    pub fn add_pattern(&mut self, pat: Pattern) -> u32 {
+    pub fn add_pattern(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        pat: Pattern,
+    ) -> Option<u32> {
+        let copied = copy_pattern_to_code(pool, region, pat)?;
         let idx = self.patterns.len() as u32;
-        self.patterns.push(pat);
-        idx
+        pool.push_code(region, &mut self.patterns, copied)?;
+        Some(idx)
     }
 
-    pub fn add_proto(&mut self, proto: Rc<FnProto>) -> u32 {
+    pub fn add_proto(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        proto: FnProtoPtr,
+    ) -> Option<u32> {
         let idx = self.protos.len() as u32;
-        self.protos.push(proto);
-        idx
+        pool.push_code(region, &mut self.protos, proto)?;
+        Some(idx)
     }
 
-    pub fn add_exports(&mut self, names: Vec<String>) -> u32 {
+    pub fn add_exports(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        names: RawVec<RawStr>,
+    ) -> Option<u32> {
         let idx = self.export_lists.len() as u32;
-        self.export_lists.push(names);
-        idx
+        pool.push_code(region, &mut self.export_lists, names)?;
+        Some(idx)
     }
+
+    /// `WorkArena` 上で構築したチャンクを、`PermArena` へ余剰容量ゼロの密なスライスとしてコピーする。
+    #[inline(never)]
+    pub fn copy_to_perm(&self, pool: &mut Pool<'_>) -> Option<Self> {
+        let code = RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.code.as_slice())?;
+        let spans =
+            RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.spans.as_slice())?;
+        let tick_spans = RawVec::from_slice_exact_perm(
+            &mut pool.perm,
+            &mut pool.core,
+            self.tick_spans.as_slice(),
+        )?;
+        let floats =
+            RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.floats.as_slice())?;
+        let protos =
+            RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.protos.as_slice())?;
+
+        let strings = if self.strings.is_empty() {
+            RawVec::new()
+        } else {
+            let mut v = RawVec::new();
+            v.reserve_perm(&mut pool.perm, &mut pool.core, self.strings.len())?;
+            for &s in self.strings.as_slice() {
+                let raw = RawStr::from_perm(&mut pool.perm, &mut pool.core, s.as_str())?;
+                v.push_perm(&mut pool.perm, &mut pool.core, raw)?;
+            }
+            v
+        };
+
+        let structs = if self.structs.is_empty() {
+            RawVec::new()
+        } else {
+            let mut v = RawVec::new();
+            v.reserve_perm(&mut pool.perm, &mut pool.core, self.structs.len())?;
+            for &desc in self.structs.as_slice() {
+                let name = RawStr::from_perm(&mut pool.perm, &mut pool.core, desc.name.as_str())?;
+                let mut fields = RawVec::new();
+                if !desc.fields.is_empty() {
+                    fields.reserve_perm(&mut pool.perm, &mut pool.core, desc.fields.len())?;
+                    for &f in desc.fields.as_slice() {
+                        let fraw = RawStr::from_perm(&mut pool.perm, &mut pool.core, f.as_str())?;
+                        fields.push_perm(&mut pool.perm, &mut pool.core, fraw)?;
+                    }
+                }
+                v.push_perm(&mut pool.perm, &mut pool.core, StructDesc { name, fields })?;
+            }
+            v
+        };
+
+        let patterns = if self.patterns.is_empty() {
+            RawVec::new()
+        } else {
+            let mut v = RawVec::new();
+            v.reserve_perm(&mut pool.perm, &mut pool.core, self.patterns.len())?;
+            for &pat in self.patterns.as_slice() {
+                let copied = copy_pattern_to_code(pool, CodeRegion::Perm, pat)?;
+                v.push_perm(&mut pool.perm, &mut pool.core, copied)?;
+            }
+            v
+        };
+
+        let export_lists = if self.export_lists.is_empty() {
+            RawVec::new()
+        } else {
+            let mut v = RawVec::new();
+            v.reserve_perm(&mut pool.perm, &mut pool.core, self.export_lists.len())?;
+            for &list in self.export_lists.as_slice() {
+                let mut inner = RawVec::new();
+                if !list.is_empty() {
+                    inner.reserve_perm(&mut pool.perm, &mut pool.core, list.len())?;
+                    for &s in list.as_slice() {
+                        let raw = RawStr::from_perm(&mut pool.perm, &mut pool.core, s.as_str())?;
+                        inner.push_perm(&mut pool.perm, &mut pool.core, raw)?;
+                    }
+                }
+                v.push_perm(&mut pool.perm, &mut pool.core, inner)?;
+            }
+            v
+        };
+
+        Some(Self {
+            local_count: self.local_count,
+            code,
+            spans,
+            tick_spans,
+            strings,
+            floats,
+            structs,
+            patterns,
+            protos,
+            export_lists,
+            names: self.names,
+        })
+    }
+}
+
+fn copy_opt_str(pool: &mut Pool<'_>, region: CodeRegion, s: Option<RawStr>) -> Option<Option<RawStr>> {
+    match s {
+        None => Some(None),
+        Some(raw) => Some(Some(pool.alloc_code_str(region, raw.as_str())?)),
+    }
+}
+
+fn copy_pattern_to_code(pool: &mut Pool<'_>, region: CodeRegion, pat: Pattern) -> Option<Pattern> {
+    if region == CodeRegion::Work {
+        return Some(pat);
+    }
+    Some(match pat {
+        Pattern::Wildcard => Pattern::Wildcard,
+        Pattern::Int(n) => Pattern::Int(n),
+        Pattern::Bool(b) => Pattern::Bool(b),
+        Pattern::Char(c) => Pattern::Char(c),
+        Pattern::Str(s) => Pattern::Str(pool.alloc_code_str(region, s.as_str())?),
+        Pattern::None => Pattern::None,
+        Pattern::Some(b) => Pattern::Some(copy_opt_str(pool, region, b)?),
+        Pattern::Ok(b) => Pattern::Ok(copy_opt_str(pool, region, b)?),
+        Pattern::Err(b) => Pattern::Err(copy_opt_str(pool, region, b)?),
+        Pattern::Variant {
+            type_name,
+            variant,
+            binding,
+        } => Pattern::Variant {
+            type_name: pool.alloc_code_str(region, type_name.as_str())?,
+            variant: pool.alloc_code_str(region, variant.as_str())?,
+            binding: copy_opt_str(pool, region, binding)?,
+        },
+        Pattern::Var(s) => Pattern::Var(pool.alloc_code_str(region, s.as_str())?),
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -606,15 +828,15 @@ pub(crate) enum Op {
     TailCall(u32),
     And,
     Or,
-    Jump(usize),
-    JumpIfFalse(usize),
-    JumpIfFalsePeek(usize),
-    JumpIfTruePeek(usize),
+    Jump(u32),
+    JumpIfFalse(u32),
+    JumpIfFalsePeek(u32),
+    JumpIfTruePeek(u32),
     Pop,
 
     TryMatch {
         pat_idx: u32,
-        fail_ip: usize,
+        fail_ip: u32,
     },
     MatchFail,
 

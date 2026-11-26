@@ -7,11 +7,9 @@ mod ops;
 mod runner;
 mod vm;
 
-use std::rc::Rc;
-
 use crate::alloc::{Allocator, HeapAllocator};
 use crate::bytecode::{
-    BuiltinId, Capture, Chunk, FnProto, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name,
+    BuiltinId, Capture, Chunk, FnProtoPtr, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name,
 };
 use crate::compiler::{compile_program, compile_program_parts};
 use crate::diagnostic::{available, suggest};
@@ -611,7 +609,7 @@ pub(super) struct Runner<'a, 'p> {
 
 pub(super) enum FrameSource<'a> {
     Top(&'a Chunk),
-    Proto(Rc<FnProto>),
+    Proto(FnProtoPtr),
 }
 
 impl FrameSource<'_> {
