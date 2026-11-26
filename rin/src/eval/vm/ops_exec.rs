@@ -1,0 +1,455 @@
+//! `exec_rin_frame` から切り出した複合データ構築・アクセス・モジュール操作命令の実行補助。
+
+use std::fmt::Write;
+
+use super::*;
+use crate::mem::RawVec;
+
+impl Runner<'_, '_> {
+    pub(super) fn exec_check(&mut self, equality: bool, span: Span) -> Result<(), ErrRecorded> {
+        let expected = if equality {
+            self.stack.pop().unwrap()
+        } else {
+            RVal::Bool(true)
+        };
+        let actual = self.stack.pop().unwrap();
+        let result = if equality {
+            self.eq_cmp(true, &[actual, expected], span)
+        } else {
+            Ok(RVal::Bool(matches!(actual, RVal::Bool(true))))
+        };
+        #[cfg(feature = "std-value")]
+        if matches!(result, Ok(RVal::Bool(false))) {
+            self.check_failures.push(crate::test::CheckFailure {
+                at: span,
+                actual: self.pool.export(actual),
+                expected: self.pool.export(expected),
+                equality,
+            });
+        }
+        self.pool.release_val(actual);
+        if equality {
+            self.pool.release_val(expected);
+        }
+        result?;
+        self.stack_push(RVal::Void, span)
+    }
+
+    pub(super) fn exec_make_tuple(&mut self, n: u32, span: Span) -> Result<(), ErrRecorded> {
+        let start = self.stack.len() - n as usize;
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut tmp = RawVec::<RVal>::new();
+        if tmp
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, n as usize)
+            .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.release_stack_from(start);
+            return Err(self.work_oom(span));
+        }
+        let _ = tmp.extend_from_slice_work(
+            &mut self.pool.work,
+            &mut self.pool.core,
+            &self.stack.as_slice()[start..],
+        );
+        self.stack.truncate(start);
+        let id = self.pool.alloc_tuple_owned(tmp.as_slice(), span);
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        self.stack_push(RVal::Obj(id?), span)
+    }
+
+    pub(super) fn exec_make_struct(
+        &mut self,
+        chunk: &Chunk,
+        s_idx: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let desc = &chunk.structs[s_idx as usize];
+        let n = desc.fields.len();
+        let start = self.stack.len() - n;
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut pairs = RawVec::<(&str, RVal)>::new();
+        if pairs
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, n)
+            .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.release_stack_from(start);
+            return Err(self.work_oom(span));
+        }
+        for (idx, fname) in desc.fields.as_slice().iter().enumerate() {
+            let val = self.stack.as_slice()[start + idx];
+            let _ = pairs.push_work(
+                &mut self.pool.work,
+                &mut self.pool.core,
+                (fname.as_ref(), val),
+            );
+        }
+        self.stack.truncate(start);
+        // 安定マージソート（O(F log F)、システムヒープ不使用）
+        if super::super::sort_field_pairs_work(
+            pairs.as_mut_slice(),
+            &mut self.pool.work,
+            &mut self.pool.core,
+        )
+        .is_none()
+        {
+            for &(_, v) in pairs.as_slice() {
+                self.pool.release_val(v);
+            }
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            return Err(self.work_oom(span));
+        }
+        // ソート済み配列を 1 パスで重複排除（後ろ勝ち・旧値は解放）
+        let mut field_names = RawVec::<&str>::new();
+        let mut field_vals = RawVec::<RVal>::new();
+        if field_names
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, pairs.len())
+            .is_none()
+            || field_vals
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, pairs.len())
+                .is_none()
+        {
+            for &(_, v) in pairs.as_slice() {
+                self.pool.release_val(v);
+            }
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            return Err(self.work_oom(span));
+        }
+        for &(k, v) in pairs.as_slice() {
+            if field_names.last().copied() == Some(k) {
+                let prev = std::mem::replace(field_vals.last_mut().unwrap(), v);
+                self.pool.release_val(prev);
+            } else {
+                let _ = field_names.push_work(&mut self.pool.work, &mut self.pool.core, k);
+                let _ = field_vals.push_work(&mut self.pool.work, &mut self.pool.core, v);
+            }
+        }
+        let desc_ref =
+            match self
+                .pool
+                .intern_struct_desc(desc.name.as_ref(), field_names.as_slice(), span)
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    self.release_slice(field_vals.as_slice());
+                    self.pool.work.rewind(&mut self.pool.core, mark);
+                    return Err(e);
+                }
+            };
+        let id = self
+            .pool
+            .alloc_struct_owned(desc_ref, field_vals.as_slice(), span);
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        self.stack_push(RVal::Obj(id?), span)
+    }
+
+    pub(super) fn exec_with_check_struct(&mut self, span: Span) -> Result<(), ErrRecorded> {
+        let base_val = *self
+            .stack
+            .last()
+            .expect("stack underflow on WithCheckStruct");
+        let is_struct = matches!(
+            base_val,
+            RVal::Obj(id) if matches!(self.pool.get(id), Obj::Struct { .. })
+        );
+        if !is_struct {
+            let tname = base_val.type_name(self.pool);
+            return Err(self.err_runtime_fmt(
+                "expr.with",
+                span,
+                format_args!("'with' requires a struct, got {tname}"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn exec_with_check_field(
+        &mut self,
+        chunk: &Chunk,
+        f_idx: u32,
+        pushed_count: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let fname = &chunk.strings[f_idx as usize];
+        let base_val = self.stack.as_slice()[self.stack.len() - 1 - pushed_count as usize];
+        let RVal::Obj(id) = base_val else {
+            unreachable!();
+        };
+        let Obj::Struct { desc, .. } = *self.pool.get(id) else {
+            unreachable!();
+        };
+        if self
+            .pool
+            .struct_desc_find_field(desc, fname.as_ref())
+            .is_none()
+        {
+            return Err(self.pool.err_struct_missing_field(
+                "expr.with",
+                span,
+                desc,
+                fname.as_ref(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn exec_with_finish(
+        &mut self,
+        chunk: &Chunk,
+        s_idx: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let patch_desc = &chunk.structs[s_idx as usize];
+        let n = patch_desc.fields.len();
+        let val_start = self.stack.len() - n;
+        let base_val = self.stack.as_slice()[val_start - 1];
+        let RVal::Obj(id) = base_val else {
+            unreachable!();
+        };
+        let Obj::Struct { desc, values } = *self.pool.get(id) else {
+            unreachable!();
+        };
+        if !super::super::runner::try_charge_steps(&mut self.steps_left, values.len()) {
+            return self.step_limit_result(span);
+        }
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut updated = RawVec::<RVal>::new();
+        if updated
+            .extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, values.as_slice())
+            .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            return Err(self.work_oom(span));
+        }
+        for &v in updated.as_slice() {
+            self.pool.retain_val(v);
+        }
+        for (idx, fname) in patch_desc.fields.as_slice().iter().enumerate() {
+            let val = self.stack.as_slice()[val_start + idx];
+            let fpos = self
+                .pool
+                .struct_desc_find_field(desc, fname.as_ref())
+                .expect("WithCheckField already verified field");
+            let prev = std::mem::replace(&mut updated.as_mut_slice()[fpos], val);
+            self.pool.release_val(prev);
+        }
+        self.stack.truncate(val_start - 1);
+        self.pool.struct_desc_retain(desc);
+        self.pool.release_val(base_val);
+        let new_id = self.pool.alloc_struct_owned(desc, updated.as_slice(), span);
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        self.stack_push(RVal::Obj(new_id?), span)
+    }
+
+    pub(super) fn exec_get_field(
+        &mut self,
+        chunk: &Chunk,
+        f_idx: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let field = &chunk.strings[f_idx as usize];
+        let val = self.stack.pop().expect("stack underflow on GetField");
+        let res = match val {
+            RVal::Obj(id) => match *self.pool.get(id) {
+                Obj::Struct { desc, values } => {
+                    match self.pool.struct_desc_find_field(desc, field.as_ref()) {
+                        Some(fpos) => {
+                            let fv = values[fpos];
+                            self.pool.retain_val(fv);
+                            Ok(fv)
+                        }
+                        None => Err(self.pool.err_struct_missing_field(
+                            "expr.field",
+                            span,
+                            desc,
+                            field.as_ref(),
+                        )),
+                    }
+                }
+                Obj::Module { name, exports } => {
+                    match crate::pool::Pool::find_module_export(exports, field.as_ref()) {
+                        Some(fv) => {
+                            self.pool.retain_val(fv);
+                            Ok(fv)
+                        }
+                        None => {
+                            let out = self.pool.core.error.begin_msg(
+                                "expr.module",
+                                ErrorKind::Runtime,
+                                span,
+                            );
+                            let _ =
+                                write!(out, "module '{}' has no export '{field}'", name.as_str());
+                            write_available(
+                                out,
+                                "exports",
+                                exports.iter().map(|e| e.name.as_str()),
+                            );
+                            Err(ErrRecorded)
+                        }
+                    }
+                }
+                _ => {
+                    let tname = val.type_name(self.pool);
+                    Err(self.err_runtime_fmt(
+                        "expr.field",
+                        span,
+                        format_args!("cannot read field '{field}' on {tname}"),
+                    ))
+                }
+            },
+            other => {
+                let tname = other.type_name(self.pool);
+                Err(self.err_runtime_fmt(
+                    "expr.field",
+                    span,
+                    format_args!("cannot read field '{field}' on {tname}"),
+                ))
+            }
+        };
+        self.pool.release_val(val);
+        self.stack_push(res?, span)
+    }
+
+    pub(super) fn exec_get_index(&mut self, span: Span) -> Result<(), ErrRecorded> {
+        let idx_val = self.stack.pop().expect("stack underflow on GetIndex");
+        let list_val = self.stack.pop().expect("stack underflow on GetIndex");
+        let idx = match idx_val {
+            RVal::Int(i) => i,
+            other => {
+                let tname = other.type_name(self.pool);
+                self.pool.release_val(idx_val);
+                self.pool.release_val(list_val);
+                return Err(self.err_runtime_fmt(
+                    "expr.index",
+                    span,
+                    format_args!("index must be i64, got {tname}"),
+                ));
+            }
+        };
+        self.pool.release_val(idx_val);
+
+        let res = if let RVal::Obj(id) = list_val
+            && let Obj::Array(arr) = *self.pool.get(id)
+        {
+            if idx < 0 || (idx as usize) >= arr.len() {
+                Err(self.err_runtime_fmt(
+                    "expr.index",
+                    span,
+                    format_args!("index {idx} out of range (length {})", arr.len()),
+                ))
+            } else {
+                let v = arr[idx as usize];
+                self.pool.retain_val(v);
+                Ok(v)
+            }
+        } else if !self.is_list(list_val) {
+            let tname = list_val.type_name(self.pool);
+            Err(self.err_runtime_fmt(
+                "expr.index",
+                span,
+                format_args!("cannot index into {tname}"),
+            ))
+        } else if idx < 0 {
+            let len = self.pool.list_len(list_val);
+            Err(self.err_runtime_fmt(
+                "expr.index",
+                span,
+                format_args!("index {idx} out of range (length {len})"),
+            ))
+        } else {
+            match self.list_get(list_val, idx as usize, span) {
+                Err(e) => Err(e),
+                Ok(Some(v)) => {
+                    self.pool.retain_val(v);
+                    Ok(v)
+                }
+                Ok(None) => {
+                    let len = self.pool.list_len(list_val);
+                    Err(self.err_runtime_fmt(
+                        "expr.index",
+                        span,
+                        format_args!("index {idx} out of range (length {len})"),
+                    ))
+                }
+            }
+        };
+        self.pool.release_val(list_val);
+        self.stack_push(res?, span)
+    }
+
+    pub(super) fn exec_import(&mut self, id: u32, span: Span) -> Result<(), ErrRecorded> {
+        if self.frozen {
+            return Err(self.err_runtime(
+                "env.frozen",
+                span,
+                "'import' is not allowed in a frozen environment",
+            ));
+        }
+        let name = self.syms.name(id).unwrap_or("?");
+        let Some(mod_val) = self.modules.get_val(name) else {
+            let out = self
+                .pool
+                .core
+                .error
+                .begin_msg("expr.module", ErrorKind::Runtime, span);
+            let _ = write!(out, "unknown module '{name}'");
+            write_suggest(out, name, self.modules.loaded_names());
+            return Err(ErrRecorded);
+        };
+        self.pool.retain_val(mod_val);
+        self.define_top(id, mod_val, span)?;
+        self.stack_push(RVal::Void, span)
+    }
+
+    pub(super) fn exec_export(
+        &mut self,
+        chunk: &Chunk,
+        idx: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        if self.frozen {
+            return Err(self.err_runtime(
+                "env.frozen",
+                span,
+                "'export' is not allowed in a frozen environment",
+            ));
+        }
+        if self.active_module.is_none() {
+            return Err(self.err_runtime(
+                "expr.module",
+                span,
+                "'export' can only be used inside a module",
+            ));
+        }
+        let names = &chunk.export_lists[idx as usize];
+        let list = self.export_list.get_or_insert_with(RawVec::new);
+        for &sym in names.as_slice() {
+            let Some(raw) = crate::mem::RawStr::from_work(
+                &mut self.pool.work,
+                &mut self.pool.core,
+                sym.as_str(),
+            ) else {
+                return Err(self.pool.core.err_str(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    span,
+                    "memory limit exceeded",
+                ));
+            };
+            if list
+                .push_work(&mut self.pool.work, &mut self.pool.core, raw)
+                .is_none()
+            {
+                return Err(self.pool.core.err_str(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    span,
+                    "memory limit exceeded",
+                ));
+            }
+        }
+        self.stack_push(RVal::Void, span)
+    }
+}

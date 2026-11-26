@@ -7,8 +7,10 @@
 //! - [`WorkArena`]（作業領域）: AST・コンパイラ一時データ・値スタック・呼び出しフレーム。評価終了時に先頭へ巻き戻す。
 
 mod arena;
-mod containers;
 mod obj_heap;
+mod raw_map;
+mod raw_str;
+mod raw_vec;
 #[cfg(test)]
 mod tests;
 
@@ -22,9 +24,13 @@ use crate::error::{ErrRecorded, ErrorKind, ErrorStore, Span};
 #[allow(unused_imports)]
 pub(crate) use arena::{PermArena, WorkArena, WorkMark};
 #[allow(unused_imports)]
-pub(crate) use containers::{RawMap, RawStr, RawVec, WorkBox, fnv1a_bytes, fnv1a_u32};
-#[allow(unused_imports)]
 pub(crate) use obj_heap::{ObjBlock, ObjHeap};
+#[allow(unused_imports)]
+pub(crate) use raw_map::{RawMap, fnv1a_bytes, fnv1a_u32};
+#[allow(unused_imports)]
+pub(crate) use raw_str::RawStr;
+#[allow(unused_imports)]
+pub(crate) use raw_vec::{RawVec, WorkBox};
 
 /// 領域が `Allocator` から取得するチャンクの大きさ設定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

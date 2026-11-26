@@ -1,4 +1,4 @@
-use super::containers::fnv1a_bytes;
+use super::fnv1a_bytes;
 use super::*;
 use crate::alloc::{ArenaAllocator, HeapAllocator};
 

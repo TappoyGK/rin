@@ -1,6 +1,7 @@
 //! バイトコード VM の実行環境 `Builder`・`Machine` と `Runner` を定義する。
 
 mod builtins;
+mod host_api;
 mod host_vals;
 mod machine;
 mod modules;
