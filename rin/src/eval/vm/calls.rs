@@ -10,8 +10,9 @@ impl Runner<'_, '_> {
         b: BuiltinId,
         arg_start: usize,
         argc: usize,
-        span: Span,
-    ) -> Result<RVal, ErrRecorded> {
+        chunk: &crate::bytecode::Chunk,
+        op_ip: usize,
+    ) -> Result<(), ErrRecorded> {
         if argc == 2 {
             let s = self.stack.as_slice();
             let lhs = s[arg_start];
@@ -27,19 +28,26 @@ impl Runner<'_, '_> {
                     BuiltinId::Ge => (Some(RVal::Bool(x >= y)), 1),
                     BuiltinId::Eq => (Some(RVal::Bool(x == y)), 2),
                     BuiltinId::Ne => (Some(RVal::Bool(x != y)), 2),
-                    _ => return self.call_builtin_slow(b, arg_start, argc, span),
+                    _ => return self.call_builtin_slow(b, arg_start, argc, chunk.spans[op_ip]),
                 };
-                self.stack.truncate(arg_start - 1);
                 if !self.try_charge(cost) {
-                    return self.step_limit_result(span);
+                    self.stack.truncate(arg_start - 1);
+                    return self.step_limit_result(chunk.spans[op_ip]);
                 }
                 return match value {
-                    Some(value) => Ok(value),
-                    None => self.integer_overflow(span),
+                    Some(value) => {
+                        self.stack.as_mut_slice()[arg_start - 1] = value;
+                        self.stack.truncate(arg_start);
+                        Ok(())
+                    }
+                    None => {
+                        self.stack.truncate(arg_start - 1);
+                        self.integer_overflow(chunk.spans[op_ip]).map(|_| ())
+                    }
                 };
             }
         }
-        self.call_builtin_slow(b, arg_start, argc, span)
+        self.call_builtin_slow(b, arg_start, argc, chunk.spans[op_ip])
     }
 
     #[inline(never)]
@@ -49,12 +57,12 @@ impl Runner<'_, '_> {
         arg_start: usize,
         argc: usize,
         span: Span,
-    ) -> Result<RVal, ErrRecorded> {
+    ) -> Result<(), ErrRecorded> {
         if !self.try_charge(1) {
             self.release_stack_from(arg_start - 1);
             return self.step_limit_result(span);
         }
-        if argc == 2 {
+        let res = if argc == 2 {
             let s = self.stack.as_slice();
             let lhs = s[arg_start];
             let rhs = s[arg_start + 1];
@@ -62,52 +70,55 @@ impl Runner<'_, '_> {
             let res = self.apply_non_callback_builtin(b, &[lhs, rhs], span);
             self.pool.release_val(lhs);
             self.pool.release_val(rhs);
-            return res;
-        }
-        match argc {
-            0 => {
-                self.stack.truncate(arg_start - 1);
-                self.apply_non_callback_builtin(b, &[], span)
-            }
-            1 => {
-                let a = self.stack.as_slice()[arg_start];
-                self.stack.truncate(arg_start - 1);
-                let res = self.apply_non_callback_builtin(b, &[a], span);
-                self.pool.release_val(a);
-                res
-            }
-            3 => {
-                let s = self.stack.as_slice();
-                let a = s[arg_start];
-                let c = s[arg_start + 1];
-                let d = s[arg_start + 2];
-                self.stack.truncate(arg_start - 1);
-                let res = self.apply_non_callback_builtin(b, &[a, c, d], span);
-                self.pool.release_val(a);
-                self.pool.release_val(c);
-                self.pool.release_val(d);
-                res
-            }
-            _ => {
-                let mark = self.pool.work.mark(&self.pool.core);
-                let mut args = RawVec::<RVal>::new();
-                if args
-                    .reserve_work(&mut self.pool.work, &mut self.pool.core, argc)
-                    .is_none()
-                {
-                    self.pool.work.rewind(&mut self.pool.core, mark);
-                    self.release_stack_from(arg_start - 1);
-                    return Err(self.work_oom(span));
+            res
+        } else {
+            match argc {
+                0 => {
+                    self.stack.truncate(arg_start - 1);
+                    self.apply_non_callback_builtin(b, &[], span)
                 }
-                let src = &self.stack.as_slice()[arg_start..arg_start + argc];
-                let _ = args.extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, src);
-                self.stack.truncate(arg_start - 1);
-                let res = self.apply_non_callback_builtin(b, args.as_slice(), span);
-                self.release_slice(args.as_slice());
-                self.pool.work.rewind(&mut self.pool.core, mark);
-                res
+                1 => {
+                    let a = self.stack.as_slice()[arg_start];
+                    self.stack.truncate(arg_start - 1);
+                    let res = self.apply_non_callback_builtin(b, &[a], span);
+                    self.pool.release_val(a);
+                    res
+                }
+                3 => {
+                    let s = self.stack.as_slice();
+                    let a = s[arg_start];
+                    let c = s[arg_start + 1];
+                    let d = s[arg_start + 2];
+                    self.stack.truncate(arg_start - 1);
+                    let res = self.apply_non_callback_builtin(b, &[a, c, d], span);
+                    self.pool.release_val(a);
+                    self.pool.release_val(c);
+                    self.pool.release_val(d);
+                    res
+                }
+                _ => {
+                    let mark = self.pool.work.mark(&self.pool.core);
+                    let mut args = RawVec::<RVal>::new();
+                    if args
+                        .reserve_work(&mut self.pool.work, &mut self.pool.core, argc)
+                        .is_none()
+                    {
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        self.release_stack_from(arg_start - 1);
+                        return Err(self.work_oom(span));
+                    }
+                    let src = &self.stack.as_slice()[arg_start..arg_start + argc];
+                    let _ =
+                        args.extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, src);
+                    self.stack.truncate(arg_start - 1);
+                    let res = self.apply_non_callback_builtin(b, args.as_slice(), span);
+                    self.release_slice(args.as_slice());
+                    self.pool.work.rewind(&mut self.pool.core, mark);
+                    res
+                }
             }
-        }
+        }?;
+        self.stack_push(res, span)
     }
 }
 

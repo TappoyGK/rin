@@ -38,7 +38,7 @@ impl Runner<'_, '_> {
         let (at, from_host, via_builtin) = match orig {
             CallOrigin::Rin(s) => (s, false, None),
             CallOrigin::Host => (Span::default(), true, None),
-            CallOrigin::Builtin { name, at } => (at, false, Some(name)),
+            CallOrigin::Builtin { id, at } => (at, false, Some(id.name())),
         };
         self.pool.core.error.push_frame(FrameInput {
             module,

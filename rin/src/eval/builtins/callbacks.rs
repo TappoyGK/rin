@@ -29,6 +29,19 @@ impl CallbackKind {
         }
     }
 
+    pub(in crate::eval) const fn builtin_id(self) -> BuiltinId {
+        match self {
+            Self::Find => BuiltinId::Find,
+            Self::Any => BuiltinId::Any,
+            Self::All => BuiltinId::All,
+            Self::Map => BuiltinId::Map,
+            Self::Filter => BuiltinId::Filter,
+            Self::FlatMap => BuiltinId::FlatMap,
+            Self::Fold => BuiltinId::Fold,
+            Self::SortBy => BuiltinId::SortBy,
+        }
+    }
+
     pub(in crate::eval) const fn name(self) -> &'static str {
         match self {
             Self::Find => "find",
@@ -43,14 +56,15 @@ impl CallbackKind {
     }
 }
 
-/// 高階組み込み関数の実行状態を保持するフレーム（作業領域のフレームスタックに積む）。
+/// 高階組み込み関数の実行状態を保持するフレーム（作業領域上の `WorkBox` へ格納する）。
 pub(in crate::eval) struct BuiltinFrame {
     pub(in crate::eval) kind: CallbackKind,
     pub(in crate::eval) span: Span,
     pub(in crate::eval) callback: RVal,
     pub(in crate::eval) items_owner: RVal,
-    pub(in crate::eval) items: RawVec<RVal>,
-    pub(in crate::eval) idx: usize,
+    /// 現在処理中の要素（`head`）と、次のコンスセル（`next_cur`）。
+    pub(in crate::eval) cur_item: RVal,
+    pub(in crate::eval) next_cur: RVal,
     pub(in crate::eval) out: RawVec<RVal>,
     pub(in crate::eval) keyed: RawVec<(RVal, RVal)>,
     pub(in crate::eval) acc: RVal,
@@ -64,15 +78,15 @@ pub(in crate::eval) enum CallbackStep {
         args: [RVal; 2],
         argc: usize,
         span: Span,
-        builtin_name: &'static str,
+        builtin_id: BuiltinId,
     },
 }
 
 impl Runner<'_, '_> {
-    pub(in crate::eval) fn cleanup_builtin_frame(&mut self, mut frame: BuiltinFrame) {
-        self.pool.release_val(frame.callback);
-        self.pool.release_val(frame.items_owner);
-        self.pool.release_val(frame.acc);
+    pub(in crate::eval) fn cleanup_builtin_frame(&mut self, frame: &mut BuiltinFrame) {
+        self.pool.release_val(std::mem::replace(&mut frame.callback, RVal::Void));
+        self.pool.release_val(std::mem::replace(&mut frame.items_owner, RVal::Void));
+        self.pool.release_val(std::mem::replace(&mut frame.acc, RVal::Void));
         self.release_slice(frame.out.as_slice());
         frame.out.clear();
         for &(k, _) in frame.keyed.as_slice() {
@@ -122,9 +136,12 @@ impl Runner<'_, '_> {
         };
 
         self.expect_list(kind.name(), list_v, span)?;
-        let items = self.list_to_work_vec(list_v, span)?;
+        let list_len = self.pool.list_len(list_v);
+        if !self.try_charge(list_len) {
+            return self.step_limit_result(span);
+        }
 
-        if items.is_empty() {
+        let RVal::Obj(first_id) = list_v else {
             let done = match kind {
                 CallbackKind::Find => RVal::None,
                 CallbackKind::Any => RVal::Bool(false),
@@ -140,7 +157,15 @@ impl Runner<'_, '_> {
                 }
             };
             return Ok((None, CallbackStep::Done(done)));
-        }
+        };
+        let Obj::Cons {
+            head: first_x,
+            tail: next_cur,
+            ..
+        } = *self.pool.get(first_id)
+        else {
+            unreachable!();
+        };
 
         self.pool.retain_val(f);
         self.pool.retain_val(list_v);
@@ -151,7 +176,6 @@ impl Runner<'_, '_> {
             RVal::Void
         };
 
-        let first_x = items.as_slice()[0];
         let (call_args, call_argc) = match kind {
             CallbackKind::Fold => ([acc, first_x], 2),
             _ => ([first_x, RVal::Void], 1),
@@ -162,8 +186,8 @@ impl Runner<'_, '_> {
             span,
             callback: f,
             items_owner: list_v,
-            items,
-            idx: 0,
+            cur_item: first_x,
+            next_cur,
             out: RawVec::new(),
             keyed: RawVec::new(),
             acc,
@@ -174,18 +198,19 @@ impl Runner<'_, '_> {
             args: call_args,
             argc: call_argc,
             span,
-            builtin_name: kind.name(),
+            builtin_id: kind.builtin_id(),
         };
         Ok((Some(frame), step))
     }
 
+    #[inline(always)]
     pub(in crate::eval) fn resume_callback_builtin(
         &mut self,
         frame: &mut BuiltinFrame,
         result: RVal,
     ) -> Result<CallbackStep, ErrRecorded> {
         let span = frame.span;
-        let x = frame.items.as_slice()[frame.idx];
+        let x = frame.cur_item;
         match frame.kind {
             CallbackKind::Find => match result {
                 RVal::Bool(true) => {
@@ -310,9 +335,17 @@ impl Runner<'_, '_> {
             }
         }
 
-        frame.idx += 1;
-        if frame.idx < frame.items.len() {
-            let next_x = frame.items.as_slice()[frame.idx];
+        if let RVal::Obj(next_id) = frame.next_cur {
+            let Obj::Cons {
+                head: next_x,
+                tail: next_tail,
+                ..
+            } = *self.pool.get(next_id)
+            else {
+                unreachable!();
+            };
+            frame.cur_item = next_x;
+            frame.next_cur = next_tail;
             let (call_args, call_argc) = match frame.kind {
                 CallbackKind::Fold => ([frame.acc, next_x], 2),
                 _ => ([next_x, RVal::Void], 1),
@@ -322,7 +355,7 @@ impl Runner<'_, '_> {
                 args: call_args,
                 argc: call_argc,
                 span,
-                builtin_name: frame.kind.name(),
+                builtin_id: frame.kind.builtin_id(),
             });
         }
 

@@ -76,6 +76,30 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
+    pub(super) fn stack_push_at(
+        &mut self,
+        val: RVal,
+        chunk: &Chunk,
+        op_ip: usize,
+    ) -> Result<(), ErrRecorded> {
+        if self
+            .stack
+            .push_work(&mut self.pool.work, &mut self.pool.core, val)
+            .is_none()
+        {
+            return Err(self.stack_push_oom(val, chunk, op_ip));
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn stack_push_oom(&mut self, val: RVal, chunk: &Chunk, op_ip: usize) -> ErrRecorded {
+        self.pool.release_val(val);
+        self.work_oom(chunk.spans[op_ip])
+    }
+
+    #[inline(always)]
     pub(super) fn stack_push(&mut self, val: RVal, span: Span) -> Result<(), ErrRecorded> {
         if self
             .stack
@@ -125,6 +149,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         Ok(())
     }
 
+    #[inline(always)]
     pub(super) fn enter_depth(&mut self, span: Span) -> Result<(), ErrRecorded> {
         self.depth += 1;
         if self.depth > self.limits.depth {
@@ -145,14 +170,15 @@ impl<'a, 'p> Runner<'a, 'p> {
         )
     }
 
+    #[inline(always)]
     pub(super) fn leave_depth(&mut self) {
         self.depth = self.depth.saturating_sub(1);
     }
 
+    #[inline(always)]
     pub(super) fn lookup_global(
         &mut self,
         id: u32,
-        span: Span,
         chunk: &Chunk,
         ip: usize,
     ) -> Result<RVal, ErrRecorded> {
@@ -179,12 +205,13 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.pool.retain_val(v);
             return Ok(v);
         }
-        Err(self.unknown_name(id, span, chunk, ip))
+        Err(self.unknown_name(id, chunk, ip))
     }
 
     #[cold]
     #[inline(never)]
-    fn unknown_name(&mut self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> ErrRecorded {
+    fn unknown_name(&mut self, id: u32, chunk: &Chunk, ip: usize) -> ErrRecorded {
+        let span = chunk.spans[ip];
         let name = self.syms.name(id).unwrap_or("?");
         let eval_names = self
             .active_module
@@ -255,17 +282,24 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
+    #[inline(always)]
     pub(super) fn release_stack_from(&mut self, from: usize) {
-        while self.stack.len() > from {
-            let v = self.stack.pop().unwrap();
-            self.pool.release_val(v);
+        let len = self.stack.len();
+        if len > from {
+            let mut i = len;
+            while i > from {
+                i -= 1;
+                let v = self.stack.as_slice()[i];
+                self.pool.release_val(v);
+            }
+            self.stack.truncate(from);
         }
     }
 
     pub(super) fn build_closure(
         &mut self,
         proto: FnProtoPtr,
-        captures: &[RVal],
+        captures: *const RVal,
         base: usize,
         span: Span,
     ) -> Result<RVal, ErrRecorded> {
@@ -289,7 +323,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         for cap in proto.captures.as_slice() {
             let v = match cap {
                 Capture::Local(slot) => self.stack.as_slice()[base + *slot as usize],
-                Capture::Upvalue(idx) => captures[*idx as usize],
+                // SAFETY: コンパイラが `idx < 親クロージャの captures.len()` を保証する。
+                Capture::Upvalue(idx) => unsafe { *captures.add(*idx as usize) },
             };
             self.pool.retain_val(v);
             let _ = cap_vals.push_work(&mut self.pool.work, &mut self.pool.core, v);
@@ -304,20 +339,17 @@ impl<'a, 'p> Runner<'a, 'p> {
     pub(super) fn run_top_chunk(&mut self, chunk: &Chunk) -> Result<RVal, ErrRecorded> {
         let base = self.stack.len();
         self.stack_resize_void(base + chunk.local_count as usize, Span::default())?;
-        let frame = super::vm::RinFrame {
-            entry: FrameSource::Top(chunk),
-            tail_source: None,
-            tail_calls: 0,
-            captures: ObjSlice::empty(),
+        let frame = super::vm::RinFrame::new(
+            FrameSource::Top(chunk),
+            ObjSlice::empty(),
             base,
-            frame_stack_start: base + chunk.local_count as usize,
-            ip: 0,
-            origin: None,
-            caller_module: self.active_module,
-            prev_active_module: self.active_module,
-            cleanup_stack_to: base,
-            counted_depth: false,
-        };
+            base + chunk.local_count as usize,
+            None,
+            self.active_module,
+            self.active_module,
+            base,
+            false,
+        );
         self.run_vm(frame)
     }
 
@@ -384,20 +416,17 @@ impl<'a, 'p> Runner<'a, 'p> {
                     base + local_count,
                     RVal::Void,
                 );
-                let frame = super::vm::RinFrame {
-                    entry: FrameSource::Proto(proto),
-                    tail_source: None,
-                    tail_calls: 0,
+                let frame = super::vm::RinFrame::new(
+                    FrameSource::Proto(proto),
                     captures,
                     base,
-                    frame_stack_start: base + local_count,
-                    ip: 0,
-                    origin: Some(origin),
-                    caller_module: prev_mod,
-                    prev_active_module: prev_mod,
-                    cleanup_stack_to: base,
-                    counted_depth: true,
-                };
+                    base + local_count,
+                    Some(origin),
+                    prev_mod,
+                    prev_mod,
+                    base,
+                    true,
+                );
                 self.run_vm(frame)
             }
             RVal::Builtin(b) => {

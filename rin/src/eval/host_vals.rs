@@ -24,11 +24,12 @@ impl EnvState<'_> {
     pub(super) fn val_list(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>> {
         let mut tail = RVal::EmptyList;
         for &item in items.iter().rev() {
-            self.pool.retain_val(item.0);
             match self.pool.alloc_cons(item.0, tail, Span::default()) {
-                Ok(rv) => tail = rv,
+                Ok(rv) => {
+                    self.pool.release_val(tail);
+                    tail = rv;
+                }
                 Err(_) => {
-                    self.pool.release_val(item.0);
                     self.pool.release_val(tail);
                     return Err(self.pool.core.error.as_ref());
                 }

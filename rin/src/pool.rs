@@ -546,30 +546,34 @@ impl<'a> Pool<'a> {
         )
     }
 
+    #[inline(always)]
     fn slot_ref(&self, id: ObjId) -> &Slot {
         let idx = id.0 as usize;
-        let chunk_idx = idx / CHUNK_SLOTS;
-        let in_chunk = idx % CHUNK_SLOTS;
-        let len = if chunk_idx + 1 == self.chunks.len() {
-            self.last_chunk_len
-        } else {
-            CHUNK_SLOTS
-        };
-        &self.chunks.as_slice()[chunk_idx].as_slice(len)[in_chunk]
+        let chunk_idx = idx >> 8;
+        let in_chunk = idx & (CHUNK_SLOTS - 1);
+        debug_assert!(chunk_idx < self.chunks.len());
+        // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
+        unsafe { &*self.chunks.as_slice().get_unchecked(chunk_idx).as_ptr().add(in_chunk) }
     }
 
+    #[inline(always)]
     fn slot_mut(&mut self, id: ObjId) -> &mut Slot {
         let idx = id.0 as usize;
-        let chunk_idx = idx / CHUNK_SLOTS;
-        let in_chunk = idx % CHUNK_SLOTS;
-        let len = if chunk_idx + 1 == self.chunks.len() {
-            self.last_chunk_len
-        } else {
-            CHUNK_SLOTS
-        };
-        &mut self.chunks.as_mut_slice()[chunk_idx].as_mut_slice(len)[in_chunk]
+        let chunk_idx = idx >> 8;
+        let in_chunk = idx & (CHUNK_SLOTS - 1);
+        debug_assert!(chunk_idx < self.chunks.len());
+        // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
+        unsafe {
+            &mut *self
+                .chunks
+                .as_mut_slice()
+                .get_unchecked_mut(chunk_idx)
+                .as_mut_ptr()
+                .add(in_chunk)
+        }
     }
 
+    #[inline(always)]
     pub fn get(&self, id: ObjId) -> &Obj {
         match self.slot_ref(id) {
             Slot::Live { obj, .. } => obj,
@@ -577,20 +581,29 @@ impl<'a> Pool<'a> {
         }
     }
 
+    #[inline(always)]
     pub fn retain_val(&mut self, val: RVal) {
         if let RVal::Obj(id) = val {
             self.retain(id);
         }
     }
 
+    #[inline(always)]
     pub fn retain(&mut self, id: ObjId) {
         if let Slot::Live { rc, .. } = self.slot_mut(id) {
             *rc += 1;
         }
     }
 
+    #[inline(always)]
     pub fn release_val(&mut self, val: RVal) {
         if let RVal::Obj(id) = val {
+            if let Slot::Live { rc, .. } = self.slot_mut(id)
+                && *rc > 1
+            {
+                *rc -= 1;
+                return;
+            }
             self.release(id);
         }
     }

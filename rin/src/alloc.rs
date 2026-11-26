@@ -111,6 +111,17 @@ impl<T> AllocBuf<T> {
         self.ptr
     }
 
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    #[inline(always)]
     pub fn as_slice(&self, len: usize) -> &[T] {
         debug_assert!(len <= self.cap);
         if len == 0 {
@@ -118,15 +129,6 @@ impl<T> AllocBuf<T> {
         }
         // SAFETY: `len <= self.cap` かつ `0..len` が初期化済み。
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), len) }
-    }
-
-    pub fn as_mut_slice(&mut self, len: usize) -> &mut [T] {
-        debug_assert!(len <= self.cap);
-        if len == 0 {
-            return &mut [];
-        }
-        // SAFETY: `len <= self.cap` かつ `0..len` が初期化済み。
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), len) }
     }
 
     /// 未初期化の位置 `idx` に `value` を書き込む。

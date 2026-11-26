@@ -80,7 +80,7 @@ impl EnvSlots {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get(&self, id: u32) -> Option<RVal> {
         if id >= STATIC_SYM_COUNT {
             self.dynamic
@@ -376,7 +376,7 @@ fn set_slot_perm(
 pub(super) enum CallOrigin {
     Rin(Span),
     Host,
-    Builtin { name: &'static str, at: Span },
+    Builtin { id: BuiltinId, at: Span },
 }
 
 pub(super) const INLINE_EVAL_BINDINGS: usize = 8;
@@ -478,153 +478,8 @@ pub(super) struct EvalBindings<'a> {
     pub(super) names: EvalBindingNames<'a>,
 }
 
-pub(super) const INLINE_VALUE_STACK: usize = 16;
-
-/// 浅い評価では作業領域を確保せず、16 要素を超えたときだけ `WorkArena` へ移す値スタック。
-pub(super) struct ValueStack {
-    inline: [RVal; INLINE_VALUE_STACK],
-    overflow: crate::mem::RawVec<RVal>,
-    len: usize,
-    spilled: bool,
-}
-
-impl ValueStack {
-    pub(super) const fn new() -> Self {
-        Self {
-            inline: [RVal::Void; INLINE_VALUE_STACK],
-            overflow: crate::mem::RawVec::new(),
-            len: 0,
-            spilled: false,
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn len(&self) -> usize {
-        if self.spilled {
-            self.overflow.len()
-        } else {
-            self.len
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn as_slice(&self) -> &[RVal] {
-        if self.spilled {
-            self.overflow.as_slice()
-        } else {
-            &self.inline[..self.len]
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn as_mut_slice(&mut self) -> &mut [RVal] {
-        if self.spilled {
-            self.overflow.as_mut_slice()
-        } else {
-            &mut self.inline[..self.len]
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn last(&self) -> Option<&RVal> {
-        self.as_slice().last()
-    }
-
-    #[inline(always)]
-    pub(super) fn pop(&mut self) -> Option<RVal> {
-        if self.spilled {
-            self.overflow.pop()
-        } else if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            Some(self.inline[self.len])
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn truncate(&mut self, new_len: usize) {
-        if self.spilled {
-            self.overflow.truncate(new_len);
-        } else if new_len < self.len {
-            self.len = new_len;
-        }
-    }
-
-    fn spill(
-        &mut self,
-        work: &mut crate::mem::WorkArena,
-        core: &mut crate::mem::AllocCore<'_>,
-        additional: usize,
-    ) -> Option<()> {
-        debug_assert!(!self.spilled);
-        let needed = self.len.checked_add(additional)?;
-        self.overflow.reserve_work(work, core, needed)?;
-        self.overflow
-            .extend_from_slice_work(work, core, &self.inline[..self.len])?;
-        self.spilled = true;
-        Some(())
-    }
-
-    #[inline(always)]
-    pub(super) fn push_work(
-        &mut self,
-        work: &mut crate::mem::WorkArena,
-        core: &mut crate::mem::AllocCore<'_>,
-        val: RVal,
-    ) -> Option<()> {
-        if !self.spilled {
-            if self.len < INLINE_VALUE_STACK {
-                self.inline[self.len] = val;
-                self.len += 1;
-                return Some(());
-            }
-            self.spill(work, core, 1)?;
-        }
-        self.overflow.push_work(work, core, val)
-    }
-
-    #[inline(always)]
-    pub(super) fn reserve_work(
-        &mut self,
-        work: &mut crate::mem::WorkArena,
-        core: &mut crate::mem::AllocCore<'_>,
-        additional: usize,
-    ) -> Option<()> {
-        if !self.spilled {
-            if self.len.saturating_add(additional) <= INLINE_VALUE_STACK {
-                return Some(());
-            }
-            return self.spill(work, core, additional);
-        }
-        self.overflow.reserve_work(work, core, additional)
-    }
-
-    #[inline(always)]
-    pub(super) fn resize_work(
-        &mut self,
-        work: &mut crate::mem::WorkArena,
-        core: &mut crate::mem::AllocCore<'_>,
-        new_len: usize,
-        fill: RVal,
-    ) -> Option<()> {
-        if !self.spilled {
-            if new_len <= self.len {
-                self.len = new_len;
-                return Some(());
-            }
-            if new_len <= INLINE_VALUE_STACK {
-                for slot in &mut self.inline[self.len..new_len] {
-                    *slot = fill;
-                }
-                self.len = new_len;
-                return Some(());
-            }
-            self.spill(work, core, new_len - self.len)?;
-        }
-        self.overflow.resize_work(work, core, new_len, fill)
-    }
-}
+/// 作業領域 (`WorkArena`) 上の値スタック（`if spilled` 分岐を無くしホットパスを最速化する）。
+pub(super) type ValueStack = crate::mem::RawVec<RVal>;
 
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
@@ -643,6 +498,7 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) check_failures: Vec<crate::test::CheckFailure>,
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum FrameSource<'a> {
     Top(&'a Chunk),
     Proto(FnProtoPtr),

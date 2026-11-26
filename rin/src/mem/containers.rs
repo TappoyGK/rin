@@ -26,6 +26,17 @@ impl<T> WorkBox<T> {
         Some(Self { ptr })
     }
 
+    pub fn try_new(work: &mut WorkArena, core: &mut AllocCore<'_>, val: T) -> Result<Self, T> {
+        let layout = Layout::new::<T>();
+        let Some(raw) = work.alloc_raw(core, layout) else {
+            return Err(val);
+        };
+        let ptr = raw.cast::<T>();
+        // SAFETY: `raw` は `T` のアラインメントとサイズで確保済み。
+        unsafe { ptr.as_ptr().write(val) };
+        Ok(Self { ptr })
+    }
+
     #[inline]
     pub fn as_ref(&self) -> &T {
         // SAFETY: `WorkArena` が巻き戻されるまで有効。
@@ -148,7 +159,7 @@ impl<T> RawVec<T> {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len as usize) }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -158,31 +169,37 @@ impl<T> RawVec<T> {
         Some(unsafe { self.ptr.as_ptr().add(self.len as usize).read() })
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn last(&self) -> Option<&T> {
         self.as_slice().last()
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn last_mut(&mut self) -> Option<&mut T> {
         self.as_mut_slice().last_mut()
     }
 
+    #[inline]
     pub fn clear(&mut self) {
-        for i in 0..self.len as usize {
-            // SAFETY: `0..self.len` は初期化済み。
-            unsafe { std::ptr::drop_in_place(self.ptr.as_ptr().add(i)) };
+        if std::mem::needs_drop::<T>() {
+            for i in 0..self.len as usize {
+                // SAFETY: `0..self.len` は初期化済み。
+                unsafe { std::ptr::drop_in_place(self.ptr.as_ptr().add(i)) };
+            }
         }
         self.len = 0;
     }
 
+    #[inline(always)]
     pub fn truncate(&mut self, new_len: usize) {
         if new_len >= self.len as usize {
             return;
         }
-        for i in new_len..self.len as usize {
-            // SAFETY: `new_len..self.len` は初期化済み。
-            unsafe { std::ptr::drop_in_place(self.ptr.as_ptr().add(i)) };
+        if std::mem::needs_drop::<T>() {
+            for i in new_len..self.len as usize {
+                // SAFETY: `new_len..self.len` は初期化済み。
+                unsafe { std::ptr::drop_in_place(self.ptr.as_ptr().add(i)) };
+            }
         }
         self.len = new_len as u32;
     }
@@ -197,6 +214,7 @@ impl<T> RawVec<T> {
     }
 
     /// 作業領域上に領域を拡張して末尾へ要素を追加する。
+    #[inline(always)]
     pub fn push_work(
         &mut self,
         work: &mut WorkArena,
@@ -204,7 +222,7 @@ impl<T> RawVec<T> {
         value: T,
     ) -> Option<()> {
         if self.len == self.cap {
-            self.reserve_work(work, core, 1)?;
+            self.reserve_work_slow(work, core, 1)?;
         }
         // SAFETY: `self.len < self.cap`。
         unsafe { self.ptr.as_ptr().add(self.len as usize).write(value) };
@@ -212,6 +230,7 @@ impl<T> RawVec<T> {
         Some(())
     }
 
+    #[inline(always)]
     pub fn reserve_work(
         &mut self,
         work: &mut WorkArena,
@@ -221,6 +240,17 @@ impl<T> RawVec<T> {
         if (self.cap as usize).saturating_sub(self.len as usize) >= additional {
             return Some(());
         }
+        self.reserve_work_slow(work, core, additional)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn reserve_work_slow(
+        &mut self,
+        work: &mut WorkArena,
+        core: &mut AllocCore<'_>,
+        additional: usize,
+    ) -> Option<()> {
         let new_cap = Self::next_cap(self.len as usize, additional)?;
         if std::mem::size_of::<T>() == 0 {
             self.cap = new_cap as u32;
@@ -314,6 +344,7 @@ impl<T> RawVec<T> {
 }
 
 impl<T: Copy> RawVec<T> {
+    #[inline(always)]
     pub fn resize_work(
         &mut self,
         work: &mut WorkArena,

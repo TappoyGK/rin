@@ -4,14 +4,14 @@ use super::*;
 use crate::mem::RawVec;
 
 impl Runner<'_, '_> {
-    #[inline(always)]
-    pub(super) fn exec_rin_frame(
+    pub(super) fn exec_rin_frame<'f>(
         &mut self,
-        frame: &mut RinFrame<'_>,
+        frame: &mut RinFrame<'f>,
+        frames: &mut RawVec<FrameEntry<'f>>,
     ) -> Result<FrameAction, ErrRecorded> {
-        let mut ip = frame.ip;
-        let mut frame_stack_start = frame.frame_stack_start;
-        let base = frame.base;
+        let mut ip = frame.ip as usize;
+        let mut frame_stack_start = frame.frame_stack_start as usize;
+        let mut base = frame.base as usize;
         'frame: loop {
             let chunk = frame.tail_source.as_ref().unwrap_or(&frame.entry).chunk();
             while ip < chunk.code.len() {
@@ -50,24 +50,25 @@ impl Runner<'_, '_> {
                         result?;
                         self.stack_push(RVal::Void, span)?;
                     }
-                    Op::Void => self.stack_push(RVal::Void, chunk.spans[ip - 1])?,
-                    Op::Int(n) => self.stack_push(RVal::Int(n), chunk.spans[ip - 1])?,
-                    Op::Float(idx) => self
-                        .stack_push(RVal::Float(chunk.floats[idx as usize]), chunk.spans[ip - 1])?,
-                    Op::Bool(b) => self.stack_push(RVal::Bool(b), chunk.spans[ip - 1])?,
-                    Op::Char(c) => self.stack_push(RVal::Char(c), chunk.spans[ip - 1])?,
+                    Op::Void => self.stack_push_at(RVal::Void, chunk, ip - 1)?,
+                    Op::Int(n) => self.stack_push_at(RVal::Int(n), chunk, ip - 1)?,
+                    Op::Float(idx) => {
+                        self.stack_push_at(RVal::Float(chunk.floats[idx as usize]), chunk, ip - 1)?
+                    }
+                    Op::Bool(b) => self.stack_push_at(RVal::Bool(b), chunk, ip - 1)?,
+                    Op::Char(c) => self.stack_push_at(RVal::Char(c), chunk, ip - 1)?,
                     Op::Str(idx) => {
                         let s = &chunk.strings[idx as usize];
                         let span = chunk.spans[ip - 1];
                         let id = self.pool.alloc_str(s.as_ref(), span)?;
                         self.stack_push(RVal::Obj(id), span)?;
                     }
-                    Op::None => self.stack_push(RVal::None, chunk.spans[ip - 1])?,
-                    Op::EmptyList => self.stack_push(RVal::EmptyList, chunk.spans[ip - 1])?,
+                    Op::None => self.stack_push_at(RVal::None, chunk, ip - 1)?,
+                    Op::EmptyList => self.stack_push_at(RVal::EmptyList, chunk, ip - 1)?,
                     Op::GetLocal(slot) => {
                         let v = self.stack.as_slice()[base + slot as usize];
                         self.pool.retain_val(v);
-                        self.stack_push(v, chunk.spans[ip - 1])?;
+                        self.stack_push_at(v, chunk, ip - 1)?;
                     }
                     Op::SetLocal(slot) => {
                         let v = self.stack.pop().expect("stack underflow on SetLocal");
@@ -78,14 +79,13 @@ impl Runner<'_, '_> {
                         self.pool.release_val(old);
                     }
                     Op::GetCapture(idx) => {
-                        let v = frame.captures[idx as usize];
+                        let v = frame.capture_at(idx as usize);
                         self.pool.retain_val(v);
-                        self.stack_push(v, chunk.spans[ip - 1])?;
+                        self.stack_push_at(v, chunk, ip - 1)?;
                     }
                     Op::GetGlobal(id) => {
-                        let span = chunk.spans[ip - 1];
-                        let v = self.lookup_global(id, span, chunk, ip - 1)?;
-                        self.stack_push(v, span)?;
+                        let v = self.lookup_global(id, chunk, ip - 1)?;
+                        self.stack_push_at(v, chunk, ip - 1)?;
                     }
                     Op::DefGlobal(id) => {
                         let span = chunk.spans[ip - 1];
@@ -111,16 +111,14 @@ impl Runner<'_, '_> {
                             ));
                         }
                         let proto = chunk.protos[proto_idx as usize];
-                        let closure =
-                            self.build_closure(proto, frame.captures.as_slice(), base, span)?;
+                        let closure = self.build_closure(proto, frame.captures, base, span)?;
                         self.define_top(name_id, closure, span)?;
                         self.stack_push(RVal::Void, span)?;
                     }
                     Op::MakeClosure(proto_idx) => {
                         let span = chunk.spans[ip - 1];
                         let proto = chunk.protos[proto_idx as usize];
-                        let closure =
-                            self.build_closure(proto, frame.captures.as_slice(), base, span)?;
+                        let closure = self.build_closure(proto, frame.captures, base, span)?;
                         self.stack_push(closure, span)?;
                     }
                     Op::MakeList(n) => {
@@ -502,31 +500,74 @@ impl Runner<'_, '_> {
                         self.stack_push(res?, span)?;
                     }
                     Op::Call(argc) => {
-                        let span = chunk.spans[ip - 1];
                         let argc = argc as usize;
                         let arg_start = self.stack.len() - argc;
                         let callee = self.stack.as_slice()[arg_start - 1];
                         if let RVal::Builtin(b) = callee {
                             if b.has_callback() {
-                                frame.ip = ip;
-                                frame.frame_stack_start = frame_stack_start;
+                                frame.ip = ip as u32;
+                                frame.frame_stack_start = frame_stack_start as u32;
                                 return Ok(FrameAction::CallCallbackBuiltin {
                                     builtin: b,
                                     arg_start,
                                     argc,
-                                    span,
+                                    span: chunk.spans[ip - 1],
                                 });
                             }
-                            let res = self.call_builtin_from_stack(b, arg_start, argc, span)?;
-                            self.stack_push(res, span)?;
+                            self.call_builtin_from_stack(b, arg_start, argc, chunk, ip - 1)?;
                         } else {
-                            frame.ip = ip;
-                            frame.frame_stack_start = frame_stack_start;
-                            return Ok(FrameAction::CallClosure {
-                                arg_start,
-                                argc,
-                                span,
-                            });
+                            let span = chunk.spans[ip - 1];
+                            let RVal::Obj(id) = callee else {
+                                return Err(self.call_type_error(callee, span));
+                            };
+                            let (proto, captures) = match self.pool.get(id) {
+                                Obj::Closure { proto, captures } => (*proto, *captures),
+                                _ => return Err(self.call_type_error(callee, span)),
+                            };
+                            if proto.arity as usize != argc {
+                                return Err(self.call_arity_error(proto.arity, argc, span));
+                            }
+                            self.enter_depth(span)?;
+                            let child_base = arg_start;
+                            let child_locals = proto.local_count as usize;
+                            if child_locals > argc
+                                && let Err(e) =
+                                    self.stack_resize_void(child_base + child_locals, span)
+                            {
+                                self.leave_depth();
+                                return Err(e);
+                            }
+                            if frames
+                                .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
+                                .is_none()
+                            {
+                                self.leave_depth();
+                                self.release_stack_from(arg_start - 1);
+                                return Err(self.work_oom(span));
+                            }
+                            let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
+                            frame.ip = ip as u32;
+                            frame.frame_stack_start = frame_stack_start as u32;
+                            let _ = frames.push_work(
+                                &mut self.pool.work,
+                                &mut self.pool.core,
+                                FrameEntry::Rin(*frame),
+                            );
+                            *frame = RinFrame::new(
+                                FrameSource::Proto(proto),
+                                captures,
+                                child_base,
+                                child_base + child_locals,
+                                Some(CallOrigin::Rin(span)),
+                                prev_mod,
+                                prev_mod,
+                                arg_start - 1,
+                                true,
+                            );
+                            base = child_base;
+                            frame_stack_start = child_base + child_locals;
+                            ip = 0;
+                            continue 'frame;
                         }
                     }
                     Op::TailCall(argc) => {
@@ -567,15 +608,15 @@ impl Runner<'_, '_> {
                                 self.active_module = proto.module;
                                 frame.tail_source = Some(FrameSource::Proto(proto));
                                 frame.tail_calls += 1;
-                                frame.captures = cap;
+                                frame.captures = cap.as_slice().as_ptr();
                                 frame_stack_start = self.stack.len();
                                 ip = 0;
                                 continue 'frame;
                             }
                             RVal::Builtin(b) => {
                                 if b.has_callback() {
-                                    frame.ip = ip;
-                                    frame.frame_stack_start = frame_stack_start;
+                                    frame.ip = ip as u32;
+                                    frame.frame_stack_start = frame_stack_start as u32;
                                     return Ok(FrameAction::CallCallbackBuiltin {
                                         builtin: b,
                                         arg_start,
@@ -583,8 +624,7 @@ impl Runner<'_, '_> {
                                         span,
                                     });
                                 }
-                                let res = self.call_builtin_from_stack(b, arg_start, argc, span)?;
-                                self.stack_push(res, span)?;
+                                self.call_builtin_from_stack(b, arg_start, argc, chunk, ip - 1)?;
                             }
                             _ => return Err(self.call_type_error(callee, span)),
                         }
@@ -757,10 +797,115 @@ impl Runner<'_, '_> {
                     }
                 }
             }
-            break;
+            debug_assert_eq!(self.stack.len(), frame_stack_start + 1);
+            let value = self.stack.pop().unwrap_or(RVal::Void);
+            // 高階組み込みコールバックの高速再利用経路：
+            // 親が `Builtin` で、末尾呼び出しによる差し替えがない場合は、
+            // 同じクロージャの次要素呼び出しをフレーム生成・深度増減なしでそのまま継続する。
+            if frame.tail_source.is_none()
+                && matches!(frames.last(), Some(FrameEntry::Builtin(_)))
+                && let FrameSource::Proto(proto) = frame.entry
+            {
+                let Some(FrameEntry::Builtin(bframe)) = frames.last_mut() else {
+                    unreachable!();
+                };
+                let step = match self.resume_callback_builtin(bframe.as_mut(), value) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.active_module = frame.prev_mod();
+                        if frame.counted_depth {
+                            self.leave_depth();
+                        }
+                        self.release_stack_from(frame.cleanup_stack_to as usize);
+                        return Ok(FrameAction::FailUnwound(e));
+                    }
+                };
+                match step {
+                    CallbackStep::Invoke {
+                        callee,
+                        args,
+                        argc,
+                        ..
+                    } if matches!(
+                        (callee, bframe.callback),
+                        (RVal::Obj(a), RVal::Obj(b)) if a == b
+                    ) => {
+                        // 同じクロージャへの次要素呼び出し：
+                        // スタック長を変えず、引数・ローカルスロットをその場で入れ替えて `ip = 0` へ戻る。
+                        let local_count = proto.local_count as usize;
+                        for i in 0..argc {
+                            let new_v = args[i];
+                            self.pool.retain_val(new_v);
+                            let old_v = std::mem::replace(&mut self.stack.as_mut_slice()[base + i], new_v);
+                            self.pool.release_val(old_v);
+                        }
+                        for i in argc..local_count {
+                            let old_v =
+                                std::mem::replace(&mut self.stack.as_mut_slice()[base + i], RVal::Void);
+                            self.pool.release_val(old_v);
+                        }
+                        ip = 0;
+                        continue 'frame;
+                    }
+                    CallbackStep::Done(done_val) => {
+                        self.active_module = frame.prev_mod();
+                        if frame.counted_depth {
+                            self.leave_depth();
+                        }
+                        self.release_stack_from(frame.cleanup_stack_to as usize);
+                        let Some(FrameEntry::Builtin(mut done_frame)) = frames.pop() else {
+                            unreachable!();
+                        };
+                        let cleanup_to = done_frame.cleanup_stack_to;
+                        self.cleanup_builtin_frame(done_frame.as_mut());
+                        self.release_stack_from(cleanup_to);
+                        match frames.last() {
+                            None => return Ok(FrameAction::Done(done_val)),
+                            Some(FrameEntry::Rin(_)) => {
+                                let Some(FrameEntry::Rin(parent)) = frames.pop() else {
+                                    unreachable!();
+                                };
+                                *frame = parent;
+                                self.stack_push(done_val, Span::default())?;
+                                base = frame.base as usize;
+                                frame_stack_start = frame.frame_stack_start as usize;
+                                ip = frame.ip as usize;
+                                continue 'frame;
+                            }
+                            Some(FrameEntry::Builtin(_)) => {
+                                return Ok(FrameAction::ReturnToBuiltin(done_val));
+                            }
+                        }
+                    }
+                    CallbackStep::Invoke { .. } => {
+                        // コールバック先が異なる場合（通常は起きない）は通常の `drive_frames` へ返す。
+                        unreachable!("callback target changed within same BuiltinFrame");
+                    }
+                }
+            }
+
+            self.active_module = frame.prev_mod();
+            if frame.counted_depth {
+                self.leave_depth();
+            }
+            self.release_stack_from(frame.cleanup_stack_to as usize);
+            match frames.last() {
+                None => return Ok(FrameAction::Done(value)),
+                Some(FrameEntry::Rin(_)) => {
+                    let Some(FrameEntry::Rin(parent)) = frames.pop() else {
+                        unreachable!();
+                    };
+                    *frame = parent;
+                    self.stack_push(value, Span::default())?;
+                    base = frame.base as usize;
+                    frame_stack_start = frame.frame_stack_start as usize;
+                    ip = frame.ip as usize;
+                    continue 'frame;
+                }
+                Some(FrameEntry::Builtin(_)) => {
+                    return Ok(FrameAction::ReturnToBuiltin(value));
+                }
+            }
         }
-        debug_assert_eq!(self.stack.len(), frame_stack_start + 1);
-        let value = self.stack.pop().unwrap_or(RVal::Void);
-        Ok(FrameAction::Return(value))
     }
 }

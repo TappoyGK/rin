@@ -4,7 +4,7 @@ use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
 use crate::diagnostic::{write_available, write_suggest};
 use crate::error::{ErrRecorded, ErrorKind, Span};
-use crate::mem::RawVec;
+use crate::mem::{RawVec, WorkBox};
 use crate::pool::{Obj, ObjSlice, RVal};
 
 use super::builtins::callbacks::{BuiltinFrame, CallbackStep};
@@ -15,40 +15,130 @@ mod execute;
 mod pattern;
 mod trace;
 
-/// 作業領域の呼び出しフレームスタックに積む Rin フレーム。
+/// 作業領域の呼び出しフレームスタックに積む軽量 Rin フレーム（64 バイト級）。
+#[derive(Clone, Copy)]
 pub(super) struct RinFrame<'a> {
     pub(super) entry: FrameSource<'a>,
     pub(super) tail_source: Option<FrameSource<'a>>,
-    pub(super) tail_calls: usize,
-    pub(super) captures: ObjSlice<RVal>,
-    pub(super) base: usize,
-    pub(super) frame_stack_start: usize,
-    pub(super) ip: usize,
-    pub(super) origin: Option<CallOrigin>,
-    pub(super) caller_module: Option<u32>,
-    pub(super) prev_active_module: Option<u32>,
-    pub(super) cleanup_stack_to: usize,
+    pub(super) captures: *const RVal,
+    pub(super) tail_calls: u32,
+    pub(super) base: u32,
+    pub(super) frame_stack_start: u32,
+    pub(super) ip: u32,
+    pub(super) cleanup_stack_to: u32,
+    pub(super) origin_line: u32,
+    pub(super) origin_col: u32,
+    pub(super) caller_module: u32,
+    pub(super) prev_active_module: u32,
+    pub(super) origin_kind: u8,
+    pub(super) origin_builtin: u8,
     pub(super) counted_depth: bool,
+}
+
+const NO_MODULE: u32 = u32::MAX;
+const ORIGIN_NONE: u8 = 0;
+const ORIGIN_RIN: u8 = 1;
+const ORIGIN_HOST: u8 = 2;
+const ORIGIN_BUILTIN: u8 = 3;
+
+impl<'a> RinFrame<'a> {
+    #[inline(always)]
+    pub(super) fn new(
+        entry: FrameSource<'a>,
+        captures: ObjSlice<RVal>,
+        base: usize,
+        frame_stack_start: usize,
+        origin: Option<CallOrigin>,
+        caller_module: Option<u32>,
+        prev_active_module: Option<u32>,
+        cleanup_stack_to: usize,
+        counted_depth: bool,
+    ) -> Self {
+        let (origin_kind, origin_line, origin_col, origin_builtin) = match origin {
+            None => (ORIGIN_NONE, 0, 0, 0),
+            Some(CallOrigin::Rin(s)) => (ORIGIN_RIN, s.line as u32, s.col as u32, 0),
+            Some(CallOrigin::Host) => (ORIGIN_HOST, 0, 0, 0),
+            Some(CallOrigin::Builtin { id, at }) => {
+                (ORIGIN_BUILTIN, at.line as u32, at.col as u32, id as u8)
+            }
+        };
+        Self {
+            entry,
+            tail_source: None,
+            captures: captures.as_slice().as_ptr(),
+            tail_calls: 0,
+            base: base as u32,
+            frame_stack_start: frame_stack_start as u32,
+            ip: 0,
+            cleanup_stack_to: cleanup_stack_to as u32,
+            origin_line,
+            origin_col,
+            caller_module: caller_module.unwrap_or(NO_MODULE),
+            prev_active_module: prev_active_module.unwrap_or(NO_MODULE),
+            origin_kind,
+            origin_builtin,
+            counted_depth,
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn prev_mod(&self) -> Option<u32> {
+        (self.prev_active_module != NO_MODULE).then_some(self.prev_active_module)
+    }
+
+    #[inline(always)]
+    pub(super) fn caller_mod(&self) -> Option<u32> {
+        (self.caller_module != NO_MODULE).then_some(self.caller_module)
+    }
+
+    #[inline(always)]
+    pub(super) fn origin(&self) -> Option<CallOrigin> {
+        match self.origin_kind {
+            ORIGIN_RIN => Some(CallOrigin::Rin(Span {
+                line: self.origin_line as usize,
+                col: self.origin_col as usize,
+            })),
+            ORIGIN_HOST => Some(CallOrigin::Host),
+            ORIGIN_BUILTIN => Some(CallOrigin::Builtin {
+                id: BuiltinId::ALL[self.origin_builtin as usize],
+                at: Span {
+                    line: self.origin_line as usize,
+                    col: self.origin_col as usize,
+                },
+            }),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn capture_at(&self, idx: usize) -> RVal {
+        // SAFETY: コンパイラが `idx < proto.captures.len()` を保証しており、
+        // `captures` はクロージャ生存中（スタック上または親フレーム保持中）有効。
+        unsafe { *self.captures.add(idx) }
+    }
 }
 
 pub(super) enum FrameEntry<'a> {
     Rin(RinFrame<'a>),
-    Builtin(BuiltinFrame),
+    Builtin(WorkBox<BuiltinFrame>),
 }
 
 pub(super) enum FrameAction {
-    Return(RVal),
-    CallClosure {
-        arg_start: usize,
-        argc: usize,
-        span: Span,
-    },
+    Done(RVal),
+    ReturnToBuiltin(RVal),
+    FailUnwound(ErrRecorded),
     CallCallbackBuiltin {
         builtin: BuiltinId,
         arg_start: usize,
         argc: usize,
         span: Span,
     },
+}
+
+enum DeliverAction<'f> {
+    Done(RVal),
+    ResumeTopRin,
+    EnterRin(RinFrame<'f>),
 }
 
 impl<'a> Runner<'a, '_> {
@@ -73,27 +163,42 @@ impl<'a> Runner<'a, '_> {
             return Ok(v);
         };
         let mut frames = RawVec::<FrameEntry<'_>>::new();
+        let mut boxed = match WorkBox::try_new(&mut self.pool.work, &mut self.pool.core, bframe) {
+            Ok(b) => b,
+            Err(mut bf) => {
+                let cleanup_to = bf.cleanup_stack_to;
+                self.cleanup_builtin_frame(&mut bf);
+                self.release_stack_from(cleanup_to);
+                return Err(self.work_oom(span));
+            }
+        };
         if frames
             .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
             .is_none()
         {
-            let cleanup_to = bframe.cleanup_stack_to;
-            self.cleanup_builtin_frame(bframe);
+            let cleanup_to = boxed.cleanup_stack_to;
+            self.cleanup_builtin_frame(boxed.as_mut());
             self.release_stack_from(cleanup_to);
             return Err(self.work_oom(span));
         }
         let _ = frames.push_work(
             &mut self.pool.work,
             &mut self.pool.core,
-            FrameEntry::Builtin(bframe),
+            FrameEntry::Builtin(boxed),
         );
-        if let Err(err) = self.handle_callback_step(&mut frames, step) {
-            return Err(self.unwind_frames(frames, err));
+        let next = match self.handle_callback_step(&mut frames, step) {
+            Ok(n) => n,
+            Err(err) => return Err(self.unwind_frames(frames, err)),
+        };
+        match next {
+            Some(child) => self.drive_frames(frames, Some(child)),
+            None => {
+                if frames.is_empty() {
+                    return Ok(self.stack.pop().unwrap_or(RVal::Void));
+                }
+                self.drive_frames(frames, None)
+            }
         }
-        if frames.is_empty() {
-            return Ok(self.stack.pop().unwrap_or(RVal::Void));
-        }
-        self.drive_frames(frames, None)
     }
 
     fn drive_frames<'f>(
@@ -110,14 +215,14 @@ impl<'a> Runner<'a, '_> {
                 };
                 match top {
                     FrameEntry::Rin(f) => f,
-                    FrameEntry::Builtin(bframe) => {
-                        self.cleanup_builtin_frame(bframe);
+                    FrameEntry::Builtin(mut bframe) => {
+                        self.cleanup_builtin_frame(bframe.as_mut());
                         unreachable!("BuiltinFrame cannot be top without a return value");
                     }
                 }
             };
 
-            let action = match self.exec_rin_frame(&mut frame) {
+            let action = match self.exec_rin_frame(&mut frame, &mut frames) {
                 Ok(a) => a,
                 Err(err) => {
                     self.unwind_rin_frame(frame);
@@ -125,40 +230,13 @@ impl<'a> Runner<'a, '_> {
                 }
             };
             match action {
-                FrameAction::Return(val) => {
-                    self.active_module = frame.prev_active_module;
-                    if frame.counted_depth {
-                        self.leave_depth();
-                    }
-                    self.release_stack_from(frame.cleanup_stack_to);
-                    if let Some(done) = self.deliver_return(&mut frames, val)? {
-                        return Ok(done);
-                    }
-                }
-                FrameAction::CallClosure {
-                    arg_start,
-                    argc,
-                    span,
-                } => {
-                    if frames
-                        .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
-                        .is_none()
-                    {
-                        let err = self.work_oom(span);
-                        self.unwind_rin_frame(frame);
-                        return Err(self.unwind_frames(frames, err));
-                    }
-                    let _ = frames.push_work(
-                        &mut self.pool.work,
-                        &mut self.pool.core,
-                        FrameEntry::Rin(frame),
-                    );
-                    if let Err(err) =
-                        self.push_closure_call_from_stack(&mut frames, arg_start, argc, span)
-                    {
-                        return Err(self.unwind_frames(frames, err));
-                    }
-                }
+                FrameAction::Done(val) => return Ok(val),
+                FrameAction::FailUnwound(err) => return Err(self.unwind_frames(frames, err)),
+                FrameAction::ReturnToBuiltin(val) => match self.deliver_to_builtin(&mut frames, val)? {
+                    DeliverAction::Done(done) => return Ok(done),
+                    DeliverAction::ResumeTopRin => {}
+                    DeliverAction::EnterRin(child) => current = Some(child),
+                },
                 FrameAction::CallCallbackBuiltin {
                     builtin,
                     arg_start,
@@ -178,24 +256,25 @@ impl<'a> Runner<'a, '_> {
                         &mut self.pool.core,
                         FrameEntry::Rin(frame),
                     );
-                    if let Err(err) =
-                        self.start_callback_from_stack(&mut frames, builtin, arg_start, argc, span)
-                    {
-                        return Err(self.unwind_frames(frames, err));
+                    match self.start_callback_from_stack(&mut frames, builtin, arg_start, argc, span) {
+                        Ok(Some(child)) => current = Some(child),
+                        Ok(None) => {}
+                        Err(err) => return Err(self.unwind_frames(frames, err)),
                     }
                 }
             }
         }
     }
 
-    fn deliver_return<'f>(
+    #[inline(always)]
+    fn deliver_to_builtin<'f>(
         &mut self,
         frames: &mut RawVec<FrameEntry<'f>>,
         mut val: RVal,
-    ) -> Result<Option<RVal>, ErrRecorded> {
+    ) -> Result<DeliverAction<'f>, ErrRecorded> {
         loop {
             let Some(parent) = frames.last_mut() else {
-                return Ok(Some(val));
+                return Ok(DeliverAction::Done(val));
             };
             match parent {
                 FrameEntry::Rin(_) => {
@@ -203,10 +282,10 @@ impl<'a> Runner<'a, '_> {
                         let taken = std::mem::take(frames);
                         return Err(self.unwind_frames(taken, err));
                     }
-                    return Ok(None);
+                    return Ok(DeliverAction::ResumeTopRin);
                 }
                 FrameEntry::Builtin(bframe) => {
-                    let step = match self.resume_callback_builtin(bframe, val) {
+                    let step = match self.resume_callback_builtin(bframe.as_mut(), val) {
                         Ok(s) => s,
                         Err(err) => {
                             let taken = std::mem::take(frames);
@@ -215,23 +294,23 @@ impl<'a> Runner<'a, '_> {
                     };
                     match step {
                         CallbackStep::Done(done_val) => {
-                            let Some(FrameEntry::Builtin(done_frame)) = frames.pop() else {
+                            let Some(FrameEntry::Builtin(mut done_frame)) = frames.pop() else {
                                 unreachable!();
                             };
                             let cleanup_to = done_frame.cleanup_stack_to;
-                            self.cleanup_builtin_frame(done_frame);
+                            self.cleanup_builtin_frame(done_frame.as_mut());
                             self.release_stack_from(cleanup_to);
                             val = done_val;
-                            // さらに親フレームへ返す。
                         }
                         CallbackStep::Invoke { .. } => {
-                            if let Err(err) = self.handle_callback_step(frames, step) {
-                                let taken = std::mem::take(frames);
-                                return Err(self.unwind_frames(taken, err));
+                            match self.handle_callback_step(frames, step) {
+                                Ok(Some(child)) => return Ok(DeliverAction::EnterRin(child)),
+                                Ok(None) => return Ok(DeliverAction::ResumeTopRin),
+                                Err(err) => {
+                                    let taken = std::mem::take(frames);
+                                    return Err(self.unwind_frames(taken, err));
+                                }
                             }
-                            // もし同期組み込み呼び出しで `Done` まで進んだ場合は `handle_callback_step` 内で処理されない
-                            // （`handle_callback_step` が次の `RinFrame` を積むか、ここで同期処理する）。
-                            return Ok(None);
                         }
                     }
                 }
@@ -246,30 +325,36 @@ impl<'a> Runner<'a, '_> {
         arg_start: usize,
         argc: usize,
         span: Span,
-    ) -> Result<(), ErrRecorded> {
+    ) -> Result<Option<RinFrame<'f>>, ErrRecorded> {
         if !self.try_charge(1) {
             self.release_stack_from(arg_start - 1);
             return self.step_limit_result(span);
         }
-        // スタック上の引数をコピーして取り出し、スタックを `arg_start - 1` まで戻す。
-        let mark = self.pool.work.mark(&self.pool.core);
-        let mut args_buf = RawVec::<RVal>::new();
-        if args_buf
-            .reserve_work(&mut self.pool.work, &mut self.pool.core, argc)
-            .is_none()
-        {
-            self.pool.work.rewind(&mut self.pool.core, mark);
-            self.release_stack_from(arg_start - 1);
-            return Err(self.work_oom(span));
-        }
-        let src = &self.stack.as_slice()[arg_start..arg_start + argc];
-        let _ = args_buf.extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, src);
-        self.stack.truncate(arg_start - 1);
+        // 引数は最大 3 個（fold）なので、3 個以下はスタック配列でコピーして WorkArena 確保を避ける。
+        let mut stack_args = [RVal::Void; 4];
+        let mut overflow_args = RawVec::<RVal>::new();
+        let args_slice: &[RVal] = if argc <= stack_args.len() {
+            let src = &self.stack.as_slice()[arg_start..arg_start + argc];
+            stack_args[..argc].copy_from_slice(src);
+            self.stack.truncate(arg_start - 1);
+            &stack_args[..argc]
+        } else {
+            if overflow_args
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, argc)
+                .is_none()
+            {
+                self.release_stack_from(arg_start - 1);
+                return Err(self.work_oom(span));
+            }
+            let src = &self.stack.as_slice()[arg_start..arg_start + argc];
+            let _ =
+                overflow_args.extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, src);
+            self.stack.truncate(arg_start - 1);
+            overflow_args.as_slice()
+        };
 
-        let res = self.start_callback_builtin(builtin, args_buf.as_slice(), span, arg_start - 1);
-        // `start_callback_builtin` は必要な引数（`f`, `list_v`, `init`）を独自に retain 済み。
-        self.release_slice(args_buf.as_slice());
-        // 注意: `start_callback_builtin` が `items` を作業領域へ確保しているため、ここでは `mark` へ戻さない。
+        let res = self.start_callback_builtin(builtin, args_slice, span, arg_start - 1);
+        self.release_slice(args_slice);
         let (frame_opt, step) = res?;
         match frame_opt {
             None => {
@@ -277,45 +362,56 @@ impl<'a> Runner<'a, '_> {
                     unreachable!();
                 };
                 self.stack_push(val, span)?;
-                Ok(())
+                Ok(None)
             }
             Some(bframe) => {
+                let mut boxed =
+                    match WorkBox::try_new(&mut self.pool.work, &mut self.pool.core, bframe) {
+                        Ok(b) => b,
+                        Err(mut bf) => {
+                            let cleanup_to = bf.cleanup_stack_to;
+                            self.cleanup_builtin_frame(&mut bf);
+                            self.release_stack_from(cleanup_to);
+                            return Err(self.work_oom(span));
+                        }
+                    };
                 if frames
                     .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
                     .is_none()
                 {
-                    let cleanup_to = bframe.cleanup_stack_to;
-                    self.cleanup_builtin_frame(bframe);
+                    let cleanup_to = boxed.cleanup_stack_to;
+                    self.cleanup_builtin_frame(boxed.as_mut());
                     self.release_stack_from(cleanup_to);
                     return Err(self.work_oom(span));
                 }
                 let _ = frames.push_work(
                     &mut self.pool.work,
                     &mut self.pool.core,
-                    FrameEntry::Builtin(bframe),
+                    FrameEntry::Builtin(boxed),
                 );
                 self.handle_callback_step(frames, step)
             }
         }
     }
 
-    /// `CallbackStep::Invoke` を処理する。同期組み込み関数ならループで即座に処理し、
-    /// Rin クロージャなら新しい `RinFrame` を積んで VM ループへ戻す。
+    /// `CallbackStep::Invoke` を処理する。
+    /// Rin クロージャなら `Some(child)` を返して即座に実行し、同期組み込みならループで進める。
+    #[inline(always)]
     fn handle_callback_step<'f>(
         &mut self,
         frames: &mut RawVec<FrameEntry<'f>>,
         mut step: CallbackStep,
-    ) -> Result<(), ErrRecorded> {
+    ) -> Result<Option<RinFrame<'f>>, ErrRecorded> {
         loop {
             let CallbackStep::Invoke {
                 callee,
                 args,
                 argc,
                 span,
-                builtin_name,
+                builtin_id,
             } = step
             else {
-                return Ok(());
+                return Ok(None);
             };
             let arg_slice = &args[..argc];
             match callee {
@@ -348,37 +444,21 @@ impl<'a> Runner<'a, '_> {
                         base + local_count,
                         RVal::Void,
                     );
-                    let child = RinFrame {
-                        entry: FrameSource::Proto(proto),
-                        tail_source: None,
-                        tail_calls: 0,
+                    let child = RinFrame::new(
+                        FrameSource::Proto(proto),
                         captures,
                         base,
-                        frame_stack_start: base + local_count,
-                        ip: 0,
-                        origin: Some(CallOrigin::Builtin {
-                            name: builtin_name,
+                        base + local_count,
+                        Some(CallOrigin::Builtin {
+                            id: builtin_id,
                             at: span,
                         }),
-                        caller_module: prev_mod,
-                        prev_active_module: prev_mod,
-                        cleanup_stack_to: base,
-                        counted_depth: true,
-                    };
-                    if frames
-                        .push_work(
-                            &mut self.pool.work,
-                            &mut self.pool.core,
-                            FrameEntry::Rin(child),
-                        )
-                        .is_none()
-                    {
-                        self.active_module = prev_mod;
-                        self.leave_depth();
-                        self.release_stack_from(base);
-                        return Err(self.work_oom(span));
-                    }
-                    return Ok(());
+                        prev_mod,
+                        prev_mod,
+                        base,
+                        true,
+                    );
+                    return Ok(Some(child));
                 }
                 RVal::Builtin(b) => {
                     if !self.try_charge(1) {
@@ -390,19 +470,32 @@ impl<'a> Runner<'a, '_> {
                             self.start_callback_builtin(b, arg_slice, span, cleanup_to)?;
                         match sub_frame {
                             Some(sf) => {
+                                let mut boxed = match WorkBox::try_new(
+                                    &mut self.pool.work,
+                                    &mut self.pool.core,
+                                    sf,
+                                ) {
+                                    Ok(b) => b,
+                                    Err(mut bf) => {
+                                        let cleanup_to = bf.cleanup_stack_to;
+                                        self.cleanup_builtin_frame(&mut bf);
+                                        self.release_stack_from(cleanup_to);
+                                        return Err(self.work_oom(span));
+                                    }
+                                };
                                 if frames
                                     .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
                                     .is_none()
                                 {
-                                    let cleanup_to = sf.cleanup_stack_to;
-                                    self.cleanup_builtin_frame(sf);
+                                    let cleanup_to = boxed.cleanup_stack_to;
+                                    self.cleanup_builtin_frame(boxed.as_mut());
                                     self.release_stack_from(cleanup_to);
                                     return Err(self.work_oom(span));
                                 }
                                 let _ = frames.push_work(
                                     &mut self.pool.work,
                                     &mut self.pool.core,
-                                    FrameEntry::Builtin(sf),
+                                    FrameEntry::Builtin(boxed),
                                 );
                                 step = sub_step;
                                 continue;
@@ -416,7 +509,7 @@ impl<'a> Runner<'a, '_> {
                                         step = next_step;
                                         continue;
                                     }
-                                    None => return Ok(()),
+                                    None => return Ok(None),
                                 }
                             }
                         }
@@ -427,7 +520,7 @@ impl<'a> Runner<'a, '_> {
                                 step = next_step;
                                 continue;
                             }
-                            None => return Ok(()),
+                            None => return Ok(None),
                         }
                     }
                 }
@@ -444,9 +537,6 @@ impl<'a> Runner<'a, '_> {
     ) -> Result<Option<CallbackStep>, ErrRecorded> {
         loop {
             let Some(parent) = frames.last_mut() else {
-                // 最上位が `BuiltinFrame` で完了した場合：結果をスタックへ積まず呼び出し元へ返すため
-                // ここではダミーの `Done` は不要だが、`drive_frames` 経由なので `stack_push` するか
-                // `run_callback_builtin_entry` の場合は空になる。
                 self.stack_push(val, Span::default())?;
                 return Ok(None);
             };
@@ -456,14 +546,14 @@ impl<'a> Runner<'a, '_> {
                     return Ok(None);
                 }
                 FrameEntry::Builtin(bframe) => {
-                    let next = self.resume_callback_builtin(bframe, val)?;
+                    let next = self.resume_callback_builtin(bframe.as_mut(), val)?;
                     match next {
                         CallbackStep::Done(done_val) => {
-                            let Some(FrameEntry::Builtin(done_frame)) = frames.pop() else {
+                            let Some(FrameEntry::Builtin(mut done_frame)) = frames.pop() else {
                                 unreachable!();
                             };
                             let cleanup_to = done_frame.cleanup_stack_to;
-                            self.cleanup_builtin_frame(done_frame);
+                            self.cleanup_builtin_frame(done_frame.as_mut());
                             self.release_stack_from(cleanup_to);
                             val = done_val;
                         }
@@ -474,77 +564,21 @@ impl<'a> Runner<'a, '_> {
         }
     }
 
-    fn push_closure_call_from_stack<'f>(
-        &mut self,
-        frames: &mut RawVec<FrameEntry<'f>>,
-        arg_start: usize,
-        argc: usize,
-        span: Span,
-    ) -> Result<(), ErrRecorded> {
-        let callee = self.stack.as_slice()[arg_start - 1];
-        let RVal::Obj(id) = callee else {
-            return Err(self.call_type_error(callee, span));
-        };
-        let (proto, captures) = match self.pool.get(id) {
-            Obj::Closure { proto, captures } => (*proto, *captures),
-            _ => return Err(self.call_type_error(callee, span)),
-        };
-        if proto.arity as usize != argc {
-            return Err(self.call_arity_error(proto.arity, argc, span));
-        }
-        self.enter_depth(span)?;
-        let child_base = arg_start;
-        let child_locals = proto.local_count as usize;
-        if let Err(e) = self.stack_resize_void(child_base + child_locals, span) {
-            self.leave_depth();
-            return Err(e);
-        }
-        let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
-        let child = RinFrame {
-            entry: FrameSource::Proto(proto),
-            tail_source: None,
-            tail_calls: 0,
-            captures,
-            base: child_base,
-            frame_stack_start: child_base + child_locals,
-            ip: 0,
-            origin: Some(CallOrigin::Rin(span)),
-            caller_module: prev_mod,
-            prev_active_module: prev_mod,
-            cleanup_stack_to: arg_start - 1,
-            counted_depth: true,
-        };
-        if frames
-            .push_work(
-                &mut self.pool.work,
-                &mut self.pool.core,
-                FrameEntry::Rin(child),
-            )
-            .is_none()
-        {
-            self.active_module = prev_mod;
-            self.leave_depth();
-            self.release_stack_from(arg_start - 1);
-            return Err(self.work_oom(span));
-        }
-        Ok(())
-    }
-
     #[cold]
     #[inline(never)]
     fn unwind_rin_frame(&mut self, frame: RinFrame<'_>) {
         self.record_unwind_frame(
             &frame.entry,
             frame.tail_source.as_ref(),
-            frame.tail_calls,
-            frame.origin,
-            frame.caller_module,
+            frame.tail_calls as usize,
+            frame.origin(),
+            frame.caller_mod(),
         );
-        self.active_module = frame.prev_active_module;
+        self.active_module = frame.prev_mod();
         if frame.counted_depth {
             self.leave_depth();
         }
-        self.release_stack_from(frame.cleanup_stack_to);
+        self.release_stack_from(frame.cleanup_stack_to as usize);
     }
 
     #[cold]
@@ -559,9 +593,9 @@ impl<'a> Runner<'a, '_> {
                 FrameEntry::Rin(frame) => {
                     self.unwind_rin_frame(frame);
                 }
-                FrameEntry::Builtin(bframe) => {
+                FrameEntry::Builtin(mut bframe) => {
                     let cleanup_to = bframe.cleanup_stack_to;
-                    self.cleanup_builtin_frame(bframe);
+                    self.cleanup_builtin_frame(bframe.as_mut());
                     self.release_stack_from(cleanup_to);
                 }
             }
