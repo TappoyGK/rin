@@ -66,3 +66,69 @@ fn modules_import_export_isolation_and_ffi_call_in() {
         ffi::rin_free(m);
     }
 }
+
+#[test]
+fn duplicate_exports_do_not_leak_on_reload_or_unknown_symbol_error() {
+    let cases = [
+        "(def x \"hello\") (export x)",
+        "(def x \"hello\") (export x x)",
+        "(def x \"hello\") (export x x x)",
+        "(def x \"hello\") (export x) (export x)",
+    ];
+
+    let mut baseline = None;
+    for src in cases {
+        let mut alloc = HeapAllocator;
+        let mut builder = Builder::new(Limits::default(), &mut alloc);
+        let mut first_live = None;
+        for _ in 0..4 {
+            builder.load_module("m", src).unwrap();
+            let live = builder.live_bytes();
+            match first_live {
+                None => first_live = Some(live),
+                Some(expected) => assert_eq!(live, expected, "leak on reload: {src}"),
+            }
+        }
+        let live = first_live.unwrap();
+        match baseline {
+            None => baseline = Some(live),
+            Some(expected) => assert_eq!(live, expected, "live_bytes differs from baseline: {src}"),
+        }
+        let val = builder.eval("(import m) m.x").unwrap();
+        assert_eq!(val, Value::str("hello"));
+    }
+
+    // 複数シンボル混在の重複指定でも同じ公開値と生存バイト数になる。
+    let mut alloc_single = HeapAllocator;
+    let mut b_single = Builder::new(Limits::default(), &mut alloc_single);
+    b_single
+        .load_module("m", "(def a \"alpha\") (def b [1 2 3]) (export a b)")
+        .unwrap();
+    let mut alloc_dup = HeapAllocator;
+    let mut b_dup = Builder::new(Limits::default(), &mut alloc_dup);
+    for _ in 0..3 {
+        b_dup
+            .load_module(
+                "m",
+                "(def a \"alpha\") (def b [1 2 3]) (export b a b) (export a)",
+            )
+            .unwrap();
+    }
+    assert_eq!(b_dup.live_bytes(), b_single.live_bytes());
+    assert_eq!(
+        b_dup.eval("(import m) (m.a, m.b)").unwrap(),
+        b_single.eval("(import m) (m.a, m.b)").unwrap()
+    );
+
+    // 重複指定後に未定義の公開名で失敗しても値が残らない。
+    for bad_src in [
+        "(def x \"hello\") (export x x missing)",
+        "(def x \"hello\") (export x) (export x missing)",
+    ] {
+        let mut alloc = HeapAllocator;
+        let mut builder = Builder::new(Limits::default(), &mut alloc);
+        let err = builder.load_module("m", bad_src).unwrap_err();
+        assert_eq!(err.rule(), "expr.module");
+        assert_eq!(builder.live_bytes(), 0, "leak after error: {bad_src}");
+    }
+}
