@@ -63,7 +63,7 @@ impl EnvState<'_> {
             return Err(e);
         }
         // `export_filter` は `WorkArena` 上にあるため、exports 構築が終わってから巻き戻す。
-        let mut exports: RawVec<(RawStr, RVal)> = RawVec::new();
+        let mut raw_exports: RawVec<(RawStr, RVal)> = RawVec::new();
         match export_filter {
             Some(names) => {
                 for &sym_raw in names.as_slice() {
@@ -75,9 +75,6 @@ impl EnvState<'_> {
                     else {
                         let mut sym_buf = crate::error::InlineBuf::<256>::new();
                         sym_buf.push_str(sym);
-                        for &(_, v) in exports.as_slice() {
-                            self.pool.release_val(v);
-                        }
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.modules.clear_env(mod_id, &mut self.pool);
                         return Err(self.pool.core.err_fmt(
@@ -90,22 +87,10 @@ impl EnvState<'_> {
                             ),
                         ));
                     };
-                    self.pool.retain_val(val);
-                    if let Some(pos) = exports
-                        .as_slice()
-                        .iter()
-                        .position(|(k, _)| k.as_str() == sym)
-                    {
-                        let prev = std::mem::replace(&mut exports.as_mut_slice()[pos].1, val);
-                        self.pool.release_val(prev);
-                    } else if exports
+                    if raw_exports
                         .push_work(&mut self.pool.work, &mut self.pool.core, (sym_raw, val))
                         .is_none()
                     {
-                        self.pool.release_val(val);
-                        for &(_, v) in exports.as_slice() {
-                            self.pool.release_val(v);
-                        }
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.modules.clear_env(mod_id, &mut self.pool);
                         let e = self.pool.core.err_str(
@@ -152,9 +137,6 @@ impl EnvState<'_> {
                         let Some(raw) =
                             RawStr::from_work(&mut self.pool.work, &mut self.pool.core, sym_name)
                         else {
-                            for &(_, v) in exports.as_slice() {
-                                self.pool.release_val(v);
-                            }
                             self.pool.work.rewind(&mut self.pool.core, mark);
                             self.modules.clear_env(mod_id, &mut self.pool);
                             let e = self.pool.core.err_str(
@@ -166,15 +148,10 @@ impl EnvState<'_> {
                             self.pool.core.error.resolve_module(Some(name));
                             return Err(e);
                         };
-                        self.pool.retain_val(val);
-                        if exports
+                        if raw_exports
                             .push_work(&mut self.pool.work, &mut self.pool.core, (raw, val))
                             .is_none()
                         {
-                            self.pool.release_val(val);
-                            for &(_, v) in exports.as_slice() {
-                                self.pool.release_val(v);
-                            }
                             self.pool.work.rewind(&mut self.pool.core, mark);
                             self.modules.clear_env(mod_id, &mut self.pool);
                             let e = self.pool.core.err_str(
@@ -190,29 +167,61 @@ impl EnvState<'_> {
                 }
             }
         }
-        exports
-            .as_mut_slice()
-            .sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
         let mut export_pairs: RawVec<(&str, RVal)> = RawVec::new();
-        for (k, v) in exports.as_slice() {
-            if export_pairs
-                .push_work(&mut self.pool.work, &mut self.pool.core, (k.as_str(), *v))
-                .is_none()
-            {
-                for &(_, val) in exports.as_slice() {
-                    self.pool.release_val(val);
+        if export_pairs
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, raw_exports.len())
+            .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.modules.clear_env(mod_id, &mut self.pool);
+            let e = self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            );
+            self.pool.core.error.resolve_module(Some(name));
+            return Err(e);
+        }
+        for (k, v) in raw_exports.as_slice() {
+            let _ =
+                export_pairs.push_work(&mut self.pool.work, &mut self.pool.core, (k.as_str(), *v));
+        }
+        if sort_field_pairs_work(
+            export_pairs.as_mut_slice(),
+            &mut self.pool.work,
+            &mut self.pool.core,
+        )
+        .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.modules.clear_env(mod_id, &mut self.pool);
+            let e = self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            );
+            self.pool.core.error.resolve_module(Some(name));
+            return Err(e);
+        }
+        // ソート済みの公開一覧から重複を 1 パスで除去し、各公開要素につき参照を 1 つだけ保持する。
+        let mut unique_len = 0usize;
+        {
+            let slice = export_pairs.as_mut_slice();
+            for i in 0..slice.len() {
+                let (k, v) = slice[i];
+                if unique_len > 0 && slice[unique_len - 1].0 == k {
+                    slice[unique_len - 1].1 = v;
+                } else {
+                    slice[unique_len] = (k, v);
+                    unique_len += 1;
                 }
-                self.pool.work.rewind(&mut self.pool.core, mark);
-                self.modules.clear_env(mod_id, &mut self.pool);
-                let e = self.pool.core.err_str(
-                    "eval.limits",
-                    ErrorKind::TooMuchMemory,
-                    Span::default(),
-                    "memory limit exceeded",
-                );
-                self.pool.core.error.resolve_module(Some(name));
-                return Err(e);
             }
+        }
+        export_pairs.truncate(unique_len);
+        for &(_, v) in export_pairs.as_slice() {
+            self.pool.retain_val(v);
         }
         let mod_obj_res =
             self.pool
