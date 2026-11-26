@@ -1,5 +1,7 @@
 //! 評価ごとの状態操作、資源制限、束縛解決と呼び出し。
 use super::*;
+use crate::mem::RawVec;
+use crate::pool::ObjSlice;
 
 impl<'a, 'p> Runner<'a, 'p> {
     #[inline(always)]
@@ -29,6 +31,54 @@ impl<'a, 'p> Runner<'a, 'p> {
     #[inline(never)]
     pub(super) fn step_limit_result<T>(&self, span: Span) -> Result<T, Error> {
         Err(step_limit_error(self.limits.steps, span))
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn work_oom(&self, span: Span) -> Error {
+        Error::new(
+            "eval.limits",
+            ErrorKind::TooMuchMemory,
+            span,
+            format!("memory limit exceeded ({} bytes)", self.pool.core.max_bytes()),
+        )
+    }
+
+    #[inline(always)]
+    pub(super) fn stack_push(&mut self, val: RVal, span: Span) -> Result<(), Error> {
+        if self
+            .stack
+            .push_work(&mut self.pool.work, &mut self.pool.core, val)
+            .is_none()
+        {
+            self.pool.release_val(val);
+            return Err(self.work_oom(span));
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn stack_resize_void(&mut self, new_len: usize, span: Span) -> Result<(), Error> {
+        if self
+            .stack
+            .resize_work(&mut self.pool.work, &mut self.pool.core, new_len, RVal::Void)
+            .is_none()
+        {
+            return Err(self.work_oom(span));
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn stack_reserve(&mut self, additional: usize, span: Span) -> Result<(), Error> {
+        if self
+            .stack
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, additional)
+            .is_none()
+        {
+            return Err(self.work_oom(span));
+        }
+        Ok(())
     }
 
     pub(super) fn enter_depth(&mut self, span: Span) -> Result<(), Error> {
@@ -143,6 +193,12 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
+    pub(super) fn release_slice(&mut self, vals: &[RVal]) {
+        for &v in vals {
+            self.pool.release_val(v);
+        }
+    }
+
     pub(super) fn release_stack_from(&mut self, from: usize) {
         while self.stack.len() > from {
             let v = self.stack.pop().unwrap();
@@ -157,47 +213,56 @@ impl<'a, 'p> Runner<'a, 'p> {
         base: usize,
         span: Span,
     ) -> Result<RVal, Error> {
-        let mut cap_vals = Vec::with_capacity(proto.captures.len());
+        if proto.captures.is_empty() {
+            let id = self
+                .pool
+                .alloc_closure_owned(Rc::clone(proto), &[], span)?;
+            return Ok(RVal::Obj(id));
+        }
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut cap_vals = RawVec::<RVal>::new();
+        if cap_vals
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, proto.captures.len())
+            .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            return Err(self.work_oom(span));
+        }
         for cap in &proto.captures {
             let v = match cap {
-                Capture::Local(slot) => self.stack[base + *slot as usize],
+                Capture::Local(slot) => self.stack.as_slice()[base + *slot as usize],
                 Capture::Upvalue(idx) => captures[*idx as usize],
             };
             self.pool.retain_val(v);
-            cap_vals.push(v);
+            let _ = cap_vals.push_work(&mut self.pool.work, &mut self.pool.core, v);
         }
-        let id = self
+        let res = self
             .pool
-            .alloc_closure_owned(Rc::clone(proto), &cap_vals, span)?;
-        Ok(RVal::Obj(id))
+            .alloc_closure_owned(Rc::clone(proto), cap_vals.as_slice(), span);
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        Ok(RVal::Obj(res?))
     }
 
     pub(super) fn run_top_chunk(&mut self, chunk: &Chunk) -> Result<RVal, Error> {
         let base = self.stack.len();
-        self.stack
-            .resize(base + chunk.local_count as usize, RVal::Void);
-        let res = self.exec_frame(
-            FrameSource::Top(chunk),
-            crate::pool::ObjSlice::empty(),
+        self.stack_resize_void(base + chunk.local_count as usize, Span::default())?;
+        let frame = super::vm::RinFrame {
+            entry: FrameSource::Top(chunk),
+            tail_source: None,
+            tail_calls: 0,
+            captures: ObjSlice::empty(),
             base,
-            chunk.local_count as usize,
-            None,
-            self.active_module,
-        );
-        match res {
-            Ok(val) => {
-                debug_assert_eq!(self.stack.len(), base + chunk.local_count as usize);
-                self.release_stack_from(base);
-                Ok(val)
-            }
-            Err(e) => {
-                self.release_stack_from(base);
-                Err(e)
-            }
-        }
+            frame_stack_start: base + chunk.local_count as usize,
+            ip: 0,
+            origin: None,
+            caller_module: self.active_module,
+            prev_active_module: self.active_module,
+            cleanup_stack_to: base,
+            counted_depth: false,
+        };
+        self.run_vm(frame)
     }
 
-    #[cfg(debug_assertions)]
     #[cold]
     #[inline(never)]
     pub(super) fn call_type_error(&self, callee: RVal, span: Span) -> Error {
@@ -208,7 +273,6 @@ impl<'a, 'p> Runner<'a, 'p> {
         )
     }
 
-    #[cfg(debug_assertions)]
     #[cold]
     #[inline(never)]
     pub(super) fn call_arity_error(&self, expected: u32, actual: usize, span: Span) -> Error {
@@ -230,67 +294,54 @@ impl<'a, 'p> Runner<'a, 'p> {
             RVal::Obj(id) => {
                 let (proto, captures) = match self.pool.get(id) {
                     Obj::Closure { proto, captures } => (Rc::clone(proto), *captures),
-                    _ => {
-                        #[cfg(debug_assertions)]
-                        return Err(self.call_type_error(callee, span));
-                        #[cfg(not(debug_assertions))]
-                        return Err(Error::runtime(
-                            "expr.call",
-                            span,
-                            format!("cannot call value of type {}", callee.type_name(self.pool)),
-                        ));
-                    }
+                    _ => return Err(self.call_type_error(callee, span)),
                 };
                 if proto.arity as usize != args.len() {
-                    #[cfg(debug_assertions)]
                     return Err(self.call_arity_error(proto.arity, args.len(), span));
-                    #[cfg(not(debug_assertions))]
-                    return Err(Error::runtime(
-                        "expr.call",
-                        span,
-                        format!("expected {} arguments, got {}", proto.arity, args.len()),
-                    ));
                 }
                 self.enter_depth(span)?;
                 let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
                 let base = self.stack.len();
                 let local_count = proto.local_count as usize;
-                self.stack.reserve(local_count);
+                if let Err(e) = self.stack_reserve(local_count, span) {
+                    self.active_module = prev_mod;
+                    self.leave_depth();
+                    return Err(e);
+                }
                 for &val in args {
                     self.pool.retain_val(val);
-                    self.stack.push(val);
+                    let _ = self.stack.push_work(&mut self.pool.work, &mut self.pool.core, val);
                 }
-                self.stack.resize(base + local_count, RVal::Void);
-                let res = self.exec_frame(
-                    FrameSource::Proto(proto),
+                let _ = self
+                    .stack
+                    .resize_work(&mut self.pool.work, &mut self.pool.core, base + local_count, RVal::Void);
+                let frame = super::vm::RinFrame {
+                    entry: FrameSource::Proto(proto),
+                    tail_source: None,
+                    tail_calls: 0,
                     captures,
                     base,
-                    local_count,
-                    Some(origin),
-                    prev_mod,
-                );
-                self.active_module = prev_mod;
-                self.leave_depth();
-                match res {
-                    Ok(val) => {
-                        self.release_stack_from(base);
-                        Ok(val)
-                    }
-                    Err(e) => {
-                        self.release_stack_from(base);
-                        Err(e)
-                    }
+                    frame_stack_start: base + local_count,
+                    ip: 0,
+                    origin: Some(origin),
+                    caller_module: prev_mod,
+                    prev_active_module: prev_mod,
+                    cleanup_stack_to: base,
+                    counted_depth: true,
+                };
+                self.run_vm(frame)
+            }
+            RVal::Builtin(b) => {
+                if !self.try_charge(1) {
+                    return self.step_limit_result(span);
+                }
+                if b.has_callback() {
+                    self.run_callback_builtin_entry(b, args, span)
+                } else {
+                    self.apply_non_callback_builtin(b, args, span)
                 }
             }
-            RVal::Builtin(b) => self.dispatch_builtin(b, args, span),
-            #[cfg(debug_assertions)]
             other => Err(self.call_type_error(other, span)),
-            #[cfg(not(debug_assertions))]
-            other => Err(Error::runtime(
-                "expr.call",
-                span,
-                format!("cannot call value of type {}", other.type_name(self.pool)),
-            )),
         }
     }
 }

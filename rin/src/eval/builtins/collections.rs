@@ -1,5 +1,6 @@
-//! コレクションの参照・構築・変換。
+//! コレクションの参照・構築・変換（一時領域はすべて作業領域 `WorkArena` を使用）。
 use super::*;
+use crate::mem::RawVec;
 
 impl Runner<'_, '_> {
     pub(super) fn builtin_len(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
@@ -88,10 +89,20 @@ impl Runner<'_, '_> {
 
     pub(super) fn builtin_last(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("last", args, span)?;
-        let Some(items) = self.list_to_vec(xs) else {
+        let len = self.pool.list_len(xs);
+        if !self.try_charge(len) {
             return self.step_limit_result(span);
-        };
-        match items.last().copied() {
+        }
+        let mut last_val = None;
+        let mut cur = xs;
+        while let RVal::Obj(id) = cur {
+            let Obj::Cons { head, tail, .. } = *self.pool.get(id) else {
+                break;
+            };
+            last_val = Some(head);
+            cur = tail;
+        }
+        match last_val {
             Some(v) => {
                 self.pool.retain_val(v);
                 Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(v), span)?))
@@ -121,42 +132,68 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("push", *list_v, span)?;
-        let Some(mut items) = self.list_to_vec(*list_v) else {
-            return self.step_limit_result(span);
-        };
-        items.push(*item);
-        self.build_list_from_borrowed(&items, span)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let mut items = self.list_to_work_vec(*list_v, span)?;
+            if items
+                .push_work(&mut self.pool.work, &mut self.pool.core, *item)
+                .is_none()
+            {
+                return Err(self.work_oom(span));
+            }
+            self.build_list_from_borrowed(items.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_append(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         if !self.try_charge(args.len()) {
             return self.step_limit_result(span);
         }
-        let mut items = Vec::new();
-        for &arg in args {
-            self.expect_list("append", arg, span)?;
-            let Some(subitems) = self.list_to_vec(arg) else {
-                return self.step_limit_result(span);
-            };
-            items.extend(subitems);
-        }
-        self.build_list_from_borrowed(&items, span)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let mut items = RawVec::<RVal>::new();
+            for &arg in args {
+                self.expect_list("append", arg, span)?;
+                let sub = self.list_to_work_vec(arg, span)?;
+                if items
+                    .extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, sub.as_slice())
+                    .is_none()
+                {
+                    return Err(self.work_oom(span));
+                }
+            }
+            self.build_list_from_borrowed(items.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_flatten(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("flatten", args, span)?;
-        let Some(outer) = self.list_to_vec(xs) else {
-            return self.step_limit_result(span);
-        };
-        let mut items = Vec::new();
-        for sub in outer {
-            self.expect_list("flatten", sub, span)?;
-            let Some(subitems) = self.list_to_vec(sub) else {
-                return self.step_limit_result(span);
-            };
-            items.extend(subitems);
-        }
-        self.build_list_from_borrowed(&items, span)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let outer = self.list_to_work_vec(xs, span)?;
+            let mut items = RawVec::<RVal>::new();
+            for &sub in outer.as_slice() {
+                self.expect_list("flatten", sub, span)?;
+                let subitems = self.list_to_work_vec(sub, span)?;
+                if items
+                    .extend_from_slice_work(
+                        &mut self.pool.work,
+                        &mut self.pool.core,
+                        subitems.as_slice(),
+                    )
+                    .is_none()
+                {
+                    return Err(self.work_oom(span));
+                }
+            }
+            self.build_list_from_borrowed(items.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_slice(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
@@ -178,10 +215,13 @@ impl Runner<'_, '_> {
                 format!("slice range {start}..{end} out of range (length {len})"),
             ));
         }
-        let Some(items) = self.list_to_vec(*list_v) else {
-            return self.step_limit_result(span);
-        };
-        self.build_list_from_borrowed(&items[start as usize..end as usize], span)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(*list_v, span)?;
+            self.build_list_from_borrowed(&items.as_slice()[start as usize..end as usize], span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_take(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
@@ -201,11 +241,14 @@ impl Runner<'_, '_> {
                 "'take' count cannot be negative",
             ));
         }
-        let Some(items) = self.list_to_vec(*list_v) else {
-            return self.step_limit_result(span);
-        };
-        let end = (n as usize).min(items.len());
-        self.build_list_from_borrowed(&items[..end], span)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(*list_v, span)?;
+            let end = (n as usize).min(items.len());
+            self.build_list_from_borrowed(&items.as_slice()[..end], span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_drop(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
@@ -303,29 +346,32 @@ impl Runner<'_, '_> {
             ));
         };
         self.expect_list("contains", *list_v, span)?;
-        let Some(items) = self.list_to_vec(*list_v) else {
-            return self.step_limit_result(span);
-        };
-        for x in items {
-            if x.type_name(self.pool) != target.type_name(self.pool) {
-                return Err(Error::runtime(
-                    "fn.list",
-                    span,
-                    format!(
-                        "cannot compare {} and {}",
-                        x.type_name(self.pool),
-                        target.type_name(self.pool)
-                    ),
-                ));
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(*list_v, span)?;
+            for &x in items.as_slice() {
+                if x.type_name(self.pool) != target.type_name(self.pool) {
+                    return Err(Error::runtime(
+                        "fn.list",
+                        span,
+                        format!(
+                            "cannot compare {} and {}",
+                            x.type_name(self.pool),
+                            target.type_name(self.pool)
+                        ),
+                    ));
+                }
+                let Some(equal) = self.values_equal(x, *target) else {
+                    return self.step_limit_result(span);
+                };
+                if equal {
+                    return Ok(RVal::Bool(true));
+                }
             }
-            let Some(equal) = self.values_equal(x, *target) else {
-                return self.step_limit_result(span);
-            };
-            if equal {
-                return Ok(RVal::Bool(true));
-            }
-        }
-        Ok(RVal::Bool(false))
+            Ok(RVal::Bool(false))
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_zip(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
@@ -338,112 +384,163 @@ impl Runner<'_, '_> {
         };
         self.expect_list("zip", *a_v, span)?;
         self.expect_list("zip", *b_v, span)?;
-        let Some(a) = self.list_to_vec(*a_v) else {
-            return self.step_limit_result(span);
-        };
-        let Some(b) = self.list_to_vec(*b_v) else {
-            return self.step_limit_result(span);
-        };
-        let mut out = Vec::with_capacity(a.len().min(b.len()));
-        for (x, y) in a.into_iter().zip(b) {
-            self.pool.retain_val(x);
-            self.pool.retain_val(y);
-            match self.pool.alloc_tuple_owned(&[x, y], span) {
-                Ok(id) => out.push(RVal::Obj(id)),
-                Err(e) => {
-                    self.release_all(out);
-                    return Err(e);
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let a = self.list_to_work_vec(*a_v, span)?;
+            let b = self.list_to_work_vec(*b_v, span)?;
+            let n = a.len().min(b.len());
+            let mut out = RawVec::<RVal>::new();
+            if out
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, n)
+                .is_none()
+            {
+                return Err(self.work_oom(span));
+            }
+            for i in 0..n {
+                let x = a.as_slice()[i];
+                let y = b.as_slice()[i];
+                self.pool.retain_val(x);
+                self.pool.retain_val(y);
+                match self.pool.alloc_tuple_owned(&[x, y], span) {
+                    Ok(id) => {
+                        let _ =
+                            out.push_work(&mut self.pool.work, &mut self.pool.core, RVal::Obj(id));
+                    }
+                    Err(e) => {
+                        self.release_slice(out.as_slice());
+                        return Err(e);
+                    }
                 }
             }
-        }
-        self.build_list_from_owned(out, span)
+            self.build_list_from_owned_raw(out.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_enumerate(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("enumerate", args, span)?;
-        let Some(items) = self.list_to_vec(xs) else {
-            return self.step_limit_result(span);
-        };
-        let mut out = Vec::with_capacity(items.len());
-        for (i, x) in items.into_iter().enumerate() {
-            self.pool.retain_val(x);
-            match self
-                .pool
-                .alloc_tuple_owned(&[RVal::Int(i as i64), x], span)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(xs, span)?;
+            let mut out = RawVec::<RVal>::new();
+            if out
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, items.len())
+                .is_none()
             {
-                Ok(id) => out.push(RVal::Obj(id)),
-                Err(e) => {
-                    self.release_all(out);
-                    return Err(e);
+                return Err(self.work_oom(span));
+            }
+            for (i, &x) in items.as_slice().iter().enumerate() {
+                self.pool.retain_val(x);
+                match self
+                    .pool
+                    .alloc_tuple_owned(&[RVal::Int(i as i64), x], span)
+                {
+                    Ok(id) => {
+                        let _ =
+                            out.push_work(&mut self.pool.work, &mut self.pool.core, RVal::Obj(id));
+                    }
+                    Err(e) => {
+                        self.release_slice(out.as_slice());
+                        return Err(e);
+                    }
                 }
             }
-        }
-        self.build_list_from_owned(out, span)
+            self.build_list_from_owned_raw(out.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_sort(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("sort", args, span)?;
-        let Some(mut items) = self.list_to_vec(xs) else {
-            return self.step_limit_result(span);
-        };
-        if !self.charge_sort(items.iter().copied(), items.len()) {
-            return self.step_limit_result(span);
-        }
-        let mut sort_err = None;
-        items.sort_by(|&a, &b| match self.compare_vals(a, b, span) {
-            Ok(ord) => ord,
-            Err(e) => {
-                if sort_err.is_none() {
-                    sort_err = Some(e);
-                }
-                std::cmp::Ordering::Equal
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(xs, span)?;
+            let n = items.len();
+            if !self.charge_sort(items.as_slice().iter().copied(), n) {
+                return self.step_limit_result(span);
             }
-        });
-        if let Some(e) = sort_err {
-            return Err(e);
-        }
-        self.build_list_from_borrowed(&items, span)
+            let mut keyed = RawVec::<(RVal, RVal)>::new();
+            if keyed
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, n)
+                .is_none()
+            {
+                return Err(self.work_oom(span));
+            }
+            for &x in items.as_slice() {
+                let _ = keyed.push_work(&mut self.pool.work, &mut self.pool.core, (x, x));
+            }
+            let mut sort_err = None;
+            self.sort_keyed_work(keyed.as_mut_slice(), span, &mut sort_err)?;
+            if let Some(e) = sort_err {
+                return Err(e);
+            }
+            let mut sorted = RawVec::<RVal>::new();
+            if sorted
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, n)
+                .is_none()
+            {
+                return Err(self.work_oom(span));
+            }
+            for &(_, v) in keyed.as_slice() {
+                let _ = sorted.push_work(&mut self.pool.work, &mut self.pool.core, v);
+            }
+            self.build_list_from_borrowed(sorted.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_unique(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
         let xs = self.expect_one_list("unique", args, span)?;
-        let Some(items) = self.list_to_vec(xs) else {
-            return self.step_limit_result(span);
-        };
-        let mut out: Vec<RVal> = Vec::new();
-        for x in items {
-            // スカラー比較は1組1ステップ。残量を走査の上限にして、
-            // 実際に比較した数だけをまとめて計上する。
-            if !matches!(x, RVal::Obj(_)) {
-                let allowed = out.len().min(self.steps_left);
-                let found = out[..allowed]
-                    .iter()
-                    .position(|&v| Self::scalars_equal(v, x));
-                self.steps_left -= found.map_or(allowed, |i| i + 1);
-                if found.is_some() {
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(xs, span)?;
+            let mut out = RawVec::<RVal>::new();
+            for &x in items.as_slice() {
+                if !matches!(x, RVal::Obj(_)) {
+                    let allowed = out.len().min(self.steps_left);
+                    let found = out.as_slice()[..allowed]
+                        .iter()
+                        .position(|&v| Self::scalars_equal(v, x));
+                    self.steps_left -= found.map_or(allowed, |i| i + 1);
+                    if found.is_some() {
+                        continue;
+                    }
+                    if allowed < out.len() {
+                        return self.step_limit_result(span);
+                    }
+                    if out
+                        .push_work(&mut self.pool.work, &mut self.pool.core, x)
+                        .is_none()
+                    {
+                        return Err(self.work_oom(span));
+                    }
                     continue;
                 }
-                if allowed < out.len() {
-                    return self.step_limit_result(span);
+                let mut found = false;
+                for &seen in out.as_slice() {
+                    let Some(equal) = self.values_equal(seen, x) else {
+                        return self.step_limit_result(span);
+                    };
+                    if equal {
+                        found = true;
+                        break;
+                    }
                 }
-                out.push(x);
-                continue;
-            }
-            let mut found = false;
-            for &seen in &out {
-                let Some(equal) = self.values_equal(seen, x) else {
-                    return self.step_limit_result(span);
-                };
-                if equal {
-                    found = true;
-                    break;
+                if !found
+                    && out
+                        .push_work(&mut self.pool.work, &mut self.pool.core, x)
+                        .is_none()
+                {
+                    return Err(self.work_oom(span));
                 }
             }
-            if !found {
-                out.push(x);
-            }
-        }
-        self.build_list_from_borrowed(&out, span)
+            self.build_list_from_borrowed(out.as_slice(), span)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_list_to_array(
@@ -452,13 +549,18 @@ impl Runner<'_, '_> {
         span: Span,
     ) -> Result<RVal, Error> {
         let xs = self.expect_one_list("list->array", args, span)?;
-        let Some(items) = self.list_to_vec(xs) else {
-            return self.step_limit_result(span);
-        };
-        for &item in &items {
-            self.pool.retain_val(item);
-        }
-        Ok(RVal::Obj(self.pool.alloc_array_owned(&items, span)?))
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = (|| {
+            let items = self.list_to_work_vec(xs, span)?;
+            for &item in items.as_slice() {
+                self.pool.retain_val(item);
+            }
+            Ok(RVal::Obj(
+                self.pool.alloc_array_owned(items.as_slice(), span)?,
+            ))
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        res
     }
 
     pub(super) fn builtin_array_to_list(
@@ -473,13 +575,13 @@ impl Runner<'_, '_> {
                 "'array->list' takes 1 argument",
             ));
         };
-        let items = match v {
-            RVal::Obj(id) => match self.pool.get(*id) {
+        let arr_slice = match v {
+            RVal::Obj(id) => match *self.pool.get(*id) {
                 Obj::Array(arr) => {
                     if !super::super::runner::try_charge_steps(&mut self.steps_left, arr.len()) {
                         return self.step_limit_result(span);
                     }
-                    arr.as_slice().to_vec()
+                    arr
                 }
                 _ => {
                     return Err(Error::runtime(
@@ -503,6 +605,6 @@ impl Runner<'_, '_> {
                 ));
             }
         };
-        self.build_list_from_borrowed(&items, span)
+        self.build_list_from_borrowed(arr_slice.as_slice(), span)
     }
 }

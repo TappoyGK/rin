@@ -137,11 +137,12 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
         Limits {
             steps: 100_000,
             depth: 200,
-            memory_bytes: 100,
+            memory_bytes: 1200,
         },
         &mut alloc2,
     );
-    let merr = m2.load_module("m", r#"(def s "abc")"#).unwrap_err();
+    let big_mod = format!(r#"(def s "{}")"#, "a".repeat(2000));
+    let merr = m2.load_module("m", &big_mod).unwrap_err();
     assert_eq!(merr.kind, ErrorKind::TooMuchMemory);
     m2.eval(r#"(def t "xyz")"#).unwrap();
     assert_eq!(m2.eval("t").unwrap(), Value::str("xyz"));

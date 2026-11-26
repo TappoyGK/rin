@@ -31,21 +31,27 @@ impl EnvState<'_> {
             self.pool.release_val(v);
         }
         let mod_id_u32 = mod_id;
-        let mut runner = self.runner(Some(mod_id_u32), false);
-        let v = match runner.run_top_chunk(&chunk) {
-            Ok(v) => v,
-            Err(e) => {
-                for old in std::mem::take(&mut self.module_envs[mod_id_u32 as usize])
-                    .into_iter()
-                    .flatten()
-                {
-                    self.pool.release_val(old);
+        let mark = self.pool.work.mark(&self.pool.core);
+        let (v, export_filter) = {
+            let mut runner = self.runner(Some(mod_id_u32), false);
+            match runner.run_top_chunk(&chunk) {
+                Ok(v) => {
+                    runner.pool.release_val(v);
+                    (Ok(()), runner.export_list.take())
                 }
-                return Err(with_mod(e));
+                Err(e) => (Err(e), None),
             }
         };
-        runner.pool.release_val(v);
-        let export_filter = runner.export_list.take();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        if let Err(e) = v {
+            for old in std::mem::take(&mut self.module_envs[mod_id_u32 as usize])
+                .into_iter()
+                .flatten()
+            {
+                self.pool.release_val(old);
+            }
+            return Err(with_mod(e));
+        }
         let mod_env = &self.module_envs[mod_id_u32 as usize];
         let mut exports: Vec<(&str, RVal)> = Vec::new();
         match &export_filter {

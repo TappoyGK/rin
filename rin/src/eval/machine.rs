@@ -158,10 +158,15 @@ impl<'a> EnvState<'a> {
             let exprs = scratch.parse(source)?;
             compile_program(exprs, None, &mut self.syms, &self.globals, false)?
         };
-        let mut runner = self.runner(None, false);
-        let last = runner.run_top_chunk(&chunk)?;
-        let exported = runner.pool.export(last);
-        runner.pool.release_val(last);
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = {
+            let mut runner = self.runner(None, false);
+            runner.run_top_chunk(&chunk)
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let last = res?;
+        let exported = self.pool.export(last);
+        self.pool.release_val(last);
         Ok(exported)
     }
 
@@ -177,10 +182,15 @@ impl<'a> EnvState<'a> {
         };
 
         if bindings.is_empty() {
-            let mut runner = self.runner(None, true);
-            let last = runner.run_top_chunk(&chunk)?;
-            let exported = runner.pool.export(last);
-            runner.pool.release_val(last);
+            let mark = self.pool.work.mark(&self.pool.core);
+            let res = {
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk(&chunk)
+            };
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            let last = res?;
+            let exported = self.pool.export(last);
+            self.pool.release_val(last);
             return Ok(exported);
         }
 
@@ -216,11 +226,13 @@ impl<'a> EnvState<'a> {
             values,
             raw: bindings,
         };
+        let mark = self.pool.work.mark(&self.pool.core);
         let res = {
             let mut runner = self.runner(None, true);
             runner.eval_bindings = Some(&eval_bindings);
             runner.run_top_chunk(&chunk)
         };
+        self.pool.work.rewind(&mut self.pool.core, mark);
         eval_bindings.values.release_all(&mut self.pool);
         let last = res?;
         let exported = self.pool.export(last);
@@ -238,11 +250,16 @@ impl<'a> EnvState<'a> {
                 Ok(chunk) => chunk,
                 Err(error) => return (Vec::new(), Err(error)),
             };
-        let mut runner = self.runner(None, false);
-        let result = runner
-            .run_top_chunk(&chunk)
-            .map(|value| runner.pool.release_val(value));
-        (std::mem::take(&mut runner.check_failures), result)
+        let mark = self.pool.work.mark(&self.pool.core);
+        let (failures, result) = {
+            let mut runner = self.runner(None, false);
+            let result = runner
+                .run_top_chunk(&chunk)
+                .map(|value| runner.pool.release_val(value));
+            (std::mem::take(&mut runner.check_failures), result)
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        (failures, result)
     }
 
     pub(super) fn call(
@@ -288,13 +305,18 @@ impl<'a> EnvState<'a> {
             }
         }
         self.pool.retain_val(callee);
-        let mut runner = self.runner(None, frozen);
-        let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
-        runner.pool.release_val(callee);
-        runner.release_all(r_args);
+        let mark = self.pool.work.mark(&self.pool.core);
+        let res = {
+            let mut runner = self.runner(None, frozen);
+            let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
+            runner.pool.release_val(callee);
+            runner.release_all(r_args);
+            res
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
         let val = res?;
-        let exported = runner.pool.export(val);
-        runner.pool.release_val(val);
+        let exported = self.pool.export(val);
+        self.pool.release_val(val);
         Ok(exported)
     }
 
@@ -315,7 +337,7 @@ impl<'a> EnvState<'a> {
             active_module,
             export_list: None,
             check_failures: Vec::new(),
-            stack: Vec::with_capacity(64),
+            stack: ValueStack::new(),
         }
     }
 }

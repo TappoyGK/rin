@@ -1,17 +1,16 @@
 //! 組み込み関数および高階リスト・配列演算を実装する。
 
-mod callbacks;
+pub(super) mod callbacks;
 mod collections;
 
 use crate::bytecode::BuiltinId;
 use crate::error::{Error, Span};
 use crate::pool::{Obj, RVal};
 
-use super::{CallOrigin, Runner};
+use super::Runner;
 
-#[cfg(debug_assertions)]
 impl BuiltinId {
-    /// Rin の関数を呼び戻す組み込み関数。Debug では命令ループを抜けてから実行する。
+    /// Rin の関数を呼び戻す高階組み込み関数かどうか。
     #[inline(always)]
     pub(super) fn has_callback(self) -> bool {
         matches!(
@@ -29,35 +28,13 @@ impl BuiltinId {
 }
 
 impl Runner<'_, '_> {
-    // Debug では高階関数の再入時に通常の組み込み命令の作業領域を残さない。
-    // Release は apply_builtin への単純な委譲。大きな本体は VM にインライン化しない。
-    #[inline(always)]
-    pub(super) fn dispatch_builtin(
+    /// コールバックを持たない組み込み関数を実行する（ステップ 1 は呼び出し元で計上済み）。
+    pub(super) fn apply_non_callback_builtin(
         &mut self,
         b: BuiltinId,
         args: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
-        if !self.try_charge(1) {
-            return self.step_limit_result(span);
-        }
-        #[cfg(not(debug_assertions))]
-        return self.apply_builtin(b, args, span);
-        #[cfg(debug_assertions)]
-        match b {
-            BuiltinId::Find => self.builtin_find(args, span),
-            BuiltinId::Any => self.builtin_any(args, span),
-            BuiltinId::All => self.builtin_all(args, span),
-            BuiltinId::Map => self.builtin_map(args, span),
-            BuiltinId::Filter => self.builtin_filter(args, span),
-            BuiltinId::FlatMap => self.builtin_flat_map(args, span),
-            BuiltinId::Fold => self.builtin_fold(args, span),
-            BuiltinId::SortBy => self.builtin_sort_by(args, span),
-            _ => self.apply_builtin(b, args, span),
-        }
-    }
-
-    fn apply_builtin(&mut self, b: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
         match b {
             BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div | BuiltinId::Rem => {
                 self.arith(b, args, span)
@@ -205,20 +182,20 @@ impl Runner<'_, '_> {
             BuiltinId::Reverse => self.builtin_reverse(args, span),
             BuiltinId::Range => self.builtin_range(args, span),
             BuiltinId::Contains => self.builtin_contains(args, span),
-            BuiltinId::Find => self.builtin_find(args, span),
-            BuiltinId::Any => self.builtin_any(args, span),
-            BuiltinId::All => self.builtin_all(args, span),
-            BuiltinId::Map => self.builtin_map(args, span),
-            BuiltinId::Filter => self.builtin_filter(args, span),
-            BuiltinId::FlatMap => self.builtin_flat_map(args, span),
-            BuiltinId::Fold => self.builtin_fold(args, span),
             BuiltinId::Zip => self.builtin_zip(args, span),
             BuiltinId::Enumerate => self.builtin_enumerate(args, span),
             BuiltinId::Sort => self.builtin_sort(args, span),
-            BuiltinId::SortBy => self.builtin_sort_by(args, span),
             BuiltinId::Unique => self.builtin_unique(args, span),
             BuiltinId::ListToArray => self.builtin_list_to_array(args, span),
             BuiltinId::ArrayToList => self.builtin_array_to_list(args, span),
+            BuiltinId::Find
+            | BuiltinId::Any
+            | BuiltinId::All
+            | BuiltinId::Map
+            | BuiltinId::Filter
+            | BuiltinId::FlatMap
+            | BuiltinId::Fold
+            | BuiltinId::SortBy => unreachable!("callback builtins are handled by the VM frame loop"),
         }
     }
 }

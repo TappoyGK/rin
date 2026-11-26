@@ -58,34 +58,44 @@ impl Runner<'_, '_> {
         Ok(None)
     }
 
-    // None はステップ残量不足。Error の生成は呼び出し側の失敗経路だけで行う。
-    pub(super) fn list_to_vec(&mut self, mut v: RVal) -> Option<Vec<RVal>> {
-        if !self.try_charge(self.pool.list_len(v)) {
-            return None;
+    pub(super) fn list_to_work_vec(
+        &mut self,
+        mut v: RVal,
+        span: Span,
+    ) -> Result<crate::mem::RawVec<RVal>, Error> {
+        let len = self.pool.list_len(v);
+        if !self.try_charge(len) {
+            return self.step_limit_result(span);
         }
-        let mut out = Vec::with_capacity(self.pool.list_len(v));
+        let mut out = crate::mem::RawVec::new();
+        if out
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, len)
+            .is_none()
+        {
+            return Err(self.work_oom(span));
+        }
         while let RVal::Obj(id) = v {
-            let Obj::Cons { head, tail, .. } = self.pool.get(id) else {
+            let Obj::Cons { head, tail, .. } = *self.pool.get(id) else {
                 break;
             };
-            out.push(*head);
-            v = *tail;
+            let _ = out.push_work(&mut self.pool.work, &mut self.pool.core, head);
+            v = tail;
         }
-        Some(out)
+        Ok(out)
     }
 
-    pub(super) fn build_list_from_owned(
+    pub(super) fn build_list_from_owned_raw(
         &mut self,
-        items: Vec<RVal>,
+        items: &[RVal],
         span: Span,
     ) -> Result<RVal, Error> {
         if !self.try_charge(items.len()) {
-            self.release_all(items);
+            self.release_slice(items);
             return self.step_limit_result(span);
         }
         let mut acc = RVal::EmptyList;
-        for (idx, item) in items.iter().enumerate().rev() {
-            match self.pool.alloc_cons(*item, acc, span) {
+        for (idx, &item) in items.iter().enumerate().rev() {
+            match self.pool.alloc_cons(item, acc, span) {
                 Ok(next) => {
                     self.pool.release_val(acc);
                     acc = next;
@@ -98,7 +108,7 @@ impl Runner<'_, '_> {
                     return Err(e);
                 }
             }
-            self.pool.release_val(*item);
+            self.pool.release_val(item);
         }
         Ok(acc)
     }
@@ -115,7 +125,7 @@ impl Runner<'_, '_> {
             return self.step_limit_result(span);
         }
         for idx in (start..end).rev() {
-            let item = self.stack[idx];
+            let item = self.stack.as_slice()[idx];
             match self.pool.alloc_cons(item, acc, span) {
                 Ok(next) => {
                     self.pool.release_val(acc);
