@@ -243,7 +243,8 @@ fn allocator_failures() {
     struct FailAfter {
         remaining: usize,
     }
-    impl Allocator for FailAfter {
+    // SAFETY: 確保と解放をそのまま `HeapAllocator` に委譲するだけのため `Allocator` の契約を満たす。
+    unsafe impl Allocator for FailAfter {
         fn alloc(&mut self, layout: std::alloc::Layout) -> Option<std::ptr::NonNull<u8>> {
             if self.remaining == 0 {
                 return None;

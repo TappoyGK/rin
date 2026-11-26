@@ -572,7 +572,8 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
         used_cell: &'a Cell<usize>,
     }
 
-    impl Allocator for TrackedArena<'_> {
+    // SAFETY: 確保と解放を `ArenaAllocator` に委譲し使用量を記録するだけのため `Allocator` の契約を満たす。
+    unsafe impl Allocator for TrackedArena<'_> {
         fn alloc(&mut self, layout: Layout) -> Option<std::ptr::NonNull<u8>> {
             let p = self.inner.alloc(layout);
             self.used_cell.set(self.inner.used());

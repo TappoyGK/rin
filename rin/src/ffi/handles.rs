@@ -14,10 +14,18 @@ pub(super) struct CAllocator {
     pub(super) raw: RinAllocator,
 }
 
-impl Allocator for CAllocator {
+// SAFETY:
+// - `layout.size() == 0` では `layout.align()` に整列した非 NULL ポインタを返し、`dealloc` は無操作とする。
+// - `self.raw.alloc` が `None` のときは `HeapAllocator` へ委譲する。
+// - `self.raw.alloc` が `Some` のときは、C 側の呼び出し元が `RinAllocator` の契約（要求サイズ・アラインメントを
+//   満たす非重複の読み書き可能領域を返し、対応する `dealloc` または `rin_free` まで有効に保つこと）を保証する。
+unsafe impl Allocator for CAllocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        if layout.size() == 0 {
+            return NonNull::new(std::ptr::without_provenance_mut(layout.align()));
+        }
         if let Some(f) = self.raw.alloc {
-            // SAFETY: 呼び出し側がマシンの生存期間中 `f` と `self.raw.ctx` の有効性を保証する。
+            // SAFETY: 呼び出し側がマシンの生存期間中 `f` と `self.raw.ctx` の有効性および契約を保証する。
             let ptr = unsafe { f(self.raw.ctx, layout.size(), layout.align()) };
             NonNull::new(ptr)
         } else {
@@ -26,6 +34,9 @@ impl Allocator for CAllocator {
     }
 
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        if layout.size() == 0 {
+            return;
+        }
         if let Some(f) = self.raw.dealloc {
             // SAFETY: 呼び出し側が `alloc` に対応する `f` であることを保証する。
             unsafe { f(self.raw.ctx, ptr.as_ptr(), layout.size(), layout.align()) };

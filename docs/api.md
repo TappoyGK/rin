@@ -144,7 +144,7 @@ pub fn rin::math::cos(x: f64, mode: MathFma) -> f64
 ### 1.3 カスタムアロケータ `Allocator` と領域設定 `MemoryConfig`
 
 ```rust
-pub trait Allocator {
+pub unsafe trait Allocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>>;
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout);
 }
@@ -160,6 +160,16 @@ pub struct MemoryConfig {
     pub work: RegionConfig, // 作業領域
 }
 ```
+
+`Allocator` の安全性契約（`unsafe impl Allocator` の実装側および呼び出し側）：
+- **実装側の契約**：
+  - `alloc(layout)` が `Some(ptr)` を返すとき、`layout.size() > 0` であれば `ptr` は `layout.align()` に整列した少なくとも `layout.size()` バイトの読み書き可能な有効領域を指すこと。
+  - 同時に生存している（未解放の）確保領域どうしを重複させず、対応する `dealloc(ptr, layout)` またはアロケータ自体の破棄まで有効に保つこと。アリーナ実装で個別解放を省略する場合も、生存中の領域を早期に再利用してはならない。
+  - `dealloc(ptr, layout)` は、対応する確保方式と `layout` に従って安全に解放（アリーナの場合は無操作）すること。
+  - `layout.size() == 0` の要求に対しては、成功時は `layout.align()` に整列した非 NULL ポインタを返し、`dealloc` は何もせず安全に戻ること（組み込みの `HeapAllocator`・`ArenaAllocator` および C アロケータアダプタはこの契約に従う）。
+- **呼び出し側の契約**：
+  - `dealloc(ptr, layout)` には直前の `self.alloc(layout)` が返した未解放のポインタと同一の `layout` のみを渡すこと。
+  - `layout.size() == 0` で取得したポインタを通じて読み書きしないこと。
 
 組み込み実装：
 - `HeapAllocator`：Rust 標準ヒープを使うデフォルト実装。

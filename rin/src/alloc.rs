@@ -8,7 +8,34 @@ use std::ptr::NonNull;
 ///
 /// ホスト（アリーナベースのランタイムなど）はこのトレイトを実装して
 /// メモリスラブの確保先を制御できる。
-pub trait Allocator {
+///
+/// # Safety
+/// このトレイトを実装する型は、以下の契約をすべて満たさなければならない。
+///
+/// - **`alloc(layout)` の成功時（`Some(ptr)`）**：
+///   - `layout.size() > 0` のとき、`ptr` は `layout.align()` に整列した、少なくとも `layout.size()` バイトの読み書き可能な有効領域の先頭を指すこと。
+///   - 同時に生存している（未解放の）ほかの確保領域とメモリ範囲が重複しないこと。
+///   - 返された領域は、対応する `dealloc(ptr, layout)` が呼ばれるかアロケータ自身が破棄されるまで有効かつ再利用されないこと。アリーナ実装で個別解放を省略する場合も、生存中の領域を早期に再利用してはならない。
+///   - `layout.size() == 0` のとき、成功時は `layout.align()` に整列した非 NULL ポインタ（例：`std::ptr::without_provenance_mut(layout.align())`）を返し、領域への読み書きを行わない前提で扱えること。
+/// - **`dealloc(ptr, layout)`**：
+///   - 呼び出し側が「`self.alloc(layout)` が返した未解放のポインタと同じ `layout`」を渡したとき、対応する確保方式に従って安全に解放（またはアリーナの場合は無操作）すること。
+///   - `layout.size() == 0` のときは何もせず安全に戻ること。
+///
+/// 呼び出し側は、`dealloc` に渡す `ptr` と `layout` が直前の `self.alloc(layout)` 由来かつ未解放であること、また `layout.size() == 0` で得たポインタを通じて読み書きしないことを保証する。
+///
+/// ```compile_fail
+/// use std::alloc::Layout;
+/// use std::ptr::NonNull;
+/// use rin::Allocator;
+///
+/// struct Bad;
+/// // `unsafe impl` なしでは実装できない。
+/// impl Allocator for Bad {
+///     fn alloc(&mut self, _: Layout) -> Option<NonNull<u8>> { None }
+///     unsafe fn dealloc(&mut self, _: NonNull<u8>, _: Layout) {}
+/// }
+/// ```
+pub unsafe trait Allocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>>;
 
     /// 以前に確保したブロックを解放する。
@@ -16,7 +43,7 @@ pub trait Allocator {
     /// アリーナ実装では個別解放を無視し、スコープ終了時に一括回収してもよい。
     ///
     /// # Safety
-    /// `ptr` は `self.alloc(layout)` が返した未解放のポインタでなければならない。
+    /// `ptr` は `self.alloc(layout)` が返した未解放のポインタであり、`layout` は確保時と同じでなければならない。
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout);
 }
 
@@ -24,10 +51,14 @@ pub trait Allocator {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HeapAllocator;
 
-impl Allocator for HeapAllocator {
+// SAFETY:
+// - `layout.size() == 0` では `layout.align()` に整列した非 NULL ポインタを返し、`dealloc` は無操作とする。
+// - `layout.size() > 0` では `std::alloc::alloc(layout)` へ委譲し、要求サイズ・アラインメントを満たす
+//   互いに重複しない読み書き可能領域を返し、`std::alloc::dealloc(ptr, layout)` まで有効に保つ。
+unsafe impl Allocator for HeapAllocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         if layout.size() == 0 {
-            return Some(NonNull::dangling());
+            return NonNull::new(std::ptr::without_provenance_mut(layout.align()));
         }
         // SAFETY: 直前で `layout.size() > 0` を確認済み。
         let ptr = unsafe { std::alloc::alloc(layout) };
@@ -65,7 +96,12 @@ impl<'a> ArenaAllocator<'a> {
     }
 }
 
-impl Allocator for ArenaAllocator<'_> {
+// SAFETY:
+// - `layout.size() == 0` では `layout.align()` に整列した非 NULL ポインタを返し、`offset` を進めない。
+// - `layout.size() > 0` では `self.buf` 内の現在実アドレスを `layout.align()` に切り上げた先頭から
+//   `layout.size()` バイトを単調増加する `self.offset` で切り出すため、整列・有効性・非重複を満たし、
+//   `ArenaAllocator` の破棄まで再利用されない。`dealloc` は無操作。
+unsafe impl Allocator for ArenaAllocator<'_> {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         let align = layout.align();
         if layout.size() == 0 {
@@ -227,6 +263,18 @@ mod tests {
         let ptr = exact.alloc(layout8).expect("exact fit should succeed");
         assert_eq!((ptr.as_ptr() as usize) % 8, 0);
         assert_eq!(exact.used(), 15);
+    }
+
+    #[test]
+    fn heap_zero_size_returns_aligned_pointer() {
+        let mut heap = HeapAllocator;
+        for align in [1usize, 2, 4, 8, 16, 4096] {
+            let layout = Layout::from_size_align(0, align).unwrap();
+            let ptr = heap.alloc(layout).expect("zero-size alloc should succeed");
+            assert_eq!((ptr.as_ptr() as usize) % align, 0, "align={align}");
+            // SAFETY: 直前に `heap.alloc(layout)` が返したポインタと同じ `layout`。
+            unsafe { heap.dealloc(ptr, layout) };
+        }
     }
 
     #[test]
