@@ -76,11 +76,44 @@ pub(super) struct MatchArmFrame {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct QqState {
+    pub(super) depth: u32,
+    pub(super) eval: bool,
+}
+
+impl QqState {
+    pub(super) const QUOTE: Self = Self {
+        depth: 0,
+        eval: false,
+    };
+    pub(super) const QUASIQUOTE: Self = Self {
+        depth: 1,
+        eval: true,
+    };
+
+    #[inline]
+    pub(super) const fn enter_qq(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            eval: self.eval,
+        }
+    }
+
+    #[inline]
+    pub(super) const fn enter_unquote(self) -> Self {
+        Self {
+            depth: self.depth - 1,
+            eval: self.eval,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct DatumListFrame {
     pub(super) start: Span,
     pub(super) items: RawVec<Datum>,
     pub(super) max_child: usize,
-    pub(super) qq_depth: usize,
+    pub(super) qq: QqState,
     pub(super) close: WorkTokenKind,
 }
 
@@ -92,7 +125,7 @@ pub(super) struct DatumStructFrame {
     pub(super) key: RawStr,
     pub(super) key_span: Span,
     pub(super) max_child: usize,
-    pub(super) qq_depth: usize,
+    pub(super) qq: QqState,
     pub(super) is_with: bool,
 }
 
@@ -187,13 +220,13 @@ pub(super) enum ParseFrame {
         span: Span,
         tag: &'static str,
         is_paren: bool,
-        outer_qq_depth: usize,
+        outer_qq: QqState,
     },
     DatumList(WorkBox<DatumListFrame>),
     DatumIndex {
         target: WorkBox<Datum>,
         target_depth: usize,
-        qq_depth: usize,
+        qq: QqState,
     },
     DatumVariantData {
         span: Span,

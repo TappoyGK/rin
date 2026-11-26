@@ -4,7 +4,7 @@ use super::*;
 impl Parser<'_, '_, '_> {
     pub(super) fn start_datum(
         &mut self,
-        qq_depth: usize,
+        qq: QqState,
         allow_splice: bool,
     ) -> Result<NextStep, ErrRecorded> {
         let tok = self.peek();
@@ -15,7 +15,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Int(n)),
                     1,
-                    qq_depth,
+                    qq,
                 ))
             }
             WorkTokenKind::Float(x) => {
@@ -23,7 +23,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Float(x)),
                     1,
-                    qq_depth,
+                    qq,
                 ))
             }
             WorkTokenKind::Str(s) => {
@@ -31,7 +31,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Str(s)),
                     1,
-                    qq_depth,
+                    qq,
                 ))
             }
             WorkTokenKind::Char(c) => {
@@ -39,7 +39,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Char(c)),
                     1,
-                    qq_depth,
+                    qq,
                 ))
             }
             WorkTokenKind::Quote => {
@@ -49,12 +49,12 @@ impl Parser<'_, '_, '_> {
                         span,
                         tag: "quote",
                         is_paren: false,
-                        outer_qq_depth: qq_depth,
+                        outer_qq: qq,
                     },
                     span,
                 )?;
                 Ok(NextStep::StartDatum {
-                    qq_depth,
+                    qq,
                     allow_splice: false,
                 })
             }
@@ -65,18 +65,17 @@ impl Parser<'_, '_, '_> {
                         span,
                         tag: "quasiquote",
                         is_paren: false,
-                        outer_qq_depth: qq_depth,
+                        outer_qq: qq,
                     },
                     span,
                 )?;
-                let next_depth = if qq_depth > 0 { qq_depth + 1 } else { 0 };
                 Ok(NextStep::StartDatum {
-                    qq_depth: next_depth,
+                    qq: qq.enter_qq(),
                     allow_splice: false,
                 })
             }
             WorkTokenKind::Unquote => {
-                if qq_depth == 0 {
+                if qq.depth == 0 {
                     return Err(self.parse_err(
                         "src.syntax",
                         span,
@@ -84,7 +83,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 self.advance()?;
-                if qq_depth == 1 {
+                if qq.depth == 1 && qq.eval {
                     self.push_frame(
                         ParseFrame::DatumUnquote {
                             span,
@@ -100,18 +99,18 @@ impl Parser<'_, '_, '_> {
                             span,
                             tag: "unquote",
                             is_paren: false,
-                            outer_qq_depth: qq_depth,
+                            outer_qq: qq,
                         },
                         span,
                     )?;
                     Ok(NextStep::StartDatum {
-                        qq_depth: qq_depth - 1,
+                        qq: qq.enter_unquote(),
                         allow_splice: false,
                     })
                 }
             }
             WorkTokenKind::UnquoteSplicing => {
-                if qq_depth == 0 {
+                if qq.depth == 0 {
                     return Err(self.parse_err(
                         "src.syntax",
                         span,
@@ -119,7 +118,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 self.advance()?;
-                if qq_depth == 1 {
+                if qq.depth == 1 && qq.eval {
                     if !allow_splice {
                         return Err(self.parse_err(
                             "src.syntax",
@@ -142,12 +141,12 @@ impl Parser<'_, '_, '_> {
                             span,
                             tag: "unquote_splicing",
                             is_paren: false,
-                            outer_qq_depth: qq_depth,
+                            outer_qq: qq,
                         },
                         span,
                     )?;
                     Ok(NextStep::StartDatum {
-                        qq_depth: qq_depth - 1,
+                        qq: qq.enter_unquote(),
                         allow_splice: false,
                     })
                 }
@@ -171,7 +170,7 @@ impl Parser<'_, '_, '_> {
                     return Ok(NextStep::HaveDatum(
                         Datum::new(span, DatumKind::List(items)),
                         1,
-                        qq_depth,
+                        qq,
                     ));
                 }
                 let dl = self.alloc_box(
@@ -179,19 +178,19 @@ impl Parser<'_, '_, '_> {
                         start: span,
                         items,
                         max_child: 0,
-                        qq_depth,
+                        qq,
                         close: WorkTokenKind::RBracket,
                     },
                     span,
                 )?;
                 self.push_frame(ParseFrame::DatumList(dl), span)?;
                 Ok(NextStep::StartDatum {
-                    qq_depth,
+                    qq,
                     allow_splice: true,
                 })
             }
-            WorkTokenKind::LParen => self.start_datum_paren(qq_depth, allow_splice),
-            WorkTokenKind::Ident(name) => self.start_datum_ident(name, span, qq_depth),
+            WorkTokenKind::LParen => self.start_datum_paren(qq, allow_splice),
+            WorkTokenKind::Ident(name) => self.start_datum_ident(name, span, qq),
             other => Err(self.parse_err_fmt(
                 "src.syntax",
                 span,
@@ -202,7 +201,7 @@ impl Parser<'_, '_, '_> {
 
     fn start_datum_paren(
         &mut self,
-        qq_depth: usize,
+        qq: QqState,
         allow_splice: bool,
     ) -> Result<NextStep, ErrRecorded> {
         let start = self.expect(WorkTokenKind::LParen, "'('")?;
@@ -211,7 +210,7 @@ impl Parser<'_, '_, '_> {
             return Ok(NextStep::HaveDatum(
                 Datum::new(start, DatumKind::List(RawVec::new())),
                 1,
-                qq_depth,
+                qq,
             ));
         }
 
@@ -232,24 +231,24 @@ impl Parser<'_, '_, '_> {
         };
         if let Some(head) = special {
             match head.as_str() {
-                "quasiquote" if qq_depth >= 1 => {
+                "quasiquote" => {
                     self.advance()?;
                     self.push_frame(
                         ParseFrame::DatumWrap {
                             span: start,
                             tag: "quasiquote",
                             is_paren: true,
-                            outer_qq_depth: qq_depth,
+                            outer_qq: qq,
                         },
                         start,
                     )?;
                     return Ok(NextStep::StartDatum {
-                        qq_depth: qq_depth + 1,
+                        qq: qq.enter_qq(),
                         allow_splice: false,
                     });
                 }
                 "unquote" => {
-                    if qq_depth == 0 {
+                    if qq.depth == 0 {
                         return Err(self.parse_err(
                             "src.syntax",
                             start,
@@ -257,7 +256,7 @@ impl Parser<'_, '_, '_> {
                         ));
                     }
                     self.advance()?;
-                    if qq_depth == 1 {
+                    if qq.depth == 1 && qq.eval {
                         self.push_frame(
                             ParseFrame::DatumUnquote {
                                 span: start,
@@ -273,18 +272,18 @@ impl Parser<'_, '_, '_> {
                                 span: start,
                                 tag: "unquote",
                                 is_paren: true,
-                                outer_qq_depth: qq_depth,
+                                outer_qq: qq,
                             },
                             start,
                         )?;
                         return Ok(NextStep::StartDatum {
-                            qq_depth: qq_depth - 1,
+                            qq: qq.enter_unquote(),
                             allow_splice: false,
                         });
                     }
                 }
                 "unquote_splicing" => {
-                    if qq_depth == 0 {
+                    if qq.depth == 0 {
                         return Err(self.parse_err(
                             "src.syntax",
                             start,
@@ -292,7 +291,7 @@ impl Parser<'_, '_, '_> {
                         ));
                     }
                     self.advance()?;
-                    if qq_depth == 1 {
+                    if qq.depth == 1 && qq.eval {
                         if !allow_splice {
                             return Err(self.parse_err(
                                 "src.syntax",
@@ -315,12 +314,12 @@ impl Parser<'_, '_, '_> {
                                 span: start,
                                 tag: "unquote_splicing",
                                 is_paren: true,
-                                outer_qq_depth: qq_depth,
+                                outer_qq: qq,
                             },
                             start,
                         )?;
                         return Ok(NextStep::StartDatum {
-                            qq_depth: qq_depth - 1,
+                            qq: qq.enter_unquote(),
                             allow_splice: false,
                         });
                     }
@@ -334,14 +333,14 @@ impl Parser<'_, '_, '_> {
                 start,
                 items: RawVec::new(),
                 max_child: 0,
-                qq_depth,
+                qq,
                 close: WorkTokenKind::RParen,
             },
             start,
         )?;
         self.push_frame(ParseFrame::DatumList(dl), start)?;
         Ok(NextStep::StartDatum {
-            qq_depth,
+            qq,
             allow_splice: true,
         })
     }
@@ -350,7 +349,7 @@ impl Parser<'_, '_, '_> {
         &mut self,
         name: RawStr,
         span: Span,
-        qq_depth: usize,
+        qq: QqState,
     ) -> Result<NextStep, ErrRecorded> {
         self.advance()?;
         match name.as_str() {
@@ -358,35 +357,35 @@ impl Parser<'_, '_, '_> {
                 return Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Bool(true)),
                     1,
-                    qq_depth,
+                    qq,
                 ));
             }
             "false" => {
                 return Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Bool(false)),
                     1,
-                    qq_depth,
+                    qq,
                 ));
             }
             "none" => {
                 return Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::None),
                     1,
-                    qq_depth,
+                    qq,
                 ));
             }
             "inf" => {
                 return Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Float(f64::INFINITY)),
                     1,
-                    qq_depth,
+                    qq,
                 ));
             }
             "nan" => {
                 return Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::Float(f64::NAN)),
                     1,
-                    qq_depth,
+                    qq,
                 ));
             }
             "some" if self.peek().kind == WorkTokenKind::LParen && self.peek().attached => {
@@ -396,12 +395,12 @@ impl Parser<'_, '_, '_> {
                         span,
                         tag: "some",
                         is_paren: true,
-                        outer_qq_depth: qq_depth,
+                        outer_qq: qq,
                     },
                     span,
                 )?;
                 return Ok(NextStep::StartDatum {
-                    qq_depth,
+                    qq,
                     allow_splice: false,
                 });
             }
@@ -412,12 +411,12 @@ impl Parser<'_, '_, '_> {
                         span,
                         tag: "ok",
                         is_paren: true,
-                        outer_qq_depth: qq_depth,
+                        outer_qq: qq,
                     },
                     span,
                 )?;
                 return Ok(NextStep::StartDatum {
-                    qq_depth,
+                    qq,
                     allow_splice: false,
                 });
             }
@@ -428,12 +427,12 @@ impl Parser<'_, '_, '_> {
                         span,
                         tag: "err",
                         is_paren: true,
-                        outer_qq_depth: qq_depth,
+                        outer_qq: qq,
                     },
                     span,
                 )?;
                 return Ok(NextStep::StartDatum {
-                    qq_depth,
+                    qq,
                     allow_splice: false,
                 });
             }
@@ -463,7 +462,7 @@ impl Parser<'_, '_, '_> {
                 return Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::List(items)),
                     1,
-                    qq_depth,
+                    qq,
                 ));
             }
             let (key, key_span) = self.expect_ident("field name")?;
@@ -476,14 +475,14 @@ impl Parser<'_, '_, '_> {
                     key,
                     key_span,
                     max_child: 0,
-                    qq_depth,
+                    qq,
                     is_with: false,
                 },
                 span,
             )?;
             self.push_frame(ParseFrame::DatumStructFields(dsf), span)?;
             return Ok(NextStep::StartDatum {
-                qq_depth,
+                qq,
                 allow_splice: false,
             });
         }
@@ -502,7 +501,7 @@ impl Parser<'_, '_, '_> {
                     span,
                 )?;
                 return Ok(NextStep::StartDatum {
-                    qq_depth,
+                    qq,
                     allow_splice: false,
                 });
             }
@@ -520,14 +519,14 @@ impl Parser<'_, '_, '_> {
             return Ok(NextStep::HaveDatum(
                 Datum::new(span, DatumKind::List(items)),
                 1,
-                qq_depth,
+                qq,
             ));
         }
 
         Ok(NextStep::HaveDatum(
             Datum::new(span, DatumKind::Ident(name)),
             1,
-            qq_depth,
+            qq,
         ))
     }
 
@@ -536,7 +535,7 @@ impl Parser<'_, '_, '_> {
         frame: ParseFrame,
         datum: Datum,
         depth: usize,
-        qq_depth: usize,
+        qq: QqState,
     ) -> Result<NextStep, ErrRecorded> {
         match frame {
             ParseFrame::QuoteFinish {
@@ -559,7 +558,7 @@ impl Parser<'_, '_, '_> {
                 span,
                 tag,
                 is_paren,
-                outer_qq_depth,
+                outer_qq,
             } => {
                 if is_paren {
                     self.expect(WorkTokenKind::RParen, "')'")?;
@@ -574,7 +573,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::List(items)),
                     1 + depth,
-                    outer_qq_depth,
+                    outer_qq,
                 ))
             }
             ParseFrame::DatumList(mut dl) => {
@@ -589,7 +588,7 @@ impl Parser<'_, '_, '_> {
                 dl_mut.max_child = dl_mut.max_child.max(depth);
                 let close = dl_mut.close;
                 let start = dl_mut.start;
-                let list_qq_depth = dl_mut.qq_depth;
+                let list_qq = dl_mut.qq;
 
                 // `(with target { f1: v1 ... })` の糖衣正規化
                 if close == WorkTokenKind::RParen
@@ -609,7 +608,7 @@ impl Parser<'_, '_, '_> {
                         return Ok(NextStep::HaveDatum(
                             Datum::new(d.start, DatumKind::List(d.items)),
                             1 + d.max_child,
-                            d.qq_depth,
+                            d.qq,
                         ));
                     }
                     let (key, key_span) = self.expect_ident("field name")?;
@@ -622,14 +621,14 @@ impl Parser<'_, '_, '_> {
                             key,
                             key_span,
                             max_child: d.max_child,
-                            qq_depth: d.qq_depth,
+                            qq: d.qq,
                             is_with: true,
                         },
                         d.start,
                     )?;
                     self.push_frame(ParseFrame::DatumStructFields(dsf), d.start)?;
                     return Ok(NextStep::StartDatum {
-                        qq_depth: d.qq_depth,
+                        qq: d.qq,
                         allow_splice: false,
                     });
                 }
@@ -640,7 +639,7 @@ impl Parser<'_, '_, '_> {
                     return Ok(NextStep::HaveDatum(
                         Datum::new(d.start, DatumKind::List(d.items)),
                         1 + d.max_child,
-                        d.qq_depth,
+                        d.qq,
                     ));
                 }
                 if self.at_eof() {
@@ -653,14 +652,14 @@ impl Parser<'_, '_, '_> {
                 }
                 self.push_frame(ParseFrame::DatumList(dl), start)?;
                 Ok(NextStep::StartDatum {
-                    qq_depth: list_qq_depth,
+                    qq: list_qq,
                     allow_splice: true,
                 })
             }
             ParseFrame::DatumIndex {
                 target,
                 target_depth,
-                qq_depth: idx_qq_depth,
+                qq: idx_qq,
             } => {
                 self.expect(WorkTokenKind::RBracket, "']'")?;
                 let combined = 1 + target_depth.max(depth);
@@ -676,7 +675,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::List(items)),
                     combined,
-                    idx_qq_depth,
+                    idx_qq,
                 ))
             }
             ParseFrame::DatumVariantData {
@@ -700,7 +699,7 @@ impl Parser<'_, '_, '_> {
                 Ok(NextStep::HaveDatum(
                     Datum::new(span, DatumKind::List(items)),
                     1 + depth,
-                    qq_depth,
+                    qq,
                 ))
             }
             ParseFrame::DatumStructFields(mut dsf) => {
@@ -731,7 +730,7 @@ impl Parser<'_, '_, '_> {
                     return Ok(NextStep::HaveDatum(
                         Datum::new(d.start, DatumKind::List(d.items)),
                         1 + d.max_child,
-                        d.qq_depth,
+                        d.qq,
                     ));
                 }
                 if self.at_eof() {
@@ -747,10 +746,10 @@ impl Parser<'_, '_, '_> {
                 dsf_mut.key = next_key;
                 dsf_mut.key_span = next_key_span;
                 let sp = dsf_mut.start;
-                let field_qq_depth = dsf_mut.qq_depth;
+                let field_qq = dsf_mut.qq;
                 self.push_frame(ParseFrame::DatumStructFields(dsf), sp)?;
                 Ok(NextStep::StartDatum {
-                    qq_depth: field_qq_depth,
+                    qq: field_qq,
                     allow_splice: false,
                 })
             }

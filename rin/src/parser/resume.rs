@@ -594,7 +594,11 @@ impl Parser<'_, '_, '_> {
                 } else {
                     DatumKind::Unquote(boxed)
                 };
-                Ok(NextStep::HaveDatum(Datum::new(span, kind), 1 + depth, 1))
+                Ok(NextStep::HaveDatum(
+                    Datum::new(span, kind),
+                    1 + depth,
+                    QqState::QUASIQUOTE,
+                ))
             }
             ParseFrame::QuoteFinish { .. }
             | ParseFrame::DatumWrap { .. }

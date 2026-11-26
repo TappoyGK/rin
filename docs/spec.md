@@ -104,11 +104,11 @@ true false none some ok err inf nan
 - `result`：`ok(expr)` / `(ok expr)` または `err(expr)` / `(err expr)`
 - `fn`：関数値（ユーザー定義関数・無名関数・組み込み関数）
 
-**[value.display]** 値の表示（`Value`・`ValueRef` の `Display`）は型ごとに次の形式とし、関数値・`void`・`array` を除くデータ値はそのまま Rin のソースとして読み直したときに元の値と等しくなる表現を用いる。
+**[value.display]** 値の表示（`Value`・`ValueRef` の `Display`）は型ごとに次の形式とし、関数値・`void`・`array`・`f64`（および `f64` を含む値）を除くデータ値はそのまま Rin のソースとして読み直したときに元の値と等しくなる表現を用いる。
 
 - `void`：`void`
 - `i64`：10 進表記（例：`42`、`-5`）
-- `f64`：浮動小数点表記（`nan`・`-0.0` 等の厳密な表示規則は今後の仕様改定で定める）
+- `f64`：浮動小数点表記（現在の表示では整数値に小数点を付けず、`NaN`・`inf`・`-inf`・`-0` のように出力するため再入力対象外）
 - `bool`：`true` または `false`
 - `char`：`'a'`・`'\n'` 等の文字リテラル表記
 - `string`：`"hello"` 等の文字列リテラル表記
@@ -192,7 +192,7 @@ true false none some ok err inf nan
 
 **[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードは `ident` 値、数値（`inf` / `nan` を含む）・`true` / `false` / `none`・文字・文字列はその値、`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。
 
-**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、深さ 1 の位置に現れる `,expr`（`unquote`）を通常の式として評価して埋め込み、リスト要素位置に現れる `,@expr`（`unquote_splicing`）をリストとして評価して展開する。入れ子の `quasiquote` にも対応する。`quasiquote` の外での `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外での `,@` は構文エラーである。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
+**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、入れ子の深さを数えて対応する `unquote` / `unquote_splicing` を評価する。深さは `quasiquote` に入るたびに 1 増え、`unquote` / `unquote_splicing` に入るたびに 1 減る。評価対象の `quasiquote` の中で深さが 0 になった `,expr`（`unquote`）を通常の式として評価して埋め込み、リスト要素位置で深さが 0 になった `,@expr`（`unquote_splicing`）をリストとして評価して展開する。深さが 1 以上のまま残るものは評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。`quote` の中に書かれた `quasiquote` でも同様に深さを数え、その内部の `unquote` / `unquote_splicing` は評価せずデータとして構築する。いずれの `quasiquote` の中にもない（深さ 0 の）位置での `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外で評価される `,@` は構文エラーである。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
 
 ### 5.4 関数呼び出し
 

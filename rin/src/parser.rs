@@ -116,8 +116,8 @@ pub(crate) fn parse_frame_size() -> usize {
 enum NextStep {
     StartExpr,
     HaveExpr(Expr, usize),
-    StartDatum { qq_depth: usize, allow_splice: bool },
-    HaveDatum(Datum, usize, usize),
+    StartDatum { qq: QqState, allow_splice: bool },
+    HaveDatum(Datum, usize, QqState),
 }
 
 impl Parser<'_, '_, '_> {
@@ -276,15 +276,12 @@ impl Parser<'_, '_, '_> {
                     };
                     next = self.resume_frame(frame, expr, depth)?;
                 }
-                NextStep::StartDatum {
-                    qq_depth,
-                    allow_splice,
-                } => {
+                NextStep::StartDatum { qq, allow_splice } => {
                     let tok_span = self.peek().span;
                     self.check_nesting(self.frames.len() + 1, tok_span)?;
-                    next = self.start_datum(qq_depth, allow_splice)?;
+                    next = self.start_datum(qq, allow_splice)?;
                 }
-                NextStep::HaveDatum(mut datum, mut depth, qq_depth) => {
+                NextStep::HaveDatum(mut datum, mut depth, qq) => {
                     if !matches!(datum.kind, DatumKind::UnquoteSplicing(_)) {
                         loop {
                             let next_tok = self.peek();
@@ -315,12 +312,12 @@ impl Parser<'_, '_, '_> {
                                     ParseFrame::DatumIndex {
                                         target,
                                         target_depth: depth,
-                                        qq_depth,
+                                        qq,
                                     },
                                     next_tok.span,
                                 )?;
                                 next = NextStep::StartDatum {
-                                    qq_depth,
+                                    qq,
                                     allow_splice: false,
                                 };
                                 continue 'outer;
@@ -333,7 +330,7 @@ impl Parser<'_, '_, '_> {
                     let Some(frame) = self.frames.pop() else {
                         unreachable!("datum must always have a parent frame");
                     };
-                    next = self.resume_datum_frame(frame, datum, depth, qq_depth)?;
+                    next = self.resume_datum_frame(frame, datum, depth, qq)?;
                 }
             }
         }

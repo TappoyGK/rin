@@ -32,7 +32,7 @@ impl Parser<'_, '_, '_> {
                     span,
                 )?;
                 Ok(NextStep::StartDatum {
-                    qq_depth: 0,
+                    qq: QqState::QUOTE,
                     allow_splice: false,
                 })
             }
@@ -47,7 +47,7 @@ impl Parser<'_, '_, '_> {
                     span,
                 )?;
                 Ok(NextStep::StartDatum {
-                    qq_depth: 1,
+                    qq: QqState::QUASIQUOTE,
                     allow_splice: false,
                 })
             }
@@ -368,7 +368,7 @@ impl Parser<'_, '_, '_> {
                         start,
                     )?;
                     return Ok(NextStep::StartDatum {
-                        qq_depth: 0,
+                        qq: QqState::QUOTE,
                         allow_splice: false,
                     });
                 }
@@ -383,7 +383,7 @@ impl Parser<'_, '_, '_> {
                         start,
                     )?;
                     return Ok(NextStep::StartDatum {
-                        qq_depth: 1,
+                        qq: QqState::QUASIQUOTE,
                         allow_splice: false,
                     });
                 }

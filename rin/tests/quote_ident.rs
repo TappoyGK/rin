@@ -156,6 +156,24 @@ fn quasiquote_unquote_splicing_and_nesting() {
         eval("['quasiquote ['a ['unquote ['+ 1 2]] ['unquote 3]]]").unwrap()
     );
 
+    // quote の中の quasiquote 内の unquote / unquote_splicing は評価せずデータとして残す
+    assert_eq!(
+        eval("'(a `(b ,x))").unwrap(),
+        eval("['a ['quasiquote ['b ['unquote 'x]]]]").unwrap()
+    );
+    assert_eq!(
+        eval("(quote (quasiquote (a (unquote b))))").unwrap(),
+        eval("['quasiquote ['a ['unquote 'b]]]").unwrap()
+    );
+    assert_eq!(
+        eval("'(a `(b ,@xs))").unwrap(),
+        eval("['a ['quasiquote ['b ['unquote_splicing 'xs]]]]").unwrap()
+    );
+    // quote の中の quasiquote でも深さ 0 を超えて unquote を重ねると構文エラー
+    let err = eval("'(a `(b ,,x))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "src.syntax");
+
     // リスト以外を `,@` で展開すると実行時エラー
     let err = eval("`(1 ,@42 2)").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Runtime);
