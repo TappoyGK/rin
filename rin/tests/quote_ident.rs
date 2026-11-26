@@ -42,6 +42,7 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     }
 
     // 結合文字単独は 1 スカラー値なので文字、基底文字＋結合文字は 2 スカラー値なので名前扱いになり src.char エラー
+    // また Z（Zs・Zl・Zp）・Cc・Cf の文字や入力末尾が `\` 直後に来た場合も src.char エラー
     assert_eq!(eval("\\\u{0301}").unwrap(), Value::Char('\u{0301}'));
     for bad_char in [
         "\\ab",
@@ -54,6 +55,17 @@ fn lex_char_vs_quote_and_unicode_escapes() {
         "\\\t",
         "\\\n",
         "\\\r",
+        "\\\0",
+        "\\\x0b",
+        "\\\x0c",
+        "\\\x7f",
+        "\\\u{0085}",
+        "\\\u{00a0}",
+        "\\\u{00ad}",
+        "\\\u{200b}",
+        "\\\u{2028}",
+        "\\\u{2029}",
+        "\\\u{3000}",
     ] {
         let err = eval(bad_char).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Lex, "{bad_char}: {err}");
@@ -113,6 +125,16 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(
         eval("(let (x 1) (list \\u{41}x))").unwrap(),
         Value::list(vec![Value::Char('A'), Value::Int(1)])
+    );
+    assert_eq!(
+        eval("(let (a 1) (list \\日 \\é'x \\😀a))").unwrap(),
+        Value::list(vec![
+            Value::Char('日'),
+            Value::Char('é'),
+            Value::ident("x"),
+            Value::Char('😀'),
+            Value::Int(1),
+        ])
     );
 
     // match パターンの文字リテラル
@@ -497,6 +519,12 @@ fn tuple_syntax_and_display_roundtrip() {
         ("\\u{c}", "\\u{c}"),
         ("\\u{7f}", "\\u{7f}"),
         ("\\u{80}", "\\u{80}"),
+        ("\\u{a0}", "\\u{a0}"),
+        ("\\u{ad}", "\\u{ad}"),
+        ("\\u{200b}", "\\u{200b}"),
+        ("\\u{2028}", "\\u{2028}"),
+        ("\\u{3000}", "\\u{3000}"),
+        ("\\u{301}", "\\u{301}"),
         ("\\a", "\\a"),
         ("\\n", "\\n"),
         ("\\\\", "\\\\"),
@@ -505,8 +533,8 @@ fn tuple_syntax_and_display_roundtrip() {
         ("\\日", "\\日"),
         ("\\😀", "\\😀"),
         (
-            "\"\\0\\n\\r\\t\\\\\\\"'\\u{1}\\u{7f}あ😀\"",
-            "\"\\0\\n\\r\\t\\\\\\\"'\\u{1}\\u{7f}あ😀\"",
+            "\"hello world \\0\\n\\r\\t\\\\\\\"'\\u{1}\\u{7f}\\u{a0}\\u{200b}\\u{3000}e\\u{301}あ😀\"",
+            "\"hello world \\0\\n\\r\\t\\\\\\\"'\\u{1}\\u{7f}\\u{a0}\\u{200b}\\u{3000}e\\u{301}あ😀\"",
         ),
     ] {
         let v = eval(src).unwrap();

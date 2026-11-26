@@ -391,29 +391,41 @@ impl<'a> Lexer<'a> {
         let Some(first) = self.bump_char() else {
             return Err(Error::lex("src.char", span, "unterminated char literal"));
         };
-        if first.is_ascii_whitespace() {
+        if unicode::is_char_forbidden_raw(first) {
             return Err(Error::lex(
                 "src.char",
                 span,
-                "whitespace is not allowed after '\\' in char literal",
+                "invisible or control character is not allowed directly after '\\' in char literal",
             ));
         }
         if first == 'u' && self.peek() == Some(b'{') {
             return self.lex_unicode_escape(span).map(TokenKind::Char);
         }
+        // 後続が入力末尾または ASCII 非名前文字なら 1 文字で確定（非 ASCII の二分探索を省略）。
+        let Some(next_b) = self.peek() else {
+            return Ok(TokenKind::Char(first));
+        };
+        if next_b < 0x80 && !(next_b.is_ascii_alphanumeric() || next_b == b'_') {
+            return Ok(TokenKind::Char(first));
+        }
         if unicode::is_char_name_char(first) {
             let mut count = 1usize;
-            while let Some(next_b) = self.peek() {
-                let next_ch = if next_b < 0x80 {
-                    next_b as char
+            while let Some(nb) = self.peek() {
+                if nb < 0x80 {
+                    if nb.is_ascii_alphanumeric() || nb == b'_' {
+                        self.bump();
+                        count += 1;
+                    } else {
+                        break;
+                    }
                 } else {
-                    self.char_at(self.pos)
-                };
-                if !unicode::is_char_name_char(next_ch) {
-                    break;
+                    let next_ch = self.char_at(self.pos);
+                    if !unicode::is_char_name_char(next_ch) {
+                        break;
+                    }
+                    self.bump_char();
+                    count += 1;
                 }
-                self.bump_char();
-                count += 1;
             }
             if count == 1 {
                 return Ok(TokenKind::Char(first));
@@ -584,7 +596,11 @@ pub(crate) fn write_rin_char(f: &mut fmt::Formatter<'_>, c: char) -> fmt::Result
         '\n' => f.write_str("\\newline"),
         '\r' => f.write_str("\\return"),
         ' ' => f.write_str("\\space"),
-        c if c.is_control() => write!(f, "\\u{{{:x}}}", c as u32),
+        c if c.is_ascii_control()
+            || (!c.is_ascii() && unicode::is_display_escaped_non_ascii(c)) =>
+        {
+            write!(f, "\\u{{{:x}}}", c as u32)
+        }
         c => {
             f.write_char('\\')?;
             f.write_char(c)
@@ -595,17 +611,47 @@ pub(crate) fn write_rin_char(f: &mut fmt::Formatter<'_>, c: char) -> fmt::Result
 /// `[value.display]` に従い `string` 値を Rin 文字列リテラル形式で書き出す。
 pub(crate) fn write_rin_str(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
     f.write_char('"')?;
-    for c in s.chars() {
-        match c {
-            '\0' => f.write_str("\\0")?,
-            '\n' => f.write_str("\\n")?,
-            '\r' => f.write_str("\\r")?,
-            '\t' => f.write_str("\\t")?,
-            '\\' => f.write_str("\\\\")?,
-            '"' => f.write_str("\\\"")?,
-            c if c.is_control() => write!(f, "\\u{{{:x}}}", c as u32)?,
-            c => f.write_char(c)?,
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            if (0x20..=0x7E).contains(&b) && b != b'\\' && b != b'"' {
+                i += 1;
+                continue;
+            }
+            if start < i {
+                f.write_str(&s[start..i])?;
+            }
+            match b {
+                b'\0' => f.write_str("\\0")?,
+                b'\n' => f.write_str("\\n")?,
+                b'\r' => f.write_str("\\r")?,
+                b'\t' => f.write_str("\\t")?,
+                b'\\' => f.write_str("\\\\")?,
+                b'"' => f.write_str("\\\"")?,
+                _ => write!(f, "\\u{{{:x}}}", b)?,
+            }
+            i += 1;
+            start = i;
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            let len = ch.len_utf8();
+            if unicode::is_display_escaped_non_ascii(ch) {
+                if start < i {
+                    f.write_str(&s[start..i])?;
+                }
+                write!(f, "\\u{{{:x}}}", ch as u32)?;
+                i += len;
+                start = i;
+            } else {
+                i += len;
+            }
         }
+    }
+    if start < bytes.len() {
+        f.write_str(&s[start..])?;
     }
     f.write_char('"')
 }

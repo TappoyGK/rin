@@ -266,12 +266,12 @@ impl Lexer<'_> {
                 "unterminated char literal",
             ));
         };
-        if first.is_ascii_whitespace() {
+        if unicode::is_char_forbidden_raw(first) {
             return Err(core.err_str(
                 "src.char",
                 ErrorKind::Lex,
                 span,
-                "whitespace is not allowed after '\\' in char literal",
+                "invisible or control character is not allowed directly after '\\' in char literal",
             ));
         }
         if first == 'u' && self.peek() == Some(b'{') {
@@ -279,19 +279,31 @@ impl Lexer<'_> {
                 .lex_work_unicode_escape(span, core)
                 .map(WorkTokenKind::Char);
         }
+        // 後続が入力末尾または ASCII 非名前文字なら 1 文字で確定（非 ASCII の二分探索を省略）。
+        let Some(next_b) = self.peek() else {
+            return Ok(WorkTokenKind::Char(first));
+        };
+        if next_b < 0x80 && !(next_b.is_ascii_alphanumeric() || next_b == b'_') {
+            return Ok(WorkTokenKind::Char(first));
+        }
         if unicode::is_char_name_char(first) {
             let mut count = 1usize;
-            while let Some(next_b) = self.peek() {
-                let next_ch = if next_b < 0x80 {
-                    next_b as char
+            while let Some(nb) = self.peek() {
+                if nb < 0x80 {
+                    if nb.is_ascii_alphanumeric() || nb == b'_' {
+                        self.bump();
+                        count += 1;
+                    } else {
+                        break;
+                    }
                 } else {
-                    self.char_at(self.pos)
-                };
-                if !unicode::is_char_name_char(next_ch) {
-                    break;
+                    let next_ch = self.char_at(self.pos);
+                    if !unicode::is_char_name_char(next_ch) {
+                        break;
+                    }
+                    self.bump_char();
+                    count += 1;
                 }
-                self.bump_char();
-                count += 1;
             }
             if count == 1 {
                 return Ok(WorkTokenKind::Char(first));
