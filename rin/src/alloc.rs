@@ -67,15 +67,15 @@ impl<'a> ArenaAllocator<'a> {
 
 impl Allocator for ArenaAllocator<'_> {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        let align = layout.align();
         if layout.size() == 0 {
-            return Some(NonNull::dangling());
+            return NonNull::new(std::ptr::without_provenance_mut(align));
         }
         let base = self.buf.as_mut_ptr();
-        let align = layout.align();
-        let cur_addr = (base as usize).checked_add(self.offset)?;
-        let rem = cur_addr & (align - 1);
-        let pad = if rem == 0 { 0 } else { align - rem };
-        let aligned_offset = self.offset.checked_add(pad)?;
+        let base_addr = base as usize;
+        let cur_addr = base_addr.checked_add(self.offset)?;
+        let aligned_addr = cur_addr.checked_add(align - 1)? & !(align - 1);
+        let aligned_offset = aligned_addr - base_addr;
         let end = aligned_offset.checked_add(layout.size())?;
         if end > self.buf.len() {
             return None;
@@ -230,7 +230,19 @@ mod tests {
     }
 
     #[test]
-    fn arena_overflow_size_preserves_used() {
+    fn arena_zero_size_returns_aligned_pointer_without_advancing_used() {
+        let mut raw = [0u8; 64];
+        let mut arena = ArenaAllocator::new(&mut raw);
+        for align in [1usize, 2, 4, 8, 16, 4096] {
+            let layout = Layout::from_size_align(0, align).unwrap();
+            let ptr = arena.alloc(layout).expect("zero-size alloc should succeed");
+            assert_eq!((ptr.as_ptr() as usize) % align, 0, "align={align}");
+            assert_eq!(arena.used(), 0);
+        }
+    }
+
+    #[test]
+    fn arena_huge_size_preserves_used() {
         let mut raw = [0u8; 64];
         let start = (0..8)
             .find(|&i| (raw.as_ptr() as usize + i) % 8 == 1)
