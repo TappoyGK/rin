@@ -22,14 +22,12 @@ impl Drop for Machine {
     }
 }
 
-// 戻り値の所有物を処理し、エラーは machine から別途読む。
-unsafe fn finish(mut result: RinEvalResult, ok: bool) {
+// 戻り値を確認し、エラーは machine から別途読む。
+unsafe fn finish(result: RinEvalResult, ok: bool) {
     assert_eq!(result.ok, ok);
     if !ok {
         assert!(result.value.is_null());
     }
-    unsafe { rin_res_free(&mut result) };
-    assert!(result.value.is_null());
 }
 unsafe fn check_error(m: *mut Rin, kind: RinErrorKind) {
     unsafe {
@@ -73,15 +71,14 @@ fn kinds_modules_and_borrowed_lifetime() {
             assert_eq!(CStr::from_ptr(e.module), c"mod");
             assert!(e.line > 0 && e.col > 0);
         }
-        let mut loaded = rin_load(
+        let loaded = rin_load(
             m.0,
             c"mod".as_ptr(),
             c"(defn fail () (/ 1 0)) (defn good () 42)".as_ptr(),
         );
         assert!(loaded.ok && loaded.value.is_null());
-        rin_res_free(&mut loaded);
         assert!(rin_last_error(m.0).is_null());
-        let mut result = rin_call_in(m.0, c"mod".as_ptr(), c"fail".as_ptr(), null(), 0);
+        let result = rin_call_in(m.0, c"mod".as_ptr(), c"fail".as_ptr(), null(), 0);
         assert!(!result.ok);
         let p = rin_last_error(m.0);
         check_error(m.0, RinErrorKind::Runtime);
@@ -90,8 +87,6 @@ fn kinds_modules_and_borrowed_lifetime() {
         assert_eq!(rule.as_c_str(), c"op.arith");
         assert!(!(*p).backtrace.is_null());
         assert_eq!(CStr::from_ptr((*p).module), c"mod");
-        assert_eq!(p, rin_last_error(m.0));
-        rin_res_free(&mut result);
         assert_eq!(p, rin_last_error(m.0));
         assert_eq!(text.as_c_str(), CStr::from_ptr((*p).text));
         assert_eq!(rule.as_c_str(), CStr::from_ptr((*p).rule));
@@ -152,23 +147,12 @@ fn resource_errors_and_bind_failures_preserve_kind() {
             memory_bytes: 0,
             ..rin_limits_default()
         });
-        let v = rin_str(c"value".as_ptr());
+        assert!(rin_str(m.0, c"value".as_ptr()).is_null());
+        check_error(m.0, RinErrorKind::TooMuchMemory);
+        let v = rin_int(m.0, 1);
         assert!(!rin_bind(m.0, c"x".as_ptr(), v));
         check_error(m.0, RinErrorKind::TooMuchMemory);
-        rin_drop(v);
-        let m = Machine::new(rin_limits_default());
-        let v = RinValue(rin::Value::Builtin("unknown\0builtin"));
-        assert!(!rin_bind(m.0, c"x".as_ptr(), &v));
-        check_error(m.0, RinErrorKind::Runtime);
-        assert_eq!(CStr::from_ptr((*rin_last_error(m.0)).rule), c"host.value");
-        for s in [(*rin_last_error(m.0)).message, (*rin_last_error(m.0)).text] {
-            assert!(
-                CStr::from_ptr(s)
-                    .to_str()
-                    .unwrap()
-                    .contains("unknown\\0builtin")
-            );
-        }
+        rin_drop(m.0, v);
     }
 }
 
@@ -178,7 +162,7 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
         let m = Machine::new(rin_limits_default());
         let bad = [0xff_u8, 0];
         let bad = bad.as_ptr().cast();
-        let v = rin_int(1);
+        let v = rin_int(m.0, 1);
         let missing = [null()];
         let missing_bind_name = [RinBinding {
             name: null(),
@@ -232,7 +216,7 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
             assert!(rin_bind(m.0, c"x".as_ptr(), v));
             assert!(rin_last_error(m.0).is_null());
         }
-        rin_drop(v);
+        rin_drop(m.0, v);
         assert!(rin_last_error(null()).is_null());
         finish(rin_build(null_mut(), null()), false);
         finish(rin_eval(null_mut(), null()), false);

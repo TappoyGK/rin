@@ -1165,6 +1165,61 @@ impl<'a> Pool<'a> {
         }
     }
 
+    pub(crate) fn copy_struct_desc_name_to_work(&mut self, desc: StructDescRef) -> Option<RawStr> {
+        let name = match desc {
+            StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize].name.as_str(),
+            StructDescRef::Obj(id) => {
+                let idx = id.0 as usize;
+                let chunk_idx = idx / CHUNK_SLOTS;
+                let in_chunk = idx % CHUNK_SLOTS;
+                let len = if chunk_idx + 1 == self.chunks.len() {
+                    self.last_chunk_len
+                } else {
+                    CHUNK_SLOTS
+                };
+                match &self.chunks.as_slice()[chunk_idx].as_slice(len)[in_chunk] {
+                    Slot::Live {
+                        obj: Obj::StructDesc { name, .. },
+                        ..
+                    } => name.as_str(),
+                    _ => unreachable!(),
+                }
+            }
+        };
+        RawStr::from_work(&mut self.work, &mut self.core, name)
+    }
+
+    pub(crate) fn copy_struct_desc_field_to_work(
+        &mut self,
+        desc: StructDescRef,
+        field_idx: usize,
+    ) -> Option<RawStr> {
+        let fname = match desc {
+            StructDescRef::Perm(id) => {
+                self.struct_descs.descs.as_slice()[id as usize].fields.as_slice()[field_idx]
+                    .as_str()
+            }
+            StructDescRef::Obj(id) => {
+                let idx = id.0 as usize;
+                let chunk_idx = idx / CHUNK_SLOTS;
+                let in_chunk = idx % CHUNK_SLOTS;
+                let len = if chunk_idx + 1 == self.chunks.len() {
+                    self.last_chunk_len
+                } else {
+                    CHUNK_SLOTS
+                };
+                match &self.chunks.as_slice()[chunk_idx].as_slice(len)[in_chunk] {
+                    Slot::Live {
+                        obj: Obj::StructDesc { fields, .. },
+                        ..
+                    } => fields[field_idx].as_str(),
+                    _ => unreachable!(),
+                }
+            }
+        };
+        RawStr::from_work(&mut self.work, &mut self.core, fname)
+    }
+
     #[cold]
     #[inline(never)]
     pub fn err_struct_missing_field(

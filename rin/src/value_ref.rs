@@ -31,6 +31,18 @@ pub enum ValueTag {
 #[derive(Debug, Clone, Copy)]
 pub struct Val(pub(crate) RVal);
 
+impl Val {
+    #[inline]
+    pub(crate) const fn void() -> Self {
+        Self(RVal::Void)
+    }
+
+    #[inline]
+    pub(crate) const fn empty_list() -> Self {
+        Self(RVal::EmptyList)
+    }
+}
+
 /// プール上の値をシステムヒープへ複製せず直接読み取る借用ビュー。
 #[derive(Clone, Copy)]
 pub struct ValueRef<'a> {
@@ -260,6 +272,23 @@ impl<'a> ValueRef<'a> {
 pub struct ListIter<'a> {
     cur: RVal,
     pool: &'a Pool<'a>,
+}
+
+impl<'a> ListIter<'a> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.pool.list_len(self.cur)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub(crate) fn cur_rval(&self) -> RVal {
+        self.cur
+    }
 }
 
 impl<'a> Iterator for ListIter<'a> {

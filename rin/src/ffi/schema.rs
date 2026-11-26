@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, c_char};
 
-use super::RinValue;
+use super::{Rin, RinValue};
 use crate::schema::Schema;
 
 pub struct RinSchema(pub Schema);
@@ -39,34 +39,47 @@ pub unsafe extern "C" fn rin_schema_free(schema: *mut RinSchema) {
 /// `val` がコンパイル済み `RinSchema*` に適合するか検証する。
 ///
 /// # Safety
-/// `val` と `schema` は有効なポインタでなければならない。
+/// `machine`・`val`・`schema` は有効なポインタでなければならない。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_check(val: *const RinValue, schema: *const RinSchema) -> bool {
-    if val.is_null() || schema.is_null() {
+pub unsafe extern "C" fn rin_check(
+    machine: *const Rin,
+    val: *const RinValue,
+    schema: *const RinSchema,
+) -> bool {
+    let (Some(m), Some(v), Some(s)) = (
+        unsafe { machine.as_ref() },
+        unsafe { val.as_ref() },
+        unsafe { schema.as_ref() },
+    ) else {
         return false;
-    }
-    // SAFETY: 呼び出し側が有効なポインタを保証する。
-    let v = unsafe { &(*val).0 };
-    let s = unsafe { &(*schema).0 };
-    s.check(v).is_ok()
+    };
+    let owned = m.state_ref().value_ref(v.0).pool.export(v.0.0);
+    s.0.check(&owned).is_ok()
 }
 
 /// `schema_src` の解析と `val` の検証を 1 回で行う。
 ///
 /// # Safety
-/// `val` は有効な `RinValue*`、`schema_src` は有効な NUL 終端 UTF-8 文字列でなければならない。
+/// `machine` と `val` は有効なポインタ、`schema_src` は有効な NUL 終端 UTF-8 文字列でなければならない。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_check_str(val: *const RinValue, schema_src: *const c_char) -> bool {
-    if val.is_null() || schema_src.is_null() {
+pub unsafe extern "C" fn rin_check_str(
+    machine: *const Rin,
+    val: *const RinValue,
+    schema_src: *const c_char,
+) -> bool {
+    let (Some(m), Some(v)) = (unsafe { machine.as_ref() }, unsafe { val.as_ref() }) else {
+        return false;
+    };
+    if schema_src.is_null() {
         return false;
     }
-    // SAFETY: 呼び出し側が有効なポインタを保証する。
+    // SAFETY: 呼び出し側が有効な NUL 終端文字列を保証する。
     let Ok(text) = unsafe { CStr::from_ptr(schema_src) }.to_str() else {
         return false;
     };
     let Ok(schema) = Schema::parse(text) else {
         return false;
     };
-    // SAFETY: 呼び出し側が有効な `RinValue*` を保証する。
-    schema.check(unsafe { &(*val).0 }).is_ok()
+    let owned = m.state_ref().value_ref(v.0).pool.export(v.0.0);
+    schema.check(&owned).is_ok()
 }

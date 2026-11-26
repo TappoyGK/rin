@@ -82,13 +82,19 @@ fn all_implementation_rules_are_documented() {
                 sites += 1;
             }
         }
-        // C API の Host エラーは Rust Error を介さず保存する。
-        if path.ends_with("ffi/error.rs") {
-            for rest in source.split("Self::new(").skip(1) {
-                if let Some(literal) = rest.trim_start().strip_prefix('"') {
-                    let (rule, _) = literal.split_once('"').unwrap();
-                    assert!(rules.contains(rule), "undocumented FFI rule {rule}");
-                    sites += 1;
+        // C API の Host / phase エラーは Rust Error を介さず保存する。
+        if path.ends_with("ffi/error.rs") || path.ends_with("ffi/mod.rs") {
+            for pat in [
+                "set_simple(",
+                "record_simple_error(",
+                "record_simple_error_fmt(",
+            ] {
+                for rest in source.split(pat).skip(1) {
+                    if let Some(literal) = rest.trim_start().strip_prefix('"') {
+                        let (rule, _) = literal.split_once('"').unwrap();
+                        assert!(rules.contains(rule), "undocumented FFI rule {rule}");
+                        sites += 1;
+                    }
                 }
             }
         }

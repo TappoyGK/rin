@@ -65,23 +65,26 @@ typedef struct RinError {
     const char *message;   /* 常に非 NULL。見出しの本文。 */
     const char *module;    /* モジュール外なら NULL。 */
     const char *rule;      /* 根拠となる仕様の規則名。非 NULL、角括弧なし。 */
-    size_t line;          /* 1 始まり。位置がなければ 0。 */
-    size_t col;           /* 1 始まり。位置がなければ 0。 */
+    size_t line;           /* 1 始まり。位置がなければ 0。 */
+    size_t col;            /* 1 始まり。位置がなければ 0。 */
     const char *backtrace; /* 履歴がなければ NULL。 */
     const char *text;      /* 常に非 NULL。見出しと履歴の全体。 */
 } RinError;
 
 /* rin_eval_with に渡す 1 件の初期束縛。
- * name は NUL 終端の UTF-8、value は有効な RinValue で、呼び出しの間だけ有効であればよい（所有権は移動しない）。
+ * name は NUL 終端の UTF-8、value は同じ Rin で生成した有効な RinValue。
  */
 typedef struct RinBinding {
     const char *name;
     const RinValue *value;
 } RinBinding;
 
+/* value は Rin が所有する借用ポインタ。同じ Rin に対する次の評価・呼び出し・解放まで有効。
+ * rin_load 成功時と失敗時は NULL。ホスト側で解放してはならない。
+ */
 typedef struct RinEvalResult {
     bool ok;
-    RinValue *value; /* 評価・呼び出し成功時に所有。rin_load 成功時と失敗時は NULL。 */
+    const RinValue *value;
 } RinEvalResult;
 
 RinLimits rin_limits_default(void);
@@ -105,47 +108,48 @@ RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, c
  * rin_load / rin_call / rin_call_in / rin_bind / rin_freeze / rin_set_math_fma、
  * または rin_free まで有効。
  * 対象操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
- * rin_last_error や rin_res_free は無効化しない。
+ * rin_last_error は無効化しない。
  * NULL rin には記録できない。それ以外の引数エラーは RIN_ERR_HOST、位置は 0。
  * 同じ rin の対象操作・解放と並行して参照してはならない。
  */
 const RinError *rin_last_error(const Rin *rin);
-void rin_res_free(RinEvalResult *res);
 
-RinValue *rin_int(int64_t n);
-RinValue *rin_float(double x);
-RinValue *rin_bool(bool b);
-RinValue *rin_str(const char *s);
-RinValue *rin_i64s(const int64_t *ptr, size_t len);
-RinValue *rin_f64s(const double *ptr, size_t len);
-RinValue *rin_nil(void);
-RinValue *rin_cons(const RinValue *head, const RinValue *tail);
-RinValue *rin_none(void);
-RinValue *rin_some(const RinValue *val);
-RinValue *rin_struct(const char *name);
-bool rin_struct_set(RinValue *s, const char *field, const RinValue *val);
-RinValue *rin_variant(const char *type_name, const char *variant, const RinValue *data);
-void rin_drop(RinValue *val);
+/* 値ハンドル構築・解放（すべて Rin のアロケータ上で確保される。使い終わったら rin_drop で返却）。 */
+RinValue *rin_int(Rin *rin, int64_t n);
+RinValue *rin_float(Rin *rin, double x);
+RinValue *rin_bool(Rin *rin, bool b);
+RinValue *rin_str(Rin *rin, const char *s);
+RinValue *rin_i64s(Rin *rin, const int64_t *ptr, size_t len);
+RinValue *rin_f64s(Rin *rin, const double *ptr, size_t len);
+RinValue *rin_nil(Rin *rin);
+RinValue *rin_cons(Rin *rin, const RinValue *head, const RinValue *tail);
+RinValue *rin_none(Rin *rin);
+RinValue *rin_some(Rin *rin, const RinValue *val);
+RinValue *rin_struct(Rin *rin, const char *name);
+bool rin_struct_set(Rin *rin, RinValue *s, const char *field, const RinValue *val);
+RinValue *rin_variant(Rin *rin, const char *type_name, const char *variant, const RinValue *data);
+void rin_drop(Rin *rin, RinValue *val);
 
-RinTag rin_tag(const RinValue *val);
-bool rin_as_int(const RinValue *val, int64_t *out);
-bool rin_as_float(const RinValue *val, double *out);
-bool rin_as_bool(const RinValue *val, bool *out);
-const uint8_t *rin_as_str(const RinValue *val, size_t *out_len);
-size_t rin_len(const RinValue *val);
-RinValue *rin_car(const RinValue *val);
-RinValue *rin_cdr(const RinValue *val);
-RinValue *rin_field(const RinValue *val, const char *field);
-const uint8_t *rin_variant_name(const RinValue *val, size_t *out_len);
-RinValue *rin_unwrap(const RinValue *val);
-RinValue *rin_tuple_get(const RinValue *val, size_t index);
-size_t rin_copy_i64s(const RinValue *val, int64_t *out_ptr, size_t out_cap);
-size_t rin_copy_f64s(const RinValue *val, double *out_ptr, size_t out_cap);
+/* 値読み取り（rin_car / rin_cdr / rin_field / rin_unwrap / rin_tuple_get の返り値は rin_drop で返却）。 */
+RinTag rin_tag(const Rin *rin, const RinValue *val);
+bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out);
+bool rin_as_float(const Rin *rin, const RinValue *val, double *out);
+bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out);
+const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len);
+size_t rin_len(const Rin *rin, const RinValue *val);
+RinValue *rin_car(Rin *rin, const RinValue *val);
+RinValue *rin_cdr(Rin *rin, const RinValue *val);
+RinValue *rin_field(Rin *rin, const RinValue *val, const char *field);
+const uint8_t *rin_variant_name(const Rin *rin, const RinValue *val, size_t *out_len);
+RinValue *rin_unwrap(Rin *rin, const RinValue *val);
+RinValue *rin_tuple_get(Rin *rin, const RinValue *val, size_t index);
+size_t rin_copy_i64s(const Rin *rin, const RinValue *val, int64_t *out_ptr, size_t out_cap);
+size_t rin_copy_f64s(const Rin *rin, const RinValue *val, double *out_ptr, size_t out_cap);
 
 RinSchema *rin_schema(const char *src);
 void rin_schema_free(RinSchema *schema);
-bool rin_check(const RinValue *val, const RinSchema *schema);
-bool rin_check_str(const RinValue *val, const char *schema_src);
+bool rin_check(const Rin *rin, const RinValue *val, const RinSchema *schema);
+bool rin_check_str(const Rin *rin, const RinValue *val, const char *schema_src);
 
 #ifdef __cplusplus
 }

@@ -172,21 +172,19 @@ fn runtime_and_limit_errors_record_call_backtrace() {
             },
         );
         let c_src = std::ffi::CString::new(src).unwrap();
-        let mut res = crate::ffi::rin_build(cm, c_src.as_ptr());
+        let res = crate::ffi::rin_build(cm, c_src.as_ptr());
         assert!(!res.ok);
         let bt_ptr = (*crate::ffi::rin_last_error(cm)).backtrace;
         assert!(!bt_ptr.is_null());
         let bt_str = std::ffi::CStr::from_ptr(bt_ptr).to_str().unwrap();
         assert!(bt_str.contains("in inner (at 2:22)"));
         assert!(bt_str.contains("in outer (at 3:1)"));
-        crate::ffi::rin_res_free(&mut res);
 
         // 早期リターンによるエラーでも前回の呼び出し履歴は消去する。
         let bad_utf8 = [0xffu8, 0x00];
-        let mut bad_res = crate::ffi::rin_build(cm, bad_utf8.as_ptr().cast());
+        let bad_res = crate::ffi::rin_build(cm, bad_utf8.as_ptr().cast());
         assert!(!bad_res.ok);
         assert!((*crate::ffi::rin_last_error(cm)).backtrace.is_null());
-        crate::ffi::rin_res_free(&mut bad_res);
 
         crate::ffi::rin_free(cm);
     }

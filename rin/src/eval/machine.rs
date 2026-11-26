@@ -60,10 +60,7 @@ impl<'a> Builder<'a> {
         self.inner.run_test(setup, body)
     }
 
-    pub(crate) fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
-        self.inner.call(fn_name, args, false)
-    }
-
+    #[cfg(test)]
     pub(crate) fn call_in(
         &mut self,
         mod_name: &str,
