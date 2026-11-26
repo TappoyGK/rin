@@ -21,9 +21,9 @@ use std::ptr::NonNull;
 ///   - 呼び出し側が「`self.alloc(layout)` が返した未解放のポインタと同じ `layout`」を渡したとき、対応する確保方式に従って安全に解放（またはアリーナの場合は無操作）すること。
 ///   - `layout.size() == 0` のときは何もせず安全に戻ること。
 ///
-/// 呼び出し側は、`dealloc` に渡す `ptr` と `layout` が直前の `self.alloc(layout)` 由来かつ未解放であること、また `layout.size() == 0` で得たポインタを通じて読み書きしないことを保証する。
+/// 呼び出し側は、`dealloc` に渡す `ptr` が `self.alloc(layout)` が返した未解放のポインタであり、`layout` が確保時と同じであること、また `layout.size() == 0` で得たポインタを通じて読み書きしないことを保証する。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0200
 /// use std::alloc::Layout;
 /// use std::ptr::NonNull;
 /// use rin::Allocator;

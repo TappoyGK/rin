@@ -16,7 +16,7 @@ pub(super) struct CAllocator {
 
 // SAFETY:
 // - `layout.size() == 0` では `layout.align()` に整列した非 NULL ポインタを返し、`dealloc` は無操作とする。
-// - `self.raw.alloc` が `None` のときは `HeapAllocator` へ委譲する。
+// - `self.raw.alloc` が `None` のときは、`self.raw.dealloc` の有無によらず確保・解放とも `HeapAllocator` へ委譲する。
 // - `self.raw.alloc` が `Some` のときは、C 側の呼び出し元が `RinAllocator` の契約（要求サイズ・アラインメントを
 //   満たす非重複の読み書き可能領域を返し、対応する `dealloc` または `rin_free` まで有効に保つこと）を保証する。
 unsafe impl Allocator for CAllocator {
@@ -37,12 +37,12 @@ unsafe impl Allocator for CAllocator {
         if layout.size() == 0 {
             return;
         }
-        if let Some(f) = self.raw.dealloc {
-            // SAFETY: 呼び出し側が `alloc` に対応する `f` であることを保証する。
-            unsafe { f(self.raw.ctx, ptr.as_ptr(), layout.size(), layout.align()) };
-        } else if self.raw.alloc.is_none() {
+        if self.raw.alloc.is_none() {
             // SAFETY: `self.raw.alloc` が `None` のため `HeapAllocator` で確保した領域。
             unsafe { HeapAllocator.dealloc(ptr, layout) };
+        } else if let Some(f) = self.raw.dealloc {
+            // SAFETY: 呼び出し側が `alloc` に対応する `f` であることを保証する。
+            unsafe { f(self.raw.ctx, ptr.as_ptr(), layout.size(), layout.align()) };
         }
     }
 }
@@ -253,5 +253,71 @@ impl RinState {
             RinState::Building(b) => b.last_result_val(),
             RinState::Frozen(f) => f.last_result_val(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn c_allocator_null_alloc_ignores_dealloc_callback_and_uses_heap() {
+        static DEALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn count_dealloc(
+            _ctx: *mut c_void,
+            _ptr: *mut u8,
+            _size: usize,
+            _align: usize,
+        ) {
+            DEALLOC_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        DEALLOC_CALLS.store(0, Ordering::SeqCst);
+        let alloc = RinAllocator {
+            ctx: std::ptr::null_mut(),
+            alloc: None,
+            dealloc: Some(count_dealloc),
+        };
+        let rin = crate::ffi::rin_new(crate::ffi::rin_limits_default(), alloc);
+        assert!(!rin.is_null());
+        // SAFETY: 直前に `rin_new` が返した有効なハンドル。
+        unsafe { crate::ffi::rin_free(rin) };
+        assert_eq!(DEALLOC_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn c_allocator_zero_size_does_not_invoke_callbacks() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn fail_alloc(_ctx: *mut c_void, _size: usize, _align: usize) -> *mut u8 {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            std::ptr::null_mut()
+        }
+        unsafe extern "C" fn fail_dealloc(
+            _ctx: *mut c_void,
+            _ptr: *mut u8,
+            _size: usize,
+            _align: usize,
+        ) {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut alloc = CAllocator {
+            raw: RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: Some(fail_alloc),
+                dealloc: Some(fail_dealloc),
+            },
+        };
+        for align in [1usize, 8, 4096] {
+            let layout = Layout::from_size_align(0, align).unwrap();
+            let ptr = alloc.alloc(layout).expect("zero-size alloc should succeed");
+            assert_eq!((ptr.as_ptr() as usize) % align, 0);
+            // SAFETY: 直前に `alloc.alloc(layout)` が返したポインタと同じ `layout`。
+            unsafe { alloc.dealloc(ptr, layout) };
+        }
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0);
     }
 }
