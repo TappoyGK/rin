@@ -111,12 +111,14 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + offset).copied()
     }
 
-    /// `start` バイト位置から始まる 1 Unicode スカラー値を返す。
+    /// `start` バイト位置から始まる 1 Unicode スカラー値を O(1) で返す。
     fn char_at(&self, start: usize) -> char {
-        std::str::from_utf8(&self.src[start..])
-            .ok()
-            .and_then(|s| s.chars().next())
-            .unwrap_or(char::REPLACEMENT_CHARACTER)
+        let slice = &self.src[start..(start + 4).min(self.src.len())];
+        let valid = match std::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(e) => std::str::from_utf8(&slice[..e.valid_up_to()]).unwrap_or(""),
+        };
+        valid.chars().next().unwrap_or(char::REPLACEMENT_CHARACTER)
     }
 
     fn bump(&mut self) -> Option<u8> {
