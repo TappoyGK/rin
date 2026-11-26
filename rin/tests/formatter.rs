@@ -22,7 +22,9 @@ fn basic_whitespace_literals_comments_and_definitions() {
     assert_eq!(formatted("`(a  ,b  ,@c)"), "`(a ,b ,@c)\n");
     for source in [
         "\"; \\\"\\n猫\"",
-        "'\\n'",
+        "\\newline",
+        "\\u{41}",
+        "\\a",
         "\"line1\n  line2\"",
         "nan",
         "0xF_F",

@@ -497,12 +497,12 @@ impl fmt::Display for ValueRef<'_> {
                         }
                     }
                     RVal::Bool(b) => f.write_str(if b { "true" } else { "false" })?,
-                    RVal::Char(c) => write!(f, "{c:?}")?,
+                    RVal::Char(c) => crate::lexer::write_rin_char(f, c)?,
                     RVal::None => f.write_str("none")?,
                     RVal::EmptyList => f.write_str("[]")?,
                     RVal::Builtin(b) => write!(f, "<builtin {}>", b.name())?,
                     RVal::Obj(id) => match self.pool.get(id) {
-                        Obj::Str(s) => write!(f, "{:?}", s.as_str())?,
+                        Obj::Str(s) => crate::lexer::write_rin_str(f, s.as_str())?,
                         Obj::Ident(s) => write!(f, "'{}", s.as_str())?,
                         Obj::Cons { head, tail, .. } => {
                             f.write_char('[')?;
