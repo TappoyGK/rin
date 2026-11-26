@@ -38,7 +38,7 @@ flowchart TD
 
 - **読み込み段階（`frozen = false`）**: トップレベルにある宣言のみバイトコードへ落とす。関数本体や式の中の入れ子宣言は構文エラー（`[expr.def]`・`[expr.defn]`・`[expr.module]`）として拒否する。これにより、凍結前に定義した関数を凍結後に呼び出して大域環境やモジュールを書き換える経路を根本から塞いでいる。
 - **実行段階（`frozen = true`）**: トップレベル・入れ子を問わず宣言 4 形式をすべて `[env.frozen]` の構文エラーとし、評価を始める前に拒否する。
-- **VM の防御ガード**（`rin/src/eval/vm/execute.rs`）: 実行時の多重防御として `Op::DefGlobal`・`Op::DefFn`・`Op::Import`・`Op::Export` にも `if self.frozen` の実行時エラーを残している。
+- **VM の防御ガード**（`rin/src/eval/vm/execute.rs`、`rin/src/eval/vm/ops_exec.rs`）: 実行時の多重防御として `Op::DefGlobal`・`Op::DefFn`・`Op::Import`・`Op::Export` にも `if self.frozen` の実行時エラーを残している。
 
 ## 3. 評価単位 `Runner` と `eval_with` の一時束縛
 

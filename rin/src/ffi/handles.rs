@@ -86,6 +86,7 @@ impl ValueHandles {
         }
     }
 
+    #[inline]
     pub(super) fn alloc_slot(&mut self, val: Val, alloc: &mut CAllocator) -> Option<*mut RinValue> {
         let owner = self as *const ValueHandles;
         if !self.free_head.is_null() {
@@ -159,6 +160,7 @@ impl ValueHandles {
 
     /// `val_ptr` を解放リストへ O(1) で返し、保持していた `Val` を返す。
     /// 当プールに属さないポインタ（別の `Rin` のハンドルや `RinEvalResult.value` 等）は安全のため無視して `None` を返す。
+    #[inline]
     pub(super) unsafe fn free_slot(&mut self, val_ptr: *mut RinValue) -> Option<Val> {
         if !unsafe { self.owns_live_val(val_ptr) } {
             return None;
@@ -213,6 +215,7 @@ pub(super) enum RinState {
 }
 
 impl RinState {
+    #[inline]
     pub(super) fn release_val(&mut self, v: Val) {
         match self {
             RinState::Building(b) => b.release_val(v),
