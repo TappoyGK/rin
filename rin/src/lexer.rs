@@ -18,8 +18,11 @@ pub enum TokenKind {
     LBrace,
     RBrace,
     Dot,
-    Comma,
     Colon,
+    Quote,
+    Quasiquote,
+    Unquote,
+    UnquoteSplicing,
     Ident(String),
     Int(i64),
     Float(f64),
@@ -108,6 +111,16 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + offset).copied()
     }
 
+    /// `start` バイト位置から始まる 1 Unicode スカラー値を O(1) で返す。
+    fn char_at(&self, start: usize) -> char {
+        let slice = &self.src[start..(start + 4).min(self.src.len())];
+        let valid = match std::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(e) => std::str::from_utf8(&slice[..e.valid_up_to()]).unwrap_or(""),
+        };
+        valid.chars().next().unwrap_or(char::REPLACEMENT_CHARACTER)
+    }
+
     fn bump(&mut self) -> Option<u8> {
         let b = self.src.get(self.pos).copied()?;
         self.pos += 1;
@@ -190,27 +203,37 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 TokenKind::Dot
             }
-            b',' => {
-                self.bump();
-                TokenKind::Comma
-            }
             b':' => {
                 self.bump();
                 TokenKind::Colon
             }
+            b',' => {
+                self.bump();
+                if self.peek() == Some(b'@') {
+                    self.bump();
+                    TokenKind::UnquoteSplicing
+                } else {
+                    TokenKind::Unquote
+                }
+            }
+            b'`' => {
+                self.bump();
+                TokenKind::Quasiquote
+            }
             b'"' => TokenKind::Str(self.lex_string(span)?),
-            b'\'' => TokenKind::Char(self.lex_char(span)?),
+            b'\'' => self.lex_quote_or_char(span)?,
             b'0'..=b'9' => self.lex_number(span, false)?,
             b'-' if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
                 self.bump();
                 self.lex_number(span, true)?
             }
-            _ if is_ident_start(b) => TokenKind::Ident(self.lex_ident()),
+            _ if is_ident_start(b) => TokenKind::Ident(self.lex_ident(span)?),
             _ => {
+                let ch = self.char_at(self.pos);
                 return Err(Error::lex(
                     "src.token",
                     span,
-                    format!("unexpected character {:?}", b as char),
+                    format!("unexpected character {ch:?}"),
                 ));
             }
         };
@@ -223,6 +246,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_escape(&mut self, span: Span) -> Result<char, Error> {
+        let esc_pos = self.pos;
         let Some(esc) = self.bump() else {
             return Err(Error::lex(
                 "src.escape",
@@ -238,12 +262,74 @@ impl<'a> Lexer<'a> {
             b'"' => Ok('"'),
             b'\'' => Ok('\''),
             b'0' => Ok('\0'),
-            other => Err(Error::lex(
+            b'u' => self.lex_unicode_escape(span),
+            _ => {
+                let ch = self.char_at(esc_pos);
+                for _ in 1..ch.len_utf8() {
+                    self.bump();
+                }
+                Err(Error::lex(
+                    "src.escape",
+                    span,
+                    format!("unknown escape sequence '\\{ch}'"),
+                ))
+            }
+        }
+    }
+
+    fn lex_unicode_escape(&mut self, span: Span) -> Result<char, Error> {
+        if self.bump() != Some(b'{') {
+            return Err(Error::lex(
                 "src.escape",
                 span,
-                format!("unknown escape sequence \\{}", other as char),
-            )),
+                "expected '{' in unicode escape sequence",
+            ));
         }
+        let mut val: u32 = 0;
+        let mut digits = 0usize;
+        loop {
+            match self.bump() {
+                Some(b'}') => break,
+                Some(b) if b.is_ascii_hexdigit() => {
+                    digits += 1;
+                    if digits > 6 {
+                        return Err(Error::lex(
+                            "src.escape",
+                            span,
+                            "unicode escape sequence has too many hex digits",
+                        ));
+                    }
+                    let d = match b {
+                        b'0'..=b'9' => (b - b'0') as u32,
+                        b'a'..=b'f' => (b - b'a' + 10) as u32,
+                        b'A'..=b'F' => (b - b'A' + 10) as u32,
+                        _ => unreachable!(),
+                    };
+                    val = (val << 4) | d;
+                }
+                _ => {
+                    return Err(Error::lex(
+                        "src.escape",
+                        span,
+                        "invalid unicode escape sequence",
+                    ));
+                }
+            }
+        }
+        if digits == 0 {
+            return Err(Error::lex(
+                "src.escape",
+                span,
+                "empty unicode escape sequence",
+            ));
+        }
+        char::from_u32(val).ok_or_else(|| {
+            Error::lex(
+                "src.escape",
+                span,
+                format!("invalid unicode scalar value U+{val:X}"),
+            )
+        })
     }
 
     fn lex_string(&mut self, span: Span) -> Result<String, Error> {
@@ -279,13 +365,29 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_char(&mut self, span: Span) -> Result<char, Error> {
+    fn lex_quote_or_char(&mut self, span: Span) -> Result<TokenKind, Error> {
+        let saved = (self.pos, self.line, self.col);
         self.bump(); // 開始の '\''
         let Some(b) = self.bump() else {
-            return Err(Error::lex("src.char", span, "unterminated char literal"));
+            return Ok(TokenKind::Quote);
         };
+        if matches!(b, b'\'' | b'\n' | b'\r') {
+            (self.pos, self.line, self.col) = saved;
+            self.bump();
+            return Ok(TokenKind::Quote);
+        }
         let ch = if b == b'\\' {
-            self.lex_escape(span)?
+            match self.lex_escape(span) {
+                Ok(c) => c,
+                Err(e) => {
+                    if self.peek() == Some(b'\'') {
+                        return Err(e);
+                    }
+                    (self.pos, self.line, self.col) = saved;
+                    self.bump();
+                    return Ok(TokenKind::Quote);
+                }
+            }
         } else if b < 0x80 {
             b as char
         } else {
@@ -302,10 +404,27 @@ impl<'a> Lexer<'a> {
                 .next()
                 .ok_or_else(|| Error::lex("src.char", span, "empty char literal"))?
         };
-        if self.bump() != Some(b'\'') {
-            return Err(Error::lex("src.char", span, "unterminated char literal"));
+        if self.peek() != Some(b'\'') {
+            (self.pos, self.line, self.col) = saved;
+            self.bump();
+            return Ok(TokenKind::Quote);
         }
-        Ok(ch)
+        self.bump(); // 閉じの '\''
+        if let Some(after) = self.peek()
+            && !is_char_delimiter(after)
+        {
+            if is_quote_rewind_char(b) {
+                (self.pos, self.line, self.col) = saved;
+                self.bump();
+                return Ok(TokenKind::Quote);
+            }
+            return Err(Error::lex(
+                "src.char",
+                span,
+                "unexpected character immediately after char literal",
+            ));
+        }
+        Ok(TokenKind::Char(ch))
     }
 
     fn lex_number(&mut self, span: Span, neg: bool) -> Result<TokenKind, Error> {
@@ -400,7 +519,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_ident(&mut self) -> String {
+    fn lex_ident(&mut self, span: Span) -> Result<String, Error> {
         let mut out = String::new();
         while let Some(b) = self.peek() {
             if is_ident_continue(b) {
@@ -410,11 +529,18 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        out
+        if self.peek() == Some(b'\'') {
+            return Err(Error::lex(
+                "src.ident",
+                span,
+                "single quote '\\'' is not allowed in identifier",
+            ));
+        }
+        Ok(out)
     }
 }
 
-fn is_ident_start(b: u8) -> bool {
+pub(crate) fn is_ident_start(b: u8) -> bool {
     b.is_ascii_alphabetic()
         || matches!(
             b,
@@ -422,6 +548,22 @@ fn is_ident_start(b: u8) -> bool {
         )
 }
 
-fn is_ident_continue(b: u8) -> bool {
+pub(crate) fn is_ident_continue(b: u8) -> bool {
     is_ident_start(b) || b.is_ascii_digit()
+}
+
+pub(crate) fn is_valid_ident(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let Some(&first) = bytes.first() else {
+        return false;
+    };
+    is_ident_start(first) && bytes[1..].iter().copied().all(is_ident_continue)
+}
+
+pub(crate) fn is_char_delimiter(b: u8) -> bool {
+    b.is_ascii_whitespace() || matches!(b, b';' | b')' | b']' | b'}')
+}
+
+pub(crate) fn is_quote_rewind_char(b: u8) -> bool {
+    matches!(b, b'`' | b',' | b'(' | b'[' | b'{')
 }

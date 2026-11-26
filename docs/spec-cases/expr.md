@@ -61,7 +61,7 @@
 **入力：**
 
 ```rin
-(let (c1 Card { id: "strike", cost: 1 })
+(let (c1 Card { id: "strike" cost: 1 })
   (let (c2 (with c1 { cost: 0 }))
     (+ c1.cost c2.cost)))
 ```
@@ -97,14 +97,14 @@
 **入力：**
 
 ```rin
-(1, "ok", true)
+(tuple 1 "ok" true)
 ```
 
 **期待結果：**
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 値 | `(1, "ok", true)` |
+| 既定 | 値 | `(tuple 1 "ok" true)` |
 
 ### expr-007 通常の評価ではdeftestを拒否する
 
@@ -167,11 +167,44 @@
 **入力：**
 
 ```rin
-(P { x: 1, x: 2 }.x, (with P { x: 1 } { x: 2, x: 3 }).x)
+(tuple P { x: 1 x: 2 }.x (with P { x: 1 } { x: 2 x: 3 }).x)
 ```
 
 **期待結果：**
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 値 | `(2, 3)` |
+| 既定 | 値 | `(tuple 2 3)` |
+
+### expr-011 quote と糖衣正規化
+
+主根拠：`[expr.quote]`
+
+**入力：**
+
+```rin
+'(+ 1 [a b] Point { x: 2 } p.x xs[0])
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `['+ 1 ['list 'a 'b] ['struct 'Point ['x 2]] ['field 'p 'x] ['index 'xs 0]]` |
+
+### expr-012 quasiquote の unquote と unquote-splicing
+
+主根拠：`[expr.quasiquote]`
+
+**入力：**
+
+```rin
+(let (x 10 xs [20 30])
+  `(head ,x ,@xs tail))
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `['head 10 20 30 'tail]` |

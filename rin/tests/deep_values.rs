@@ -344,7 +344,7 @@ fn formatting_and_schema_error_order() {
             ("b".into(), Value::some(Value::Bool(true))),
         ]),
     );
-    assert_eq!(v.to_string(), "S { a: [1, none], b: some(true) }");
+    assert_eq!(v.to_string(), "S { a: [1 none] b: some(true) }");
     assert_eq!(
         format!("{:?}", Value::list(vec![Value::Int(1)])),
         "List(Cons { head: Int(1), tail: Nil, len: 1 })"

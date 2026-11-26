@@ -43,6 +43,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     }
                 }
             }
+            ExprKind::Quote(datum) | ExprKind::Quasiquote(datum) => {
+                self.push_step(steps, Step::Datum(datum.as_ref()), span)?;
+            }
             ExprKind::List(items) => {
                 let items = items.as_slice();
                 let Ok(count) = u32::try_from(items.len()) else {
@@ -495,6 +498,87 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             ExprKind::Export { .. } => {
                 return Err(self.fail_decl("export", span));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn step_datum(
+        &mut self,
+        datum: &'a Datum,
+        steps: &mut RawVec<Step<'a>>,
+    ) -> Result<(), Failed> {
+        let span = datum.span;
+        self.push_tick_span(span)?;
+        match &datum.kind {
+            DatumKind::Int(n) => {
+                self.emit_raw(Op::Int(*n), span)?;
+            }
+            DatumKind::Float(x) => {
+                let idx = self.add_float(*x, span)?;
+                self.emit_raw(Op::Float(idx), span)?;
+            }
+            DatumKind::Bool(b) => {
+                self.emit_raw(Op::Bool(*b), span)?;
+            }
+            DatumKind::Char(c) => {
+                self.emit_raw(Op::Char(*c), span)?;
+            }
+            DatumKind::Str(s) => {
+                let idx = self.add_string(s.as_str(), span)?;
+                self.emit(Op::Str(idx), span)?;
+            }
+            DatumKind::None => {
+                self.emit_raw(Op::None, span)?;
+            }
+            DatumKind::Ident(s) => {
+                let idx = self.add_string(s.as_str(), span)?;
+                self.emit(Op::Ident(idx), span)?;
+            }
+            DatumKind::Unquote(expr) | DatumKind::UnquoteSplicing(expr) => {
+                self.push_step(
+                    steps,
+                    Step::Expr {
+                        expr: expr.as_ref(),
+                        is_tail: false,
+                    },
+                    expr.span,
+                )?;
+            }
+            DatumKind::List(items) => {
+                let items = items.as_slice();
+                let Ok(count) = u32::try_from(items.len()) else {
+                    return Err(self.fail_parse(
+                        "compile.capacity",
+                        span,
+                        "quoted list literal too large",
+                    ));
+                };
+                if count == 0 {
+                    self.emit(Op::EmptyList, span)?;
+                } else {
+                    let has_splice = items
+                        .iter()
+                        .any(|d| matches!(d.kind, DatumKind::UnquoteSplicing(_)));
+                    let op = if has_splice {
+                        let region = self.current_region();
+                        let mut mask = RawVec::new();
+                        for item in items {
+                            let flag = u8::from(matches!(item.kind, DatumKind::UnquoteSplicing(_)));
+                            if self.pool.push_code(region, &mut mask, flag).is_none() {
+                                return Err(self.fail_oom(span));
+                            }
+                        }
+                        let mask_idx = self.add_splice_mask(mask, span)?;
+                        Op::MakeListSplice(mask_idx)
+                    } else {
+                        Op::MakeList(count)
+                    };
+                    self.push_step(steps, Step::EmitFlushed { op, span }, span)?;
+                    for item in items.iter().rev() {
+                        self.push_step(steps, Step::Datum(item), item.span)?;
+                    }
+                }
             }
         }
         Ok(())

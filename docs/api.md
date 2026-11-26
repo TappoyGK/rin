@@ -88,6 +88,7 @@ pub fn val_bool(&self, b: bool) -> Val
 pub fn val_char(&self, c: char) -> Val
 pub fn val_none(&self) -> Val
 pub fn val_str(&mut self, s: &str) -> Result<Val, ErrorRef<'_>>
+pub fn val_ident(&mut self, s: &str) -> Result<Val, ErrorRef<'_>>
 pub fn val_list(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
 pub fn val_array(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
 pub fn val_tuple(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
@@ -117,8 +118,8 @@ pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Re
   - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり、パニックするか別の値を読む。特に、解放済みの `Val` をスロット再利用後にもう一度 `release_val` へ渡した場合や、別の `Machine` の `Val`（`ObjId` が範囲内のもの）を `release_val` へ渡した場合は、ほかのハンドルや束縛が保持している別の値を解放し、それらが再利用後の別値を指すようになることがある（どの場合も境界検査によりメモリの範囲外には触れない）。
 - **`ValueRef<'_>` と補助借用ビュー**：
   - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
-  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
-  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
+  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `Ident` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
+  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_ident`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
   - `Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
 - **`ErrorRef<'_>`**：
   - マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。次の可変操作まで有効。`Display` を含めシステムヒープを一切使わない。`std-value` フィーチャ有効時は `to_error(&self) -> Error` で所有型 `Error` へ変換できる。
@@ -233,7 +234,7 @@ impl Error {
 
 ### 1.5 深い値の処理（`std-value` 側の `Value` とゼロヒープ経路）
 
-`std-value` フィーチャ有効時のホスト側所有コンテナは `Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
+`std-value` フィーチャ有効時のホスト側所有コンテナおよび識別子値は `Value::ident`・`Value::array`・`tuple`・`structure`・`variant`・`some`・`ok`・`err` で構築する（`Value::Ident` は有効な識別子名のみ取り込める）。`Array` / `Tuple` の要素は `Rc<ValueItems>`、`Struct` のフィールドは `Rc<ValueFields>`、option / result / variant の子は `Rc<ValueChild>` が所有する。これらの型は `rin::value` で公開し、元の `Vec<Value>`・`BTreeMap<String, Value>`・`Value` への `Deref` / `DerefMut` と `From` を提供する。
 
 解放処理はこれらの所有データと `ListNode` に実装している。`Value` 自身は独自の `Drop` を持たないため、パターンマッチで所有データを取り出せる。共有参照の解放では参照カウントを減らすだけで、最後の所有者になったときだけ子を処理する。
 
@@ -338,7 +339,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 
 ### 2.1 型定義
 
-- `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_STR`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`
+- `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_STR`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`, `RIN_TAG_IDENT`
 - `RinLimits`：`{ size_t steps; size_t depth; size_t memory_bytes; }`
 - `RinRegionConfig`：`{ size_t initial_block; size_t max_block; }`（内部で `initial_block` は `256` 以上に、`max_block` は `initial_block` 以上に正規化される）
 - `RinMemoryConfig`：`{ RinRegionConfig perm; RinRegionConfig obj; RinRegionConfig work; }`
@@ -435,6 +436,7 @@ if (!result.ok) {
 | `RinValue *rin_float(Rin *rin, double x)` | `f64` 値を生成する |
 | `RinValue *rin_bool(Rin *rin, bool b)` | `bool` 値を生成する |
 | `RinValue *rin_str(Rin *rin, const char *s)` | UTF-8 文字列を生成する |
+| `RinValue *rin_ident(Rin *rin, const char *s)` | UTF-8 識別子値（`ident`）を生成する（無効な識別子名は `RIN_ERR_HOST` を記録して `NULL` を返す） |
 | `RinValue *rin_i64s(Rin *rin, const int64_t *ptr, size_t len)` | `i64` の `array` を生成する |
 | `RinValue *rin_f64s(Rin *rin, const double *ptr, size_t len)` | `f64` の `array` を生成する |
 | `RinValue *rin_nil(Rin *rin)` | 空リスト `[]` を生成する |
@@ -457,6 +459,7 @@ if (!result.ok) {
 | `bool rin_as_float(const Rin *rin, const RinValue *val, double *out)` | `f64` なら `*out` に書き込み `true` を返す |
 | `bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out)` | `bool` なら `*out` に書き込み `true` を返す |
 | `const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len)` | `Str` の UTF-8 バイト列を借用して返す（**NUL 終端ではない**。長さは `*out_len` へ書き込み、空文字列は非 NULL ポインタと長さ 0 を返す。`val` が有効な間のみ有効。非文字列または `out_len == NULL` は `NULL` を返し、失敗時は `*out_len` を書き換えない） |
+| `const uint8_t *rin_as_ident(const Rin *rin, const RinValue *val, size_t *out_len)` | `Ident` の UTF-8 バイト列を借用して返す（`rin_as_str` と同じく NUL 終端ではない。非 `Ident` または `out_len == NULL` は `NULL` を返し `*out_len` を書き換えない） |
 | `size_t rin_len(const Rin *rin, const RinValue *val)` | `List`、`Array`、または `Tuple` の要素数を返す |
 | `RinValue *rin_car(Rin *rin, const RinValue *val)` | `List` の先頭要素を所有 `RinValue *` で返す（空・非リストは `NULL`、`rin_drop` で解放） |
 | `RinValue *rin_cdr(Rin *rin, const RinValue *val)` | `List` の残余リストを所有 `RinValue *` で返す（O(1)、非リストは `NULL`、`rin_drop` で解放） |

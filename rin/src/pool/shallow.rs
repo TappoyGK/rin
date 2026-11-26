@@ -24,7 +24,7 @@ impl Pool<'_> {
         if depth == 32
             && !matches!(
                 self.get(id),
-                Obj::Str(_) | Obj::Closure { .. } | Obj::Module { .. }
+                Obj::Str(_) | Obj::Ident(_) | Obj::Closure { .. } | Obj::Module { .. }
             )
         {
             return self.export_deep(val);
@@ -43,6 +43,7 @@ impl Pool<'_> {
                 Value::list(items)
             }
             Obj::Str(s) => Value::str(s.as_str()),
+            Obj::Ident(s) => Value::ident(s.as_str()),
             Obj::Array(xs) => Value::array(
                 xs.iter()
                     .map(|v| self.export_shallow(*v, depth + 1))
@@ -144,6 +145,17 @@ impl Pool<'_> {
                     )
                 }),
             Value::Str(s) => self.alloc_str(s.as_str(), span).map(RVal::Obj),
+            Value::Ident(s) => {
+                if !crate::lexer::is_valid_ident(s.as_str()) {
+                    return Err(self.core.err_fmt(
+                        "host.value",
+                        ErrorKind::Runtime,
+                        span,
+                        format_args!("invalid identifier '{s}'"),
+                    ));
+                }
+                self.alloc_ident(s.as_str(), span).map(RVal::Obj)
+            }
             Value::List(xs) => {
                 let items: Vec<_> = xs.iter().collect();
                 let mut acc = RVal::EmptyList;

@@ -20,6 +20,22 @@ impl EnvState<'_> {
         }
     }
 
+    pub(super) fn val_ident(&mut self, s: &str) -> Result<Val, ErrorRef<'_>> {
+        if !crate::lexer::is_valid_ident(s) {
+            self.pool.core.err_str(
+                "host.value",
+                ErrorKind::Runtime,
+                Span::default(),
+                "invalid identifier",
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
+        match self.pool.alloc_ident(s, Span::default()) {
+            Ok(id) => Ok(Val(RVal::Obj(id))),
+            Err(_) => Err(self.pool.core.error.as_ref()),
+        }
+    }
+
     pub(super) fn val_list(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>> {
         let mut tail = RVal::EmptyList;
         for &item in items.iter().rev() {

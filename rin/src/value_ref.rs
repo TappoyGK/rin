@@ -23,6 +23,7 @@ pub enum ValueTag {
     Ok,
     Err,
     Fn,
+    Ident,
 }
 
 /// [`crate::Builder`] / [`crate::Machine`] のアロケータ上に確保された値への不透明ハンドル。
@@ -70,6 +71,7 @@ impl<'a> ValueRef<'a> {
             RVal::Builtin(_) => ValueTag::Fn,
             RVal::Obj(id) => match self.pool.get(id) {
                 Obj::Str(_) => ValueTag::Str,
+                Obj::Ident(_) => ValueTag::Ident,
                 Obj::Cons { .. } => ValueTag::List,
                 Obj::Array(_) => ValueTag::Array,
                 Obj::Tuple(_) => ValueTag::Tuple,
@@ -129,6 +131,16 @@ impl<'a> ValueRef<'a> {
         match self.val {
             RVal::Obj(id) => match self.pool.get(id) {
                 Obj::Str(s) => Some(s.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn as_ident(&self) -> Option<&'a str> {
+        match self.val {
+            RVal::Obj(id) => match self.pool.get(id) {
+                Obj::Ident(s) => Some(s.as_str()),
                 _ => None,
             },
             _ => None,
@@ -462,7 +474,7 @@ impl fmt::Display for ValueRef<'_> {
                             head, tail: next, ..
                         } = self.pool.get(id)
                     {
-                        f.write_str(", ")?;
+                        f.write_str(" ")?;
                         if !push(&mut stack, &mut sp, Frame::ListTail(*next))
                             || !push(&mut stack, &mut sp, Frame::Val(*head))
                         {
@@ -491,6 +503,7 @@ impl fmt::Display for ValueRef<'_> {
                     RVal::Builtin(b) => write!(f, "<builtin {}>", b.name())?,
                     RVal::Obj(id) => match self.pool.get(id) {
                         Obj::Str(s) => write!(f, "{:?}", s.as_str())?,
+                        Obj::Ident(s) => write!(f, "'{}", s.as_str())?,
                         Obj::Cons { head, tail, .. } => {
                             f.write_char('[')?;
                             if !push(&mut stack, &mut sp, Frame::Text("]"))
@@ -512,17 +525,20 @@ impl fmt::Display for ValueRef<'_> {
                                     f.write_str("...")?;
                                     break;
                                 }
-                                if i > 0 && !push(&mut stack, &mut sp, Frame::Text(", ")) {
+                                if i > 0 && !push(&mut stack, &mut sp, Frame::Text(" ")) {
                                     f.write_str("...")?;
                                     break;
                                 }
                             }
                         }
                         Obj::Tuple(xs) => {
-                            f.write_char('(')?;
                             let items = xs.as_slice();
-                            let suffix = if items.len() == 1 { ",)" } else { ")" };
-                            if !push(&mut stack, &mut sp, Frame::Text(suffix)) {
+                            f.write_str(if items.is_empty() {
+                                "(tuple"
+                            } else {
+                                "(tuple "
+                            })?;
+                            if !push(&mut stack, &mut sp, Frame::Text(")")) {
                                 f.write_str("...)")?;
                                 continue;
                             }
@@ -531,7 +547,7 @@ impl fmt::Display for ValueRef<'_> {
                                     f.write_str("...")?;
                                     break;
                                 }
-                                if i > 0 && !push(&mut stack, &mut sp, Frame::Text(", ")) {
+                                if i > 0 && !push(&mut stack, &mut sp, Frame::Text(" ")) {
                                     f.write_str("...")?;
                                     break;
                                 }
@@ -558,7 +574,7 @@ impl fmt::Display for ValueRef<'_> {
                                     f.write_str("...")?;
                                     break;
                                 }
-                                if i > 0 && !push(&mut stack, &mut sp, Frame::Text(", ")) {
+                                if i > 0 && !push(&mut stack, &mut sp, Frame::Text(" ")) {
                                     f.write_str("...")?;
                                     break;
                                 }

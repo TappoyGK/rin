@@ -23,6 +23,10 @@ impl Parser<'_, '_, '_> {
             WorkTokenKind::Int(n) => Ok(Pattern::Int(n)),
             WorkTokenKind::Str(s) => Ok(Pattern::Str(s)),
             WorkTokenKind::Char(c) => Ok(Pattern::Char(c)),
+            WorkTokenKind::Quote => {
+                let (name, _) = self.expect_ident("identifier after ''' in pattern")?;
+                Ok(Pattern::Ident(name))
+            }
             WorkTokenKind::Ident(name) => match name.as_str() {
                 "_" => Ok(Pattern::Wildcard),
                 "true" => Ok(Pattern::Bool(true)),

@@ -120,6 +120,7 @@ pub enum Value {
     Bool(bool),
     Char(char),
     Str(Rc<String>),
+    Ident(Rc<String>),
     List(Rc<ListNode>),
     Array(Rc<ValueItems>),
     Tuple(Rc<ValueItems>),
@@ -152,6 +153,10 @@ impl Value {
 
     pub fn str(s: impl Into<String>) -> Self {
         Self::Str(Rc::new(s.into()))
+    }
+
+    pub fn ident(s: impl Into<String>) -> Self {
+        Self::Ident(Rc::new(s.into()))
     }
 
     pub fn list(items: Vec<Value>) -> Self {
@@ -201,7 +206,7 @@ impl Value {
             let own = match v {
                 Value::Void | Value::None | Value::Builtin(_) => 8,
                 Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) => 16,
-                Value::Str(s) => 24 + s.len(),
+                Value::Str(s) | Value::Ident(s) => 24 + s.len(),
                 Value::List(xs) => {
                     work.extend(xs.iter());
                     24
@@ -245,6 +250,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Char(_) => "char",
             Value::Str(_) => "string",
+            Value::Ident(_) => "ident",
             Value::List(_) => "list",
             Value::Array(_) => "array",
             Value::Tuple(_) => "tuple",
@@ -273,6 +279,7 @@ fn equal(a: &Value, b: &Value, depth: usize) -> bool {
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Char(a), Value::Char(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Ident(a), Value::Ident(b)) => a == b,
         (Value::Builtin(a), Value::Builtin(b)) => a == b,
         _ => equal_nested(a, b, depth),
     }
@@ -352,6 +359,7 @@ fn equal_deep(a: &Value, b: &Value) -> bool {
             (Value::Bool(a), Value::Bool(b)) if a == b => {}
             (Value::Char(a), Value::Char(b)) if a == b => {}
             (Value::Str(a), Value::Str(b)) if a == b => {}
+            (Value::Ident(a), Value::Ident(b)) if a == b => {}
             (Value::Builtin(a), Value::Builtin(b)) if a == b => {}
             (Value::List(a), Value::List(b)) => {
                 if a.len() != b.len() {

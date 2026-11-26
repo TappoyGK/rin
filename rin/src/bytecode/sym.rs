@@ -61,6 +61,8 @@ pub(crate) enum BuiltinId {
     Unique,
     ListToArray,
     ArrayToList,
+    IdentToText,
+    TextToIdent,
 }
 
 impl BuiltinId {
@@ -118,6 +120,8 @@ impl BuiltinId {
         Self::Unique,
         Self::ListToArray,
         Self::ArrayToList,
+        Self::IdentToText,
+        Self::TextToIdent,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -175,6 +179,8 @@ impl BuiltinId {
             Self::Unique => "unique",
             Self::ListToArray => "list->array",
             Self::ArrayToList => "array->list",
+            Self::IdentToText => "ident->text",
+            Self::TextToIdent => "text->ident",
         }
     }
 }
@@ -238,6 +244,8 @@ pub(crate) fn static_sym_id(name: &str) -> Option<u32> {
         "unique" => Some(BuiltinId::Unique as u32),
         "list->array" => Some(BuiltinId::ListToArray as u32),
         "array->list" => Some(BuiltinId::ArrayToList as u32),
+        "ident->text" => Some(BuiltinId::IdentToText as u32),
+        "text->ident" => Some(BuiltinId::TextToIdent as u32),
         "pi" => Some(PI_SYM_ID),
         _ => None,
     }

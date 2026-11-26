@@ -26,6 +26,7 @@ typedef enum RinTag {
     RIN_TAG_OK = 13,
     RIN_TAG_ERR = 14,
     RIN_TAG_FN = 15,
+    RIN_TAG_IDENT = 16,
 } RinTag;
 
 typedef struct RinLimits {
@@ -166,6 +167,7 @@ RinValue *rin_int(Rin *rin, int64_t n);
 RinValue *rin_float(Rin *rin, double x);
 RinValue *rin_bool(Rin *rin, bool b);
 RinValue *rin_str(Rin *rin, const char *s);
+RinValue *rin_ident(Rin *rin, const char *s);
 RinValue *rin_i64s(Rin *rin, const int64_t *ptr, size_t len);
 RinValue *rin_f64s(Rin *rin, const double *ptr, size_t len);
 RinValue *rin_nil(Rin *rin);
@@ -187,6 +189,7 @@ bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out);
 bool rin_as_float(const Rin *rin, const RinValue *val, double *out);
 bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out);
 const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len);
+const uint8_t *rin_as_ident(const Rin *rin, const RinValue *val, size_t *out_len);
 size_t rin_len(const Rin *rin, const RinValue *val);
 RinValue *rin_car(Rin *rin, const RinValue *val);
 RinValue *rin_cdr(Rin *rin, const RinValue *val);

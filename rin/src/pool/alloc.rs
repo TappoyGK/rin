@@ -125,6 +125,58 @@ impl Pool<'_> {
         self.alloc_obj(Obj::Str(os), span)
     }
 
+    /// `Obj::Ident` を確保して `ObjId` を返す。
+    pub fn alloc_ident(&mut self, s: &str, span: Span) -> Result<ObjId, ErrRecorded> {
+        let os = self.alloc_obj_str(s, span)?;
+        self.alloc_obj(Obj::Ident(os), span)
+    }
+
+    /// 既存の `ObjStr` ペイロードを複製して `Obj::Str` を確保する。
+    pub fn alloc_str_from_obj_str(
+        &mut self,
+        src: ObjStr,
+        span: Span,
+    ) -> Result<ObjId, ErrRecorded> {
+        let os = if src.len == 0 {
+            ObjStr::empty()
+        } else {
+            let Some(block) = self.obj_heap.alloc(&mut self.core, src.len, 1) else {
+                return Err(self.oom_limit_error(span));
+            };
+            // SAFETY: `src` は既存の `ObjHeap` ブロックで `block` と非重複。
+            unsafe { std::ptr::copy_nonoverlapping(src.ptr.as_ptr(), block.ptr.as_ptr(), src.len) };
+            ObjStr {
+                ptr: block.ptr,
+                len: src.len,
+                block_size: block.actual_size,
+            }
+        };
+        self.alloc_obj(Obj::Str(os), span)
+    }
+
+    /// 既存の `ObjStr` ペイロードを複製して `Obj::Ident` を確保する。
+    pub fn alloc_ident_from_obj_str(
+        &mut self,
+        src: ObjStr,
+        span: Span,
+    ) -> Result<ObjId, ErrRecorded> {
+        let os = if src.len == 0 {
+            ObjStr::empty()
+        } else {
+            let Some(block) = self.obj_heap.alloc(&mut self.core, src.len, 1) else {
+                return Err(self.oom_limit_error(span));
+            };
+            // SAFETY: `src` は既存の `ObjHeap` ブロックで `block` と非重複。
+            unsafe { std::ptr::copy_nonoverlapping(src.ptr.as_ptr(), block.ptr.as_ptr(), src.len) };
+            ObjStr {
+                ptr: block.ptr,
+                len: src.len,
+                block_size: block.actual_size,
+            }
+        };
+        self.alloc_obj(Obj::Ident(os), span)
+    }
+
     /// 所有権を引き受けた `RVal` スライスから `Obj::Array` を確保する。失敗時は全要素を解放する。
     pub fn alloc_array_owned(&mut self, items: &[RVal], span: Span) -> Result<ObjId, ErrRecorded> {
         match self.alloc_obj_slice(items, span) {

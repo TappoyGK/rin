@@ -45,6 +45,7 @@ fn take_type_children(ty: &mut TypeExpr, next: &mut Option<TypeExpr>, work: &mut
         | TypeExpr::Bool
         | TypeExpr::Char
         | TypeExpr::String
+        | TypeExpr::Ident
         | TypeExpr::Ref(_) => {}
         TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
             push_type_if_non_leaf(std::mem::replace(&mut **t, TypeExpr::Any), next, work);

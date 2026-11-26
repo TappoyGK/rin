@@ -95,7 +95,8 @@ impl Schema {
                 | TypeExpr::F64
                 | TypeExpr::Bool
                 | TypeExpr::Char
-                | TypeExpr::String => {}
+                | TypeExpr::String
+                | TypeExpr::Ident => {}
                 TypeExpr::List(inner) | TypeExpr::Array(inner) | TypeExpr::Option(inner) => {
                     stack.push(inner);
                 }
@@ -311,6 +312,7 @@ impl SchemaParser {
                                 "bool" => TypeExpr::Bool,
                                 "char" => TypeExpr::Char,
                                 "string" => TypeExpr::String,
+                                "ident" => TypeExpr::Ident,
                                 _ => TypeExpr::Ref(name),
                             };
                             next = Next::Have(ty);

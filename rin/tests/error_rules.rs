@@ -110,7 +110,7 @@ fn language_diagnostics_and_display() {
         ("'\\q'", ErrorKind::Lex, "src.escape"),
         ("9223372036854775808", ErrorKind::Lex, "src.int"),
         ("1e", ErrorKind::Lex, "src.float"),
-        ("'ab'", ErrorKind::Lex, "src.char"),
+        ("'a'b", ErrorKind::Lex, "src.char"),
         ("(", ErrorKind::Parse, "src.syntax"),
         ("(fn ())", ErrorKind::Parse, "expr.body"),
         ("(match 1 (1.5 0))", ErrorKind::Parse, "pat.kinds"),
@@ -172,7 +172,7 @@ fn schema_diagnostics() {
     }
     for (schema, value, rule) in [
         ("i64", "true", "schema.type"),
-        ("(tuple i64 i64)", "(1, 2, 3)", "schema.tuple"),
+        ("(tuple i64 i64)", "(tuple 1 2 3)", "schema.tuple"),
         ("(struct Point (x i64))", "Point{}", "schema.struct"),
         ("(variant Color (Red))", "Color.Blue", "schema.variant"),
         ("(variant Color (Red))", "Color.Red(1)", "schema.variant"),

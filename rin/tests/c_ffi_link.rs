@@ -51,7 +51,7 @@ int main(void) {
     Rin *m = rin_new(rin_limits_default(), alloc);
     assert(m != NULL);
 
-    RinEvalResult lr = rin_load(m, "base", "(defn make_card (c) Card { id: \"ember\", cost: (- c 1) })");
+    RinEvalResult lr = rin_load(m, "base", "(defn make_card (c) Card { id: \"ember\" cost: (- c 1) })");
     assert(lr.ok && lr.value == NULL);
     assert(rin_last_error(m) == NULL);
 

@@ -33,6 +33,7 @@ pub(super) struct StructFieldFrame {
     pub(super) fields: RawVec<(RawStr, Expr)>,
     pub(super) key: RawStr,
     pub(super) max_child: usize,
+    pub(super) sexp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +61,7 @@ pub(super) struct WithFieldFrame {
     pub(super) fields: RawVec<(RawStr, Expr)>,
     pub(super) key: RawStr,
     pub(super) max_child: usize,
+    pub(super) sexp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -74,8 +76,73 @@ pub(super) struct MatchArmFrame {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct QqState {
+    pub(super) depth: u32,
+    pub(super) eval: bool,
+}
+
+impl QqState {
+    pub(super) const QUOTE: Self = Self {
+        depth: 0,
+        eval: false,
+    };
+    pub(super) const QUASIQUOTE: Self = Self {
+        depth: 1,
+        eval: true,
+    };
+
+    #[inline]
+    pub(super) const fn enter_qq(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            eval: self.eval,
+        }
+    }
+
+    #[inline]
+    pub(super) const fn enter_unquote(self) -> Self {
+        Self {
+            depth: self.depth - 1,
+            eval: self.eval,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DatumListFrame {
+    pub(super) start: Span,
+    pub(super) items: RawVec<Datum>,
+    pub(super) max_child: usize,
+    pub(super) qq: QqState,
+    pub(super) close: WorkTokenKind,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DatumStructFrame {
+    pub(super) start: Span,
+    pub(super) brace_start: Span,
+    pub(super) items: RawVec<Datum>,
+    pub(super) key: RawStr,
+    pub(super) key_span: Span,
+    pub(super) max_child: usize,
+    pub(super) qq: QqState,
+    pub(super) is_with: bool,
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum ParseFrame {
     PostfixIndex {
+        target: WorkBox<Expr>,
+        target_depth: usize,
+    },
+    FieldTarget {
+        start: Span,
+    },
+    IndexTarget {
+        start: Span,
+    },
+    IndexArg {
+        start: Span,
         target: WorkBox<Expr>,
         target_depth: usize,
     },
@@ -139,4 +206,32 @@ pub(super) enum ParseFrame {
         start: Span,
     },
     MatchArmBody(WorkBox<MatchArmFrame>),
+    QuoteFinish {
+        span: Span,
+        is_paren: bool,
+        is_quasiquote: bool,
+    },
+    DatumUnquote {
+        span: Span,
+        is_paren: bool,
+        is_splicing: bool,
+    },
+    DatumWrap {
+        span: Span,
+        tag: &'static str,
+        is_paren: bool,
+        outer_qq: QqState,
+    },
+    DatumList(WorkBox<DatumListFrame>),
+    DatumIndex {
+        target: WorkBox<Datum>,
+        target_depth: usize,
+        qq: QqState,
+    },
+    DatumVariantData {
+        span: Span,
+        type_name: RawStr,
+        variant: RawStr,
+    },
+    DatumStructFields(WorkBox<DatumStructFrame>),
 }

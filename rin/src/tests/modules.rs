@@ -13,7 +13,7 @@ fn modules_import_export_isolation_and_ffi_call_in() {
             (export deal_damage)
             (defn helper (n) (* n 2))
             (defn deal_damage (target amount)
-              Action { kind: "damage", target: target, amount: (helper amount) })
+              Action { kind: "damage" target: target amount: (helper amount) })
             "#,
         )
         .unwrap();
@@ -116,8 +116,8 @@ fn duplicate_exports_do_not_leak_on_reload_or_unknown_symbol_error() {
     }
     assert_eq!(b_dup.live_bytes(), b_single.live_bytes());
     assert_eq!(
-        b_dup.eval("(import m) (m.a, m.b)").unwrap(),
-        b_single.eval("(import m) (m.a, m.b)").unwrap()
+        b_dup.eval("(import m) (tuple m.a m.b)").unwrap(),
+        b_single.eval("(import m) (tuple m.a m.b)").unwrap()
     );
 
     // 重複指定後に未定義の公開名で失敗しても値が残らない。

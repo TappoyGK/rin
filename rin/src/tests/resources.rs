@@ -89,7 +89,7 @@ fn error_paths_do_not_leak_pool_slots() {
               (let (tmp (range 0 10))
                 (if (== n 0) (/ tmp[0] 0) (boom (- n 1)))))
             (defn loop_step (n)
-              (let (tmp [1, 2, 3])
+              (let (tmp [1 2 3])
                 (loop_step (+ n (len tmp)))))
             "#,
         )

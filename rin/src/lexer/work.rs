@@ -3,7 +3,7 @@
 use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{AllocCore, RawStr, RawVec, WorkArena};
 
-use super::{Lexer, is_ident_continue, is_ident_start};
+use super::{Lexer, is_char_delimiter, is_ident_continue, is_ident_start, is_quote_rewind_char};
 
 /// 作業領域 (`WorkArena`) 上に構築する字句トークン種別（`Copy`・システムヒープ不使用）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,8 +15,11 @@ pub(crate) enum WorkTokenKind {
     LBrace,
     RBrace,
     Dot,
-    Comma,
     Colon,
+    Quote,
+    Quasiquote,
+    Unquote,
+    UnquoteSplicing,
     Ident(RawStr),
     Int(i64),
     Float(f64),
@@ -100,16 +103,25 @@ impl Lexer<'_> {
                 self.bump();
                 WorkTokenKind::Dot
             }
-            b',' => {
-                self.bump();
-                WorkTokenKind::Comma
-            }
             b':' => {
                 self.bump();
                 WorkTokenKind::Colon
             }
+            b',' => {
+                self.bump();
+                if self.peek() == Some(b'@') {
+                    self.bump();
+                    WorkTokenKind::UnquoteSplicing
+                } else {
+                    WorkTokenKind::Unquote
+                }
+            }
+            b'`' => {
+                self.bump();
+                WorkTokenKind::Quasiquote
+            }
             b'"' => WorkTokenKind::Str(self.lex_work_string(span, work, core)?),
-            b'\'' => WorkTokenKind::Char(self.lex_work_char(span, core)?),
+            b'\'' => self.lex_work_quote_or_char(span, core)?,
             b'0'..=b'9' => self.lex_work_number(span, false, work, core)?,
             b'-' if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
                 self.bump();
@@ -117,11 +129,12 @@ impl Lexer<'_> {
             }
             _ if is_ident_start(b) => WorkTokenKind::Ident(self.lex_work_ident(span, work, core)?),
             _ => {
+                let ch = self.char_at(self.pos);
                 return Err(core.err_fmt(
                     "src.token",
                     ErrorKind::Lex,
                     span,
-                    format_args!("unexpected character {:?}", b as char),
+                    format_args!("unexpected character {ch:?}"),
                 ));
             }
         };
@@ -138,6 +151,7 @@ impl Lexer<'_> {
         span: Span,
         core: &mut AllocCore<'_>,
     ) -> Result<char, ErrRecorded> {
+        let esc_pos = self.pos;
         let Some(esc) = self.bump() else {
             return Err(core.err_str(
                 "src.escape",
@@ -154,27 +168,113 @@ impl Lexer<'_> {
             b'"' => Ok('"'),
             b'\'' => Ok('\''),
             b'0' => Ok('\0'),
-            other => Err(core.err_fmt(
-                "src.escape",
-                ErrorKind::Lex,
-                span,
-                format_args!("unknown escape sequence '\\{}'", other as char),
-            )),
+            b'u' => self.lex_work_unicode_escape(span, core),
+            _ => {
+                let ch = self.char_at(esc_pos);
+                for _ in 1..ch.len_utf8() {
+                    self.bump();
+                }
+                Err(core.err_fmt(
+                    "src.escape",
+                    ErrorKind::Lex,
+                    span,
+                    format_args!("unknown escape sequence '\\{ch}'"),
+                ))
+            }
         }
     }
 
-    fn lex_work_char(&mut self, span: Span, core: &mut AllocCore<'_>) -> Result<char, ErrRecorded> {
-        self.bump(); // 開始の '\''
-        let Some(b) = self.bump() else {
+    fn lex_work_unicode_escape(
+        &mut self,
+        span: Span,
+        core: &mut AllocCore<'_>,
+    ) -> Result<char, ErrRecorded> {
+        if self.bump() != Some(b'{') {
             return Err(core.err_str(
-                "src.char",
+                "src.escape",
                 ErrorKind::Lex,
                 span,
-                "unterminated char literal",
+                "expected '{' in unicode escape sequence",
             ));
+        }
+        let mut val: u32 = 0;
+        let mut digits = 0usize;
+        loop {
+            match self.bump() {
+                Some(b'}') => break,
+                Some(b) if b.is_ascii_hexdigit() => {
+                    digits += 1;
+                    if digits > 6 {
+                        return Err(core.err_str(
+                            "src.escape",
+                            ErrorKind::Lex,
+                            span,
+                            "unicode escape sequence has too many hex digits",
+                        ));
+                    }
+                    let d = match b {
+                        b'0'..=b'9' => (b - b'0') as u32,
+                        b'a'..=b'f' => (b - b'a' + 10) as u32,
+                        b'A'..=b'F' => (b - b'A' + 10) as u32,
+                        _ => unreachable!(),
+                    };
+                    val = (val << 4) | d;
+                }
+                _ => {
+                    return Err(core.err_str(
+                        "src.escape",
+                        ErrorKind::Lex,
+                        span,
+                        "invalid unicode escape sequence",
+                    ));
+                }
+            }
+        }
+        if digits == 0 {
+            return Err(core.err_str(
+                "src.escape",
+                ErrorKind::Lex,
+                span,
+                "empty unicode escape sequence",
+            ));
+        }
+        char::from_u32(val).ok_or_else(|| {
+            core.err_fmt(
+                "src.escape",
+                ErrorKind::Lex,
+                span,
+                format_args!("invalid unicode scalar value U+{val:X}"),
+            )
+        })
+    }
+
+    fn lex_work_quote_or_char(
+        &mut self,
+        span: Span,
+        core: &mut AllocCore<'_>,
+    ) -> Result<WorkTokenKind, ErrRecorded> {
+        let saved = (self.pos, self.line, self.col);
+        self.bump(); // 開始の '\''
+        let Some(b) = self.bump() else {
+            return Ok(WorkTokenKind::Quote);
         };
+        if matches!(b, b'\'' | b'\n' | b'\r') {
+            (self.pos, self.line, self.col) = saved;
+            self.bump();
+            return Ok(WorkTokenKind::Quote);
+        }
         let ch = if b == b'\\' {
-            self.lex_work_escape(span, core)?
+            match self.lex_work_escape(span, core) {
+                Ok(c) => c,
+                Err(e) => {
+                    if self.peek() == Some(b'\'') {
+                        return Err(e);
+                    }
+                    (self.pos, self.line, self.col) = saved;
+                    self.bump();
+                    return Ok(WorkTokenKind::Quote);
+                }
+            }
         } else if b < 0x80 {
             b as char
         } else {
@@ -198,15 +298,28 @@ impl Lexer<'_> {
             };
             c
         };
-        if self.bump() != Some(b'\'') {
+        if self.peek() != Some(b'\'') {
+            (self.pos, self.line, self.col) = saved;
+            self.bump();
+            return Ok(WorkTokenKind::Quote);
+        }
+        self.bump(); // 閉じの '\''
+        if let Some(after) = self.peek()
+            && !is_char_delimiter(after)
+        {
+            if is_quote_rewind_char(b) {
+                (self.pos, self.line, self.col) = saved;
+                self.bump();
+                return Ok(WorkTokenKind::Quote);
+            }
             return Err(core.err_str(
                 "src.char",
                 ErrorKind::Lex,
                 span,
-                "unterminated char literal",
+                "unexpected character immediately after char literal",
             ));
         }
-        Ok(ch)
+        Ok(WorkTokenKind::Char(ch))
     }
 
     fn lex_work_ident(
@@ -222,6 +335,14 @@ impl Lexer<'_> {
             } else {
                 break;
             }
+        }
+        if self.peek() == Some(b'\'') {
+            return Err(core.err_str(
+                "src.ident",
+                ErrorKind::Lex,
+                span,
+                "single quote '\\'' is not allowed in identifier",
+            ));
         }
         // SAFETY: `is_ident_continue` は ASCII のみなので有効な UTF-8。
         let s = unsafe { std::str::from_utf8_unchecked(&self.src[start..self.pos]) };

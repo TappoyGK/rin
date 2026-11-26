@@ -375,7 +375,7 @@ impl<'a> Pool<'a> {
                     self.dec_and_enqueue(id, pending);
                 }
             }
-            Obj::Str(s) => {
+            Obj::Str(s) | Obj::Ident(s) => {
                 // SAFETY: `s` は `self.obj_heap` から確保されたブロック。
                 unsafe { self.obj_heap.free(&mut self.core, s.block()) };
             }

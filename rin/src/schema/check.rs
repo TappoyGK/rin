@@ -121,6 +121,9 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
             TypeExpr::String => {
                 expect_match(matches!(value, Value::Str(_)), "string", value, &path)?
             }
+            TypeExpr::Ident => {
+                expect_match(matches!(value, Value::Ident(_)), "ident", value, &path)?
+            }
             TypeExpr::List(ty) => {
                 let Value::List(xs) = value else {
                     return mismatch("list", value.type_name(), &path);

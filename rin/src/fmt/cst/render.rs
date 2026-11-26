@@ -24,22 +24,13 @@ impl Cst<'_> {
                 out.write(" ");
             }
         }
-        let data =
-            group.is_some_and(|(_, _, s)| matches!(s, Style::Data | Style::Tuple | Style::Fields));
         for (i, &child) in items.iter().enumerate() {
-            if i > 0 {
-                if data {
-                    out.write(", ");
-                } else if self.space(items[i - 1], child) {
-                    out.write(" ");
-                }
+            if i > 0 && self.space(items[i - 1], child) {
+                out.write(" ");
             }
             self.render_flat(child, out);
         }
-        if let Some((open, close, style)) = group {
-            if matches!(style, Style::Tuple) && items.len() == 1 {
-                out.write(",");
-            }
+        if let Some((open, close, _style)) = group {
             if open == '{' && !items.is_empty() {
                 out.write(" ");
             }
@@ -139,15 +130,12 @@ impl Cst<'_> {
                 let start = out.column();
                 out.write(&open.to_string());
                 let continuation = match style {
-                    Style::Body(_) | Style::Arm | Style::Fields | Style::Data | Style::Tuple => {
-                        start + 2
-                    }
+                    Style::Body(_) | Style::Arm | Style::Fields | Style::Data => start + 2,
                     _ => start + 1,
                 };
                 let mut align = continuation;
                 let mut count = 0;
                 let mut previous = None;
-                let data = matches!(style, Style::Data | Style::Tuple | Style::Fields);
                 let total = items
                     .iter()
                     .filter(|&&i| !matches!(self.nodes[i].kind, Kind::Comment { .. }))
@@ -166,17 +154,25 @@ impl Cst<'_> {
                         Style::Body(header) => count >= *header,
                         Style::Arm => count >= 1,
                         Style::Fields => true,
-                        Style::Bindings | Style::Data | Style::Tuple => count > 0,
+                        Style::Bindings | Style::Data => count > 0,
                         Style::Call | Style::If => count > 1,
                         Style::Params => false,
                         Style::Root => unreachable!(),
                     };
                     let space = previous.is_some_and(|prev| self.space(prev, part));
-                    let must_attach = previous.is_some_and(|_| !space)
-                        && matches!(
-                            self.tokens[child.range.start].0.kind,
-                            TokenKind::LParen | TokenKind::LBracket
-                        );
+                    let must_attach = previous.is_some_and(|prev| {
+                        !space
+                            && (matches!(
+                                self.tokens[child.range.start].0.kind,
+                                TokenKind::LParen | TokenKind::LBracket
+                            ) || matches!(
+                                self.tokens[self.nodes[prev].range.end - 1].0.kind,
+                                TokenKind::Quote
+                                    | TokenKind::Quasiquote
+                                    | TokenKind::Unquote
+                                    | TokenKind::UnquoteSplicing
+                            ))
+                    });
                     let child_reserve = 1 + if count + 1 == total { reserve } else { 0 };
                     let overflow = child.flat.as_ref().is_some_and(|flat| {
                         out.column() + usize::from(space) + flat + child_reserve > WIDTH
@@ -196,9 +192,6 @@ impl Cst<'_> {
                     }
                     self.render(part, align, child_reserve, out);
                     count += 1;
-                    if data && (count < total || matches!(style, Style::Tuple) && total == 1) {
-                        out.write(",");
-                    }
                     previous = Some(part);
                 }
                 if out.at_start() {

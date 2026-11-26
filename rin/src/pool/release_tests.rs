@@ -18,7 +18,7 @@ impl Counts {
             Obj::Closure { captures, .. } => captures.len(),
             Obj::Some(_) | Obj::Ok(_) | Obj::Err(_) => 1,
             Obj::Variant { data, .. } => usize::from(data.is_some()),
-            Obj::Str(_) | Obj::StructDesc { .. } => 0,
+            Obj::Str(_) | Obj::Ident(_) | Obj::StructDesc { .. } => 0,
         };
     }
 }
