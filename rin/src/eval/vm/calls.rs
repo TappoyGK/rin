@@ -3,8 +3,7 @@ use crate::mem::RawVec;
 
 impl Runner<'_, '_> {
     // 整数の速い経路だけをVMへ展開し、汎用の引数処理は外に置く。
-    #[cfg_attr(debug_assertions, inline(never))]
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    #[inline(always)]
     pub(in crate::eval) fn call_builtin_from_stack(
         &mut self,
         b: BuiltinId,

@@ -8,7 +8,7 @@ mod lower;
 mod scope;
 mod shallow;
 mod steps;
-#[cfg(test)]
+#[cfg(all(test, feature = "std-value"))]
 mod tests;
 use scope::Scope;
 use steps::*;
@@ -91,7 +91,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     Ok(finished.chunk)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std-value"))]
 pub(crate) fn step_size() -> usize {
     std::mem::size_of::<Step<'_>>()
 }

@@ -1,7 +1,11 @@
 //! バイトコード命令の非再帰実行ループとスタックフレーム巻き戻し処理を実装する。
 
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::ptr::NonNull;
+
 use crate::ast::Pattern;
-use crate::bytecode::{BuiltinId, Op};
+use crate::bytecode::{BuiltinId, Chunk, FnProto, FnProtoPtr, Op};
 use crate::diagnostic::{write_available, write_suggest};
 use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{RawVec, WorkBox};
@@ -15,27 +19,54 @@ mod execute;
 mod pattern;
 mod trace;
 
-/// 作業領域の呼び出しフレームスタックに積む軽量 Rin フレーム（64 バイト級）。
+/// タグ付きポインタで `FrameSource<'a>` を 1 ワード（8 バイト）へ圧縮して格納する。
+/// ビット 0 が 0 なら `&Chunk`、1 なら `FnProtoPtr`。
+#[inline(always)]
+fn encode_source(src: FrameSource<'_>) -> NonZeroUsize {
+    let raw = match src {
+        FrameSource::Top(c) => c as *const Chunk as usize,
+        FrameSource::Proto(p) => (p.0.as_ptr() as usize) | 1,
+    };
+    // SAFETY: `&Chunk`・`FnProtoPtr` ともに非 NULL。
+    unsafe { NonZeroUsize::new_unchecked(raw) }
+}
+
+#[inline(always)]
+unsafe fn decode_source<'a>(raw: usize) -> FrameSource<'a> {
+    if (raw & 1) == 0 {
+        // SAFETY: `encode_source` で格納した `&'a Chunk` ポインタ。
+        FrameSource::Top(unsafe { &*(raw as *const Chunk) })
+    } else {
+        // SAFETY: `encode_source` で格納した非 NULL の `FnProtoPtr`。
+        FrameSource::Proto(FnProtoPtr(unsafe {
+            NonNull::new_unchecked((raw & !1) as *mut FnProto)
+        }))
+    }
+}
+
+/// 作業領域の呼び出しフレームスタックに積む軽量 Rin フレーム（厳密 64 バイト・1 キャッシュライン）。
+/// `entry` が `NonZeroUsize` のため `FrameEntry` も 64 バイトに収まる。
 #[derive(Clone, Copy)]
 pub(super) struct RinFrame<'a> {
-    pub(super) entry: FrameSource<'a>,
-    pub(super) tail_source: Option<FrameSource<'a>>,
+    entry: NonZeroUsize,
+    tail_source: usize,
     pub(super) captures: *const RVal,
     pub(super) tail_calls: u32,
     pub(super) base: u32,
     pub(super) frame_stack_start: u32,
     pub(super) ip: u32,
     pub(super) cleanup_stack_to: u32,
-    pub(super) origin_line: u32,
-    pub(super) origin_col: u32,
-    pub(super) caller_module: u32,
-    pub(super) prev_active_module: u32,
-    pub(super) origin_kind: u8,
-    pub(super) origin_builtin: u8,
+    origin_line: u32,
+    origin_col: u32,
+    caller_module: u16,
+    prev_active_module: u16,
+    origin_kind: u8,
+    origin_builtin: u8,
     pub(super) counted_depth: bool,
+    _marker: PhantomData<&'a Chunk>,
 }
 
-const NO_MODULE: u32 = u32::MAX;
+const NO_MODULE: u16 = u16::MAX;
 const ORIGIN_NONE: u8 = 0;
 const ORIGIN_RIN: u8 = 1;
 const ORIGIN_HOST: u8 = 2;
@@ -64,8 +95,8 @@ impl<'a> RinFrame<'a> {
             }
         };
         Self {
-            entry,
-            tail_source: None,
+            entry: encode_source(entry),
+            tail_source: 0,
             captures: captures.as_slice().as_ptr(),
             tail_calls: 0,
             base: base as u32,
@@ -74,22 +105,76 @@ impl<'a> RinFrame<'a> {
             cleanup_stack_to: cleanup_stack_to as u32,
             origin_line,
             origin_col,
-            caller_module: caller_module.unwrap_or(NO_MODULE),
-            prev_active_module: prev_active_module.unwrap_or(NO_MODULE),
+            caller_module: caller_module.map_or(NO_MODULE, |m| m as u16),
+            prev_active_module: prev_active_module.map_or(NO_MODULE, |m| m as u16),
             origin_kind,
             origin_builtin,
             counted_depth,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn entry_source(&self) -> FrameSource<'a> {
+        // SAFETY: `self.entry` は `encode_source` で格納済み。
+        unsafe { decode_source(self.entry.get()) }
+    }
+
+    #[inline(always)]
+    pub(super) fn tail_source(&self) -> Option<FrameSource<'a>> {
+        if self.tail_source == 0 {
+            None
+        } else {
+            // SAFETY: 非 0 の `self.tail_source` は `encode_source` で格納済み。
+            Some(unsafe { decode_source(self.tail_source) })
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn has_tail(&self) -> bool {
+        self.tail_source != 0
+    }
+
+    #[inline(always)]
+    pub(super) fn set_tail_proto(&mut self, proto: FnProtoPtr) {
+        self.tail_source = encode_source(FrameSource::Proto(proto)).get();
+    }
+
+    #[inline(always)]
+    pub(super) fn active_source(&self) -> FrameSource<'a> {
+        let raw = if self.tail_source != 0 {
+            self.tail_source
+        } else {
+            self.entry.get()
+        };
+        // SAFETY: `raw` は `encode_source` で格納済み。
+        unsafe { decode_source(raw) }
+    }
+
+    #[inline(always)]
+    pub(super) fn active_chunk(&self) -> &'a Chunk {
+        let raw = if self.tail_source != 0 {
+            self.tail_source
+        } else {
+            self.entry.get()
+        };
+        if (raw & 1) == 0 {
+            // SAFETY: `encode_source` で格納した `&'a Chunk`。
+            unsafe { &*(raw as *const Chunk) }
+        } else {
+            // SAFETY: `encode_source` で格納した `FnProtoPtr`。
+            unsafe { &(*((raw & !1) as *const FnProto)).chunk }
         }
     }
 
     #[inline(always)]
     pub(super) fn prev_mod(&self) -> Option<u32> {
-        (self.prev_active_module != NO_MODULE).then_some(self.prev_active_module)
+        (self.prev_active_module != NO_MODULE).then_some(self.prev_active_module as u32)
     }
 
     #[inline(always)]
     pub(super) fn caller_mod(&self) -> Option<u32> {
-        (self.caller_module != NO_MODULE).then_some(self.caller_module)
+        (self.caller_module != NO_MODULE).then_some(self.caller_module as u32)
     }
 
     #[inline(always)]
@@ -123,6 +208,11 @@ pub(super) enum FrameEntry<'a> {
     Rin(RinFrame<'a>),
     Builtin(WorkBox<BuiltinFrame>),
 }
+
+const _: () = {
+    assert!(std::mem::size_of::<RinFrame<'_>>() <= 64);
+    assert!(std::mem::size_of::<FrameEntry<'_>>() <= 64);
+};
 
 pub(super) enum FrameAction {
     Done(RVal),
@@ -576,9 +666,11 @@ impl<'a> Runner<'a, '_> {
     #[cold]
     #[inline(never)]
     fn unwind_rin_frame(&mut self, frame: RinFrame<'_>) {
+        let entry_src = frame.entry_source();
+        let tail_src = frame.tail_source();
         self.record_unwind_frame(
-            &frame.entry,
-            frame.tail_source.as_ref(),
+            &entry_src,
+            tail_src.as_ref(),
             frame.tail_calls as usize,
             frame.origin(),
             frame.caller_mod(),

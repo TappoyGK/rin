@@ -493,12 +493,12 @@ pub(crate) struct Pool<'a> {
     /// 最終チャンク内の初期化済みスロット数。
     last_chunk_len: usize,
     free_head: Option<u32>,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std-value"))]
     release_counts: release_tests::Counts,
 }
 
 impl<'a> Pool<'a> {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std-value"))]
     pub fn new(alloc: &'a mut dyn Allocator, max_bytes: usize) -> Self {
         Self::with_config(alloc, max_bytes, MemoryConfig::default())
     }
@@ -517,7 +517,7 @@ impl<'a> Pool<'a> {
             chunks: ChunkTable::new(),
             last_chunk_len: 0,
             free_head: None,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "std-value"))]
             release_counts: release_tests::Counts::default(),
         }
     }
@@ -620,19 +620,66 @@ impl<'a> Pool<'a> {
     }
 
     /// 参照カウントを減らし、0 になったオブジェクト群を侵入型 `Slot::Dying` リストで追加確保なしに反復解放する。
+    ///
+    /// 単一鎖（特に `Cons` リストや葉オブジェクト）は `Slot::Dying` を経由せず直接 `Slot::Free` へ戻すことで
+    /// スロット書き換え回数を最小化する。
     pub fn release(&mut self, root: ObjId) {
         let mut pending: Option<u32> = None;
-        self.dec_and_enqueue(root, &mut pending);
-        while let Some(id_u32) = pending {
-            let id = ObjId(id_u32);
-            let next_free = self.free_head;
-            let prev = std::mem::replace(self.slot_mut(id), Slot::Free { next: next_free });
-            self.free_head = Some(id_u32);
-            if let Slot::Dying { next, obj } = prev {
+        let mut direct: Option<ObjId> = Some(root);
+        loop {
+            let obj = if let Some(id) = direct.take() {
+                #[cfg(all(test, feature = "std-value"))]
+                {
+                    self.release_counts.references += 1;
+                }
+                let next_free = self.free_head;
+                let slot = self.slot_mut(id);
+                match slot {
+                    Slot::Live { rc, .. } if *rc > 1 => {
+                        *rc -= 1;
+                        continue;
+                    }
+                    Slot::Live { .. } => {
+                        let prev = std::mem::replace(slot, Slot::Free { next: next_free });
+                        self.free_head = Some(id.0);
+                        self.core.uncharge_obj(SLOT_BYTES);
+                        let Slot::Live { obj, .. } = prev else {
+                            unreachable!();
+                        };
+                        obj
+                    }
+                    Slot::Free { .. } | Slot::Dying { .. } => continue,
+                }
+            } else if let Some(id_u32) = pending {
+                let id = ObjId(id_u32);
+                let next_free = self.free_head;
+                let prev = std::mem::replace(self.slot_mut(id), Slot::Free { next: next_free });
+                self.free_head = Some(id_u32);
+                let Slot::Dying { next, obj } = prev else {
+                    unreachable!();
+                };
                 pending = next;
                 self.core.uncharge_obj(SLOT_BYTES);
-                #[cfg(test)]
-                self.release_counts.freed(&obj);
+                obj
+            } else {
+                break;
+            };
+
+            #[cfg(all(test, feature = "std-value"))]
+            self.release_counts.freed(&obj);
+
+            if let Obj::Cons { head, tail, .. } = obj {
+                if let RVal::Obj(h) = head {
+                    if let RVal::Obj(t) = tail {
+                        self.dec_and_enqueue(h, &mut pending);
+                        direct = Some(t);
+                    } else {
+                        direct = Some(h);
+                    }
+                } else if let RVal::Obj(t) = tail {
+                    direct = Some(t);
+                }
+            } else {
                 self.free_obj_and_enqueue_children(obj, &mut pending);
             }
         }
@@ -640,7 +687,7 @@ impl<'a> Pool<'a> {
 
     #[inline]
     fn dec_and_enqueue(&mut self, id: ObjId, pending: &mut Option<u32>) {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "std-value"))]
         {
             self.release_counts.references += 1;
         }
@@ -766,59 +813,79 @@ impl<'a> Pool<'a> {
             if let Slot::Dying { next, obj } = prev {
                 pending = next;
                 self.core.uncharge_obj(SLOT_BYTES);
-                #[cfg(test)]
+                #[cfg(all(test, feature = "std-value"))]
                 self.release_counts.freed(&obj);
                 self.free_obj_and_enqueue_children(obj, &mut pending);
             }
         }
     }
 
+    #[inline(always)]
     pub fn alloc_obj(&mut self, obj: Obj, span: Span) -> Result<ObjId, ErrRecorded> {
         if !self.core.charge_obj(SLOT_BYTES) {
-            self.release_unallocated(obj);
-            return Err(self.oom_limit_error(span));
+            return self.alloc_obj_oom(obj, span);
         }
 
         if let Some(free_idx) = self.free_head {
             let id = ObjId(free_idx);
-            let next = match self.slot_ref(id) {
-                Slot::Free { next } => *next,
+            let slot = self.slot_mut(id);
+            let next = match *slot {
+                Slot::Free { next } => next,
                 Slot::Live { .. } | Slot::Dying { .. } => unreachable!(),
             };
+            *slot = Slot::Live { rc: 1, obj };
             self.free_head = next;
-            *self.slot_mut(id) = Slot::Live { rc: 1, obj };
             return Ok(id);
         }
 
-        if self.chunks.is_empty() || self.last_chunk_len == CHUNK_SLOTS {
-            let Some(layout) = Layout::array::<Slot>(CHUNK_SLOTS).ok() else {
-                self.core.uncharge_obj(SLOT_BYTES);
-                self.release_unallocated(obj);
-                return Err(self.oom_error(span, "allocator exhausted while growing pool"));
-            };
-            let Some(raw) = self.core.alloc_raw(layout) else {
-                self.core.uncharge_obj(SLOT_BYTES);
-                self.release_unallocated(obj);
-                return Err(self.oom_error(span, "allocator exhausted while growing pool"));
-            };
-            let buf = AllocBuf::<Slot>::from_raw(raw.cast::<Slot>(), CHUNK_SLOTS);
-            if self.chunks.push(&mut self.core, buf).is_none() {
-                // SAFETY: 直前に `self.core.alloc_raw(layout)` で確保した領域。
-                unsafe { self.core.dealloc_raw(raw, layout) };
-                self.core.uncharge_obj(SLOT_BYTES);
-                self.release_unallocated(obj);
-                return Err(self.oom_error(span, "allocator exhausted while growing pool"));
-            }
-            self.last_chunk_len = 0;
+        if !self.chunks.is_empty() && self.last_chunk_len < CHUNK_SLOTS {
+            let chunk_idx = self.chunks.len() - 1;
+            let in_chunk = self.last_chunk_len;
+            let global_idx = (chunk_idx * CHUNK_SLOTS + in_chunk) as u32;
+            let slot = Slot::Live { rc: 1, obj };
+            // SAFETY: `in_chunk < CHUNK_SLOTS` かつ未初期化。
+            unsafe { self.chunks.as_mut_slice()[chunk_idx].write_at(in_chunk, slot) };
+            self.last_chunk_len += 1;
+            return Ok(ObjId(global_idx));
         }
 
+        self.alloc_obj_grow_chunk(obj, span)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn alloc_obj_oom(&mut self, obj: Obj, span: Span) -> Result<ObjId, ErrRecorded> {
+        self.release_unallocated(obj);
+        Err(self.oom_limit_error(span))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn alloc_obj_grow_chunk(&mut self, obj: Obj, span: Span) -> Result<ObjId, ErrRecorded> {
+        let Some(layout) = Layout::array::<Slot>(CHUNK_SLOTS).ok() else {
+            self.core.uncharge_obj(SLOT_BYTES);
+            self.release_unallocated(obj);
+            return Err(self.oom_error(span, "allocator exhausted while growing pool"));
+        };
+        let Some(raw) = self.core.alloc_raw(layout) else {
+            self.core.uncharge_obj(SLOT_BYTES);
+            self.release_unallocated(obj);
+            return Err(self.oom_error(span, "allocator exhausted while growing pool"));
+        };
+        let buf = AllocBuf::<Slot>::from_raw(raw.cast::<Slot>(), CHUNK_SLOTS);
+        if self.chunks.push(&mut self.core, buf).is_none() {
+            // SAFETY: 直前に `self.core.alloc_raw(layout)` で確保した領域。
+            unsafe { self.core.dealloc_raw(raw, layout) };
+            self.core.uncharge_obj(SLOT_BYTES);
+            self.release_unallocated(obj);
+            return Err(self.oom_error(span, "allocator exhausted while growing pool"));
+        }
         let chunk_idx = self.chunks.len() - 1;
-        let in_chunk = self.last_chunk_len;
-        let global_idx = (chunk_idx * CHUNK_SLOTS + in_chunk) as u32;
+        let global_idx = (chunk_idx * CHUNK_SLOTS) as u32;
         let slot = Slot::Live { rc: 1, obj };
-        // SAFETY: `in_chunk < CHUNK_SLOTS` かつ未初期化。
-        unsafe { self.chunks.as_mut_slice()[chunk_idx].write_at(in_chunk, slot) };
-        self.last_chunk_len += 1;
+        // SAFETY: 新規チャンクの 0 番目は未初期化。
+        unsafe { self.chunks.as_mut_slice()[chunk_idx].write_at(0, slot) };
+        self.last_chunk_len = 1;
         Ok(ObjId(global_idx))
     }
 

@@ -76,9 +76,11 @@ pub unsafe extern "C" fn rin_str(machine: *mut Rin, s: *const c_char) -> *mut Ri
         return std::ptr::null_mut();
     };
     if s.is_null() {
+        m.record_host_error("null pointer argument");
         return std::ptr::null_mut();
     }
     let Ok(text) = (unsafe { CStr::from_ptr(s) }).to_str() else {
+        m.record_host_error("invalid UTF-8 string");
         return std::ptr::null_mut();
     };
     let res = match m.state.as_mut().expect("Rin state present") {
@@ -105,6 +107,7 @@ pub unsafe extern "C" fn rin_i64s(machine: *mut Rin, ptr: *const i64, len: usize
         &[]
     } else {
         if ptr.is_null() {
+            m.record_host_error("null pointer argument");
             return std::ptr::null_mut();
         }
         unsafe { std::slice::from_raw_parts(ptr, len) }
@@ -137,6 +140,7 @@ pub unsafe extern "C" fn rin_f64s(machine: *mut Rin, ptr: *const f64, len: usize
         &[]
     } else {
         if ptr.is_null() {
+            m.record_host_error("null pointer argument");
             return std::ptr::null_mut();
         }
         unsafe { std::slice::from_raw_parts(ptr, len) }
@@ -480,11 +484,11 @@ pub unsafe extern "C" fn rin_cons(
     head: *const RinValue,
     tail: *const RinValue,
 ) -> *mut RinValue {
-    let (Some(m), Some(h), Some(t)) = (
-        unsafe { machine.as_mut() },
-        unsafe { head.as_ref() },
-        unsafe { tail.as_ref() },
-    ) else {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    let (Some(h), Some(t)) = (unsafe { head.as_ref() }, unsafe { tail.as_ref() }) else {
+        m.record_host_error("null pointer argument");
         return std::ptr::null_mut();
     };
     let res = match m.state.as_mut().expect("Rin state present") {
@@ -522,7 +526,11 @@ pub unsafe extern "C" fn rin_none(machine: *mut Rin) -> *mut RinValue {
 /// `machine` と `val` は有効なポインタでなければならない。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_some(machine: *mut Rin, val: *const RinValue) -> *mut RinValue {
-    let (Some(m), Some(v)) = (unsafe { machine.as_mut() }, unsafe { val.as_ref() }) else {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    let Some(v) = (unsafe { val.as_ref() }) else {
+        m.record_host_error("null pointer argument");
         return std::ptr::null_mut();
     };
     let res = match m.state.as_mut().expect("Rin state present") {
@@ -546,9 +554,11 @@ pub unsafe extern "C" fn rin_struct(machine: *mut Rin, name: *const c_char) -> *
         return std::ptr::null_mut();
     };
     if name.is_null() {
+        m.record_host_error("null pointer argument");
         return std::ptr::null_mut();
     }
     let Ok(s) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        m.record_host_error("invalid UTF-8 struct name");
         return std::ptr::null_mut();
     };
     let res = match m.state.as_mut().expect("Rin state present") {
@@ -579,17 +589,19 @@ pub unsafe extern "C" fn rin_struct_set(
     field: *const c_char,
     val: *const RinValue,
 ) -> bool {
-    let (Some(m), Some(sr), Some(vr)) =
-        (unsafe { machine.as_mut() }, unsafe { s.as_mut() }, unsafe {
-            val.as_ref()
-        })
-    else {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return false;
+    };
+    let (Some(sr), Some(vr)) = (unsafe { s.as_mut() }, unsafe { val.as_ref() }) else {
+        m.record_host_error("null pointer argument");
         return false;
     };
     if field.is_null() {
+        m.record_host_error("null pointer argument");
         return false;
     }
     let Ok(fname) = (unsafe { CStr::from_ptr(field) }).to_str() else {
+        m.record_host_error("invalid UTF-8 field name");
         return false;
     };
     let old = sr.0;
@@ -629,12 +641,14 @@ pub unsafe extern "C" fn rin_variant(
         return std::ptr::null_mut();
     };
     if type_name.is_null() || variant.is_null() {
+        m.record_host_error("null pointer argument");
         return std::ptr::null_mut();
     }
     let (Ok(tname), Ok(vname)) = (
         unsafe { CStr::from_ptr(type_name) }.to_str(),
         unsafe { CStr::from_ptr(variant) }.to_str(),
     ) else {
+        m.record_host_error("invalid UTF-8 variant name");
         return std::ptr::null_mut();
     };
     let payload = if data.is_null() {

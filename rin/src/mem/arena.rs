@@ -265,6 +265,7 @@ impl WorkArena {
     }
 
     /// 現在の位置を記録する。後で [`Self::rewind`] に渡して巻き戻せる。
+    #[inline(always)]
     pub fn mark(&self, core: &AllocCore<'_>) -> WorkMark {
         let used = self.cur.map_or(0, |ptr| {
             // SAFETY: `cur` はこのアリーナが所有する有効なチャンク。
@@ -278,6 +279,7 @@ impl WorkArena {
     }
 
     /// 記録したチェックポイントまで作業領域を巻き戻す。チャンクは再利用のため保持する。
+    #[inline(always)]
     pub fn rewind(&mut self, core: &mut AllocCore<'_>, mark: WorkMark) {
         match mark.chunk {
             None => {

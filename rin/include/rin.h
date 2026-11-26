@@ -34,6 +34,9 @@ typedef struct RinLimits {
     size_t memory_bytes;
 } RinLimits;
 
+/* 各領域のブロック拡張設定。
+ * 内部で initial_block は 256 以上に、max_block は initial_block 以上に正規化される。
+ */
 typedef struct RinRegionConfig {
     size_t initial_block;
     size_t max_block;
@@ -70,7 +73,11 @@ typedef enum RinErrorKind {
     RIN_ERR_HOST = 6
 } RinErrorKind;
 
-/* 文字列は UTF-8・NUL 終端。Rin が所有し、ホストは解放しない。 */
+/* 文字列は UTF-8・NUL 終端。Rin が所有し、ホストは解放しない。
+ * 各文字列は固定長インライン領域（NUL 終端込みの上限: rule 64 / message 1024 /
+ * module 128 / backtrace 2048 / text 3200 バイト）へ格納され、超過時は UTF-8 文字境界で切り詰められる。
+ * 履歴が長い場合は backtrace（最大 2047 バイト）が text（最大 3199 バイト）より手前で切れることがある。
+ */
 typedef struct RinError {
     RinErrorKind kind;
     const char *message;   /* 常に非 NULL。見出しの本文。 */
@@ -149,7 +156,9 @@ bool rin_struct_set(Rin *rin, RinValue *s, const char *field, const RinValue *va
 RinValue *rin_variant(Rin *rin, const char *type_name, const char *variant, const RinValue *data);
 void rin_drop(Rin *rin, RinValue *val);
 
-/* 値読み取り（rin_car / rin_cdr / rin_field / rin_unwrap / rin_tuple_get の返り値は rin_drop で返却）。 */
+/* 値読み取り（rin_car / rin_cdr / rin_field / rin_unwrap / rin_tuple_get の返り値は rin_drop で返却）。
+ * 上記 5 関数でハンドル領域の確保に失敗した場合は NULL を返し、rin_last_error を更新する。
+ */
 RinTag rin_tag(const Rin *rin, const RinValue *val);
 bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out);
 bool rin_as_float(const Rin *rin, const RinValue *val, double *out);
@@ -165,6 +174,9 @@ RinValue *rin_tuple_get(Rin *rin, const RinValue *val, size_t index);
 size_t rin_copy_i64s(const Rin *rin, const RinValue *val, int64_t *out_ptr, size_t out_cap);
 size_t rin_copy_f64s(const Rin *rin, const RinValue *val, double *out_ptr, size_t out_cap);
 
+/* スキーマ検証（Cargo フィーチャ std-value が有効なビルドでのみ提供される。
+ * --no-default-features でビルドした librin.a には含まれない）。
+ */
 RinSchema *rin_schema(const char *src);
 void rin_schema_free(RinSchema *schema);
 bool rin_check(const Rin *rin, const RinValue *val, const RinSchema *schema);

@@ -149,7 +149,7 @@ impl<'a> AllocCore<'a> {
     }
 
     /// 現在生存している論理確保バイト数（永続 + オブジェクト + 作業）。
-    #[inline]
+    #[inline(always)]
     pub fn total_live_bytes(&self) -> usize {
         self.perm_bytes
             .saturating_add(self.obj_bytes)
@@ -163,7 +163,7 @@ impl<'a> AllocCore<'a> {
     }
 
     /// 永続領域の論理使用量を `bytes` だけ増やせるか検査して予約する。
-    #[inline]
+    #[inline(always)]
     pub(crate) fn charge_perm(&mut self, bytes: usize) -> bool {
         let next = self.total_live_bytes().saturating_add(bytes);
         if next > self.max_bytes {
@@ -173,13 +173,13 @@ impl<'a> AllocCore<'a> {
         true
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn uncharge_perm(&mut self, bytes: usize) {
         self.perm_bytes = self.perm_bytes.saturating_sub(bytes);
     }
 
     /// オブジェクト領域の論理使用量を `bytes` だけ増やせるか検査して予約する。
-    #[inline]
+    #[inline(always)]
     pub(crate) fn charge_obj(&mut self, bytes: usize) -> bool {
         let next = self.total_live_bytes().saturating_add(bytes);
         if next > self.max_bytes {
@@ -189,13 +189,13 @@ impl<'a> AllocCore<'a> {
         true
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn uncharge_obj(&mut self, bytes: usize) {
         self.obj_bytes = self.obj_bytes.saturating_sub(bytes);
     }
 
     /// 作業領域の論理使用量を `bytes` だけ増やせるか検査して予約する。
-    #[inline]
+    #[inline(always)]
     pub(crate) fn charge_work(&mut self, bytes: usize) -> bool {
         let next = self.total_live_bytes().saturating_add(bytes);
         if next > self.max_bytes {
@@ -205,7 +205,7 @@ impl<'a> AllocCore<'a> {
         true
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn set_work_bytes(&mut self, bytes: usize) {
         self.work_bytes = bytes;
     }

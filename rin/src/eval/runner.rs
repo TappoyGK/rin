@@ -39,8 +39,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         Ok(())
     }
 
-    #[cfg_attr(debug_assertions, inline(never))]
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    #[inline(always)]
     pub(super) fn try_charge(&mut self, amount: usize) -> bool {
         try_charge_steps(&mut self.steps_left, amount)
     }

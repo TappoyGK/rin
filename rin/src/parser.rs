@@ -106,7 +106,7 @@ struct Parser<'s, 'f, 'c> {
     core: &'f mut AllocCore<'c>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std-value"))]
 pub(crate) fn parse_frame_size() -> usize {
     std::mem::size_of::<ParseFrame>()
 }

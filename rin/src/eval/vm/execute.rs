@@ -13,7 +13,7 @@ impl Runner<'_, '_> {
         let mut frame_stack_start = frame.frame_stack_start as usize;
         let mut base = frame.base as usize;
         'frame: loop {
-            let chunk = frame.tail_source.as_ref().unwrap_or(&frame.entry).chunk();
+            let chunk = frame.active_chunk();
             while ip < chunk.code.len() {
                 let op = chunk.code[ip];
                 ip += 1;
@@ -538,8 +538,14 @@ impl Runner<'_, '_> {
                                 self.leave_depth();
                                 return Err(e);
                             }
+                            frame.ip = ip as u32;
+                            frame.frame_stack_start = frame_stack_start as u32;
                             if frames
-                                .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
+                                .push_work(
+                                    &mut self.pool.work,
+                                    &mut self.pool.core,
+                                    FrameEntry::Rin(*frame),
+                                )
                                 .is_none()
                             {
                                 self.leave_depth();
@@ -547,13 +553,6 @@ impl Runner<'_, '_> {
                                 return Err(self.work_oom(span));
                             }
                             let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
-                            frame.ip = ip as u32;
-                            frame.frame_stack_start = frame_stack_start as u32;
-                            let _ = frames.push_work(
-                                &mut self.pool.work,
-                                &mut self.pool.core,
-                                FrameEntry::Rin(*frame),
-                            );
                             *frame = RinFrame::new(
                                 FrameSource::Proto(proto),
                                 captures,
@@ -578,10 +577,7 @@ impl Runner<'_, '_> {
                         let callee = self.stack.as_slice()[arg_start - 1];
                         match callee {
                             RVal::Obj(id)
-                                if matches!(
-                                    frame.tail_source.as_ref().unwrap_or(&frame.entry),
-                                    FrameSource::Proto(_)
-                                ) =>
+                                if matches!(frame.active_source(), FrameSource::Proto(_)) =>
                             {
                                 let (proto, cap) = match self.pool.get(id) {
                                     Obj::Closure { proto, captures } => (*proto, *captures),
@@ -607,7 +603,7 @@ impl Runner<'_, '_> {
                                     self.stack_push(callee, span)?;
                                 }
                                 self.active_module = proto.module;
-                                frame.tail_source = Some(FrameSource::Proto(proto));
+                                frame.set_tail_proto(proto);
                                 frame.tail_calls += 1;
                                 frame.captures = cap.as_slice().as_ptr();
                                 frame_stack_start = self.stack.len();
@@ -803,9 +799,9 @@ impl Runner<'_, '_> {
             // 高階組み込みコールバックの高速再利用経路：
             // 親が `Builtin` で、末尾呼び出しによる差し替えがない場合は、
             // 同じクロージャの次要素呼び出しをフレーム生成・深度増減なしでそのまま継続する。
-            if frame.tail_source.is_none()
+            if !frame.has_tail()
                 && matches!(frames.last(), Some(FrameEntry::Builtin(_)))
-                && let FrameSource::Proto(proto) = frame.entry
+                && let FrameSource::Proto(proto) = frame.entry_source()
             {
                 let Some(FrameEntry::Builtin(bframe)) = frames.last_mut() else {
                     unreachable!();

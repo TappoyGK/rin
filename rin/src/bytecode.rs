@@ -408,7 +408,7 @@ pub(crate) struct FnProto {
 
 /// `PermArena` または `WorkArena` 上に配置された `FnProto` へのコピー可能な不変ポインタ。
 #[derive(Clone, Copy)]
-pub(crate) struct FnProtoPtr(NonNull<FnProto>);
+pub(crate) struct FnProtoPtr(pub(crate) NonNull<FnProto>);
 
 impl FnProtoPtr {
     #[inline(always)]

@@ -67,7 +67,7 @@ impl<'a> Machine<'a> {
 - `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。
 - `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。
-- **永続領域の追記特性**：読み込み段階で関数やモジュールを再定義した場合、新しいバイトコード・シンボルは永続領域（`PermArena`）へ追記され、古い永続領域エントリは `Builder` / `Machine` が破棄されるまで回収されない（古い値スロットは解放される）。同じ `Builder` 上で何度も再定義を繰り返さず、ホットリロード時は新しい `Builder` を作り直すこと。
+- **永続領域の追記特性**：読み込み段階（`Builder`）の評価が関数（`fn` リテラル・`defn`）や新しいシンボル定義を含むたびに、バイトコード・シンボルは永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（再定義に限らず、関数リテラルを含む式を `Builder` で反復評価すると永続領域が増え続ける。古い値スロットは解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
 - `Builder::into_machine` / `Builder::freeze`：大域環境と読み込み済みモジュール、および永続領域（`PermArena`）を凍結し、実行段階の `Machine` を返す。`into_machine` は失敗しないゼロヒープ API、`freeze` は `std-value` フィーチャ有効時の `Result` ラッパー（現行実装では常に `Ok` を返す）。
 - 凍結後の `Machine` から読み込みの段階には戻れない。Mod を読み直す場合は、新しい `Builder` を作って読み込み・凍結し、ホスト側で `Machine` を差し替える（ホットリロードは組み込む側が担う）。
 - `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効で、評価するソースとそこから呼ばれるモジュール外の関数から参照でき（モジュール内の関数からは参照されない）、評価終了時に解放する。`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。名前解決の優先順位は、局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛 → 読み込み済みモジュール名とする。
@@ -117,8 +117,8 @@ pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Re
   - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり動作未定義（パニックまたは不正参照）となる。
 - **`ValueRef<'_>` と補助借用ビュー**：
   - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
-  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `field_at` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
-  - 主なメソッド：`tag`・`is_void`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
+  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
+  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
   - `Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
 - **`ErrorRef<'_>`**：
   - マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。次の可変操作まで有効。`Display` を含めシステムヒープを一切使わない。`std-value` フィーチャ有効時は `to_error(&self) -> Error` で所有型 `Error` へ変換できる。
@@ -164,15 +164,18 @@ pub struct MemoryConfig {
 組み込み実装：
 - `HeapAllocator`：Rust 標準ヒープを使うデフォルト実装。
 - `ArenaAllocator<'a>`：`ArenaAllocator::new(buf: &'a mut [u8])` で渡したバイト列をバンプ確保する実装（`dealloc` は何もしない）。`used()` / `capacity()` で使用量を確認できる。
-- `MemoryConfig::default()` は 3 領域すべて `initial_block = 4 KiB`、`max_block = 64 KiB` とする（既定設定では初回ブロック確保に各領域あたり 4 KiB 程度を要する）。極小の `memory_bytes` や小さな `ArenaAllocator` を使う場合は、`Builder::with_memory_config`（C FFI では `rin_new_with_config`）で `initial_block` / `max_block` を小さく調整できる。
+- `MemoryConfig::default()` は 3 領域すべて `initial_block = 4 KiB`、`max_block = 64 KiB` とする。`RegionConfig` は内部で `initial_block` を `256` 以上に、`max_block` を `initial_block` 以上に正規化する。
+- `initial_block` / `max_block` を小さくすると、固定容量アリーナ（`ArenaAllocator` 等）から切り出すチャンクの丸め無駄を抑えられる（一方、`memory_bytes` は領域内の論理使用バイト数を数えるため、ブロックを小さくしても必要な最小 `memory_bytes` は減らない。参考：最小限の評価に必要な `memory_bytes` はリテラルで約 1 KiB、単純な算術式で約 1.6 KiB、関数定義を含む式で約 3.5 KiB 程度。`Allocator` からの実確保総量はブロック単位の切り上げにより `memory_bytes` を超えうるため、アリーナ容量は別に見積もる）。
 
 ### 1.4 資源上限 `Limits` とエラー `Error`
+
+> `Limits`・`ErrorKind`・`Span` は常に利用可能。`StackFrame`・`Error` は `std-value` フィーチャ有効時のみ提供される（`--no-default-features` では 1.2.1 の `ErrorRef` を使用する）。
 
 ```rust
 pub struct Limits {
     pub steps: usize,        // 既定: 100_000
     pub depth: usize,        // 既定: 200（WorkArena 上の非再帰フレームで管理）
-    pub memory_bytes: usize, // 既定: 16 * 1024 * 1024（3 領域合計の実確保バイト数）
+    pub memory_bytes: usize, // 既定: 16 * 1024 * 1024（3 領域合計の論理使用バイト数）
 }
 
 pub enum ErrorKind {
@@ -237,7 +240,7 @@ import がメモリ上限・アロケータの確保失敗・取り込めない�
 
 `Debug` は入れ子を省略せず、`{:#?}` は浅い部分を字下げして出力する。書式化の深さはリストの各セル（tail 方向）も 1 段と数えるため、平らな長いリストも途中で切り替わる。書式化の深さ上限に達した部分木は、スタック消費を抑えるためコンパクトな形式で出力する。
 
-### 1.6 ソース付きエラー表示
+### 1.6 ソース付きエラー表示（`std-value` フィーチャ）
 
 ```rust
 impl Error {
@@ -288,7 +291,7 @@ println!("{}", error.render(source));
 
 ---
 
-### テスト実行API
+### テスト実行API（`std-value` フィーチャ）
 
 ```rust
 pub fn rin::test::run(
@@ -311,7 +314,7 @@ pub fn rin::test::run_filtered(
 
 構文やモジュール依存のエラーは `TestReport.errors` の `SourceError { source, error }` に入る。`is_success()` は全テストが成功し、準備段階のエラーもない場合に真を返す。テストが0件でエラーがない場合も真となる。実行順と上限の適用範囲は[テストツール仕様](testing.md)を参照。
 
-### ソース整形API
+### ソース整形API（`std-value` フィーチャ）
 
 ```rust
 pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
@@ -327,7 +330,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 
 - `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_STR`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`
 - `RinLimits`：`{ size_t steps; size_t depth; size_t memory_bytes; }`
-- `RinRegionConfig`：`{ size_t initial_block; size_t max_block; }`
+- `RinRegionConfig`：`{ size_t initial_block; size_t max_block; }`（内部で `initial_block` は `256` 以上に、`max_block` は `initial_block` 以上に正規化される）
 - `RinMemoryConfig`：`{ RinRegionConfig perm; RinRegionConfig obj; RinRegionConfig work; }`
 - `RinMathFma`：`RIN_MATH_FMA_STRICT = 0`, `RIN_MATH_FMA_FUSED = 1`
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
@@ -343,7 +346,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `RinLimits rin_limits_default(void)` | 既定の `RinLimits` を返す |
 | `RinMemoryConfig rin_memory_config_default(void)` | 既定の `RinMemoryConfig`（各領域 `initial_block = 4 KiB`、`max_block = 64 KiB`）を返す |
 | `Rin *rin_new(RinLimits limits, RinAllocator alloc)` | 読み込み段階の `Rin` を `alloc` 上に生成する（確保失敗時は `NULL`） |
-| `Rin *rin_new_with_config(RinLimits limits, RinMemoryConfig memory, RinAllocator alloc)` | 3 領域のブロック設定 `memory` を指定して `Rin` を `alloc` 上に生成する（確保失敗時は `NULL`） |
+| `Rin *rin_new_with_config(RinLimits limits, RinMemoryConfig memory, RinAllocator alloc)` | 3 領域のブロック設定 `memory`（`initial_block >= 256`、`max_block >= initial_block` へ正規化）を指定して `Rin` を `alloc` 上に生成する（確保失敗時は `NULL`） |
 | `void rin_free(Rin *rin)` | `Rin` と保持中の全ハンドル・プールを `alloc` へ解放する（`NULL` 可） |
 | `bool rin_freeze(Rin *rin)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`rin == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(Rin *rin, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
@@ -381,6 +384,7 @@ typedef struct RinError {
 ```
 
 - `message` は見出しの本文、`text` は Rust の `Error::to_string()` 相当の見出しと履歴全体であり、必ず非 NULL の UTF-8・NUL 終端文字列である。内部 NUL は可視の `\0` に置き換える。ほかの文字列にも同じ変換を適用する。
+- **インライン文字列バッファ上限（NUL 終端込み）**：システムヒープを使わずに保持するため、C FFI 側の各文字列には固定長上限がある：`rule` は 64 バイト、`message` は 1024 バイト、`module` は 128 バイト、`backtrace` は 2048 バイト、`text` は 3200 バイト（各最大文字列長は上限 − 1 バイト）。上限を超える場合は UTF-8 文字境界で切り詰められる。履歴が長い場合は `backtrace`（最大 2047 バイト）が `text`（最大 3199 バイト）より手前で切れることがある。また、コアの履歴文字列プール（2048 バイト）をあふれたフレームの名前は途中切り詰めまたは空文字列となる。
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
@@ -425,6 +429,8 @@ if (!result.ok) {
 
 ### 2.4 値の読み取り
 
+> 所有 `RinValue *` を返す 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）は、ハンドル領域の確保に失敗した場合にも `NULL` を返して `rin_last_error(rin)` を更新する。
+
 | 関数 | 説明 |
 |---|---|
 | `RinTag rin_tag(const Rin *rin, const RinValue *val)` | 値の型タグを返す |
@@ -442,7 +448,9 @@ if (!result.ok) {
 | `size_t rin_copy_i64s(const Rin *rin, const RinValue *val, int64_t *out_ptr, size_t out_cap)` | `i64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |
 | `size_t rin_copy_f64s(const Rin *rin, const RinValue *val, double *out_ptr, size_t out_cap)` | `f64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |
 
-### 2.5 スキーマ検証（[スキーマ仕様](schema.md)）
+### 2.5 スキーマ検証（[スキーマ仕様](schema.md)・`std-value` フィーチャ）
+
+> 以下の 4 関数は Cargo フィーチャ `std-value` が有効なビルドでのみエクスポートされる（`--no-default-features` でビルドした `librin.a` には含まれない）。
 
 | 関数 | 説明 |
 |---|---|

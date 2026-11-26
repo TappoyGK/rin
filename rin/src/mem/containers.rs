@@ -126,22 +126,22 @@ impl<T> RawVec<T> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.len as usize
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn capacity(&self) -> usize {
         self.cap as usize
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
         if self.len == 0 {
             return &[];
@@ -150,7 +150,7 @@ impl<T> RawVec<T> {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         if self.len == 0 {
             return &mut [];

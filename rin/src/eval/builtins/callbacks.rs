@@ -403,7 +403,10 @@ impl Runner<'_, '_> {
         Ok(CallbackStep::Done(final_val))
     }
 
-    /// システムヒープを使わない安定マージソート（`WorkArena` を一時バッファに使う）。
+    /// システムヒープを使わない自然ラン検出付き安定マージソート（`WorkArena` を一時バッファに使う）。
+    ///
+    /// 比較は常にリスト上で左の要素を第 1 引数、右の要素を第 2 引数として行う。
+    /// 整列済みまたは厳密逆順の入力は O(n) の 1 パスで完了し、作業バッファ確保も不要。
     pub(in crate::eval) fn sort_keyed_work(
         &mut self,
         slice: &mut [(RVal, RVal)],
@@ -414,6 +417,70 @@ impl Runner<'_, '_> {
             return Ok(());
         }
         let mark = self.pool.work.mark(&self.pool.core);
+        let mut runs = RawVec::<(usize, usize)>::new();
+        let mut idx = 0usize;
+        while idx < n {
+            let start = idx;
+            let mut end = idx + 1;
+            if end < n {
+                let first_ord = match self.compare_vals(slice[start].0, slice[end].0, span) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        return Err(e);
+                    }
+                };
+                if first_ord == std::cmp::Ordering::Greater {
+                    // 厳密降順ラン（安定性を保つため `Greater` のみ延長し、反転して昇順化）
+                    end += 1;
+                    while end < n {
+                        let ord = match self.compare_vals(slice[end - 1].0, slice[end].0, span) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                self.pool.work.rewind(&mut self.pool.core, mark);
+                                return Err(e);
+                            }
+                        };
+                        if ord == std::cmp::Ordering::Greater {
+                            end += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    slice[start..end].reverse();
+                } else {
+                    // 広義昇順ラン
+                    end += 1;
+                    while end < n {
+                        let ord = match self.compare_vals(slice[end - 1].0, slice[end].0, span) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                self.pool.work.rewind(&mut self.pool.core, mark);
+                                return Err(e);
+                            }
+                        };
+                        if ord != std::cmp::Ordering::Greater {
+                            end += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            if start == 0 && end == n {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Ok(());
+            }
+            if runs
+                .push_work(&mut self.pool.work, &mut self.pool.core, (start, end))
+                .is_none()
+            {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Err(self.work_oom(span));
+            }
+            idx = end;
+        }
+
         let mut scratch = RawVec::<(RVal, RVal)>::new();
         if scratch
             .resize_work(
@@ -428,13 +495,28 @@ impl Runner<'_, '_> {
             return Err(self.work_oom(span));
         }
         let buf = scratch.as_mut_slice();
-        let mut width = 1usize;
-        while width < n {
-            let mut left = 0usize;
-            while left < n {
-                let mid = (left + width).min(n);
-                let right = (left + 2 * width).min(n);
-                if mid < right {
+        while runs.len() > 1 {
+            let mut out_len = 0usize;
+            let run_count = runs.len();
+            let mut r = 0usize;
+            while r < run_count {
+                if r + 1 >= run_count {
+                    let keep = runs.as_slice()[r];
+                    runs.as_mut_slice()[out_len] = keep;
+                    out_len += 1;
+                    break;
+                }
+                let (left, mid) = runs.as_slice()[r];
+                let (_, right) = runs.as_slice()[r + 1];
+                // 境界が既に整列済みならマージを省略できる
+                let boundary = match self.compare_vals(slice[mid - 1].0, slice[mid].0, span) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        return Err(e);
+                    }
+                };
+                if boundary == std::cmp::Ordering::Greater {
                     let mut i = left;
                     let mut j = mid;
                     let mut k = left;
@@ -455,21 +537,22 @@ impl Runner<'_, '_> {
                         }
                         k += 1;
                     }
-                    while i < mid {
-                        buf[k] = slice[i];
-                        i += 1;
-                        k += 1;
+                    if i < mid {
+                        let rem = mid - i;
+                        buf[k..k + rem].copy_from_slice(&slice[i..mid]);
+                        k += rem;
                     }
-                    while j < right {
-                        buf[k] = slice[j];
-                        j += 1;
-                        k += 1;
+                    if j < right {
+                        let rem = right - j;
+                        buf[k..k + rem].copy_from_slice(&slice[j..right]);
                     }
                     slice[left..right].copy_from_slice(&buf[left..right]);
                 }
-                left += 2 * width;
+                runs.as_mut_slice()[out_len] = (left, right);
+                out_len += 1;
+                r += 2;
             }
-            width *= 2;
+            runs.truncate(out_len);
         }
         self.pool.work.rewind(&mut self.pool.core, mark);
         Ok(())

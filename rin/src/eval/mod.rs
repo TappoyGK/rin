@@ -322,7 +322,7 @@ pub(super) struct EnvState<'a> {
     last_result: RVal,
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn global_slot(globals: &EnvSlots, id: u32) -> Option<RVal> {
     if let Some(v) = globals.get(id) {
         return Some(v);
@@ -513,14 +513,4 @@ pub(super) struct Runner<'a, 'p> {
 pub(super) enum FrameSource<'a> {
     Top(&'a Chunk),
     Proto(FnProtoPtr),
-}
-
-impl FrameSource<'_> {
-    #[inline(always)]
-    pub(super) fn chunk(&self) -> &Chunk {
-        match self {
-            FrameSource::Top(c) => c,
-            FrameSource::Proto(p) => &p.chunk,
-        }
-    }
 }
