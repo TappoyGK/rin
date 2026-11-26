@@ -144,7 +144,7 @@ pub fn rin::math::cos(x: f64, mode: MathFma) -> f64
 ### 1.3 カスタムアロケータ `Allocator` と領域設定 `MemoryConfig`
 
 ```rust
-pub trait Allocator {
+pub unsafe trait Allocator {
     fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>>;
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout);
 }
@@ -160,6 +160,16 @@ pub struct MemoryConfig {
     pub work: RegionConfig, // 作業領域
 }
 ```
+
+`Allocator` の安全性契約（`unsafe impl Allocator` の実装側および呼び出し側）：
+- **実装側の契約**：
+  - `alloc(layout)` が `Some(ptr)` を返すとき、`layout.size() > 0` であれば `ptr` は `layout.align()` に整列した少なくとも `layout.size()` バイトの読み書き可能な有効領域を指すこと。
+  - 同時に生存している（未解放の）確保領域どうしを重複させず、対応する `dealloc(ptr, layout)` またはアロケータ自体の破棄まで有効に保つこと。アリーナ実装で個別解放を省略する場合も、生存中の領域を早期に再利用してはならない。
+  - `dealloc(ptr, layout)` は、対応する確保方式と `layout` に従って安全に解放（アリーナの場合は無操作）すること。
+  - `layout.size() == 0` の要求に対しては、成功時は `layout.align()` に整列した非 NULL ポインタを返し、`dealloc` は何もせず安全に戻ること（組み込みの `HeapAllocator`・`ArenaAllocator` および C アロケータアダプタはこの契約に従う）。
+- **呼び出し側の契約**：
+  - `dealloc(ptr, layout)` には `self.alloc(layout)` が返した未解放のポインタと、確保時と同じ `layout` のみを渡すこと。
+  - `layout.size() == 0` で取得したポインタを通じて読み書きしないこと。
 
 組み込み実装：
 - `HeapAllocator`：Rust 標準ヒープを使うデフォルト実装。
@@ -334,7 +344,12 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 - `RinMemoryConfig`：`{ RinRegionConfig perm; RinRegionConfig obj; RinRegionConfig work; }`
 - `RinMathFma`：`RIN_MATH_FMA_STRICT = 0`, `RIN_MATH_FMA_FUSED = 1`
 - `RinAllocator`：`{ void *ctx; uint8_t *(*alloc)(void *ctx, size_t size, size_t align); void (*dealloc)(void *ctx, uint8_t *ptr, size_t size, size_t align); }`
-  - `alloc` が `NULL` の場合は標準ヒープ（`HeapAllocator`）を使用する。
+  - `alloc` が `NULL` の場合は、`dealloc` の有無によらず標準ヒープ（`HeapAllocator`）で確保・解放する（`dealloc` は呼ばれない）。
+  - `alloc` が非 `NULL` の場合、成功時は `align` に整列した少なくとも `size` バイトの読み書き可能な有効領域を返し、同時に生存する他の確保領域と重複させず、対応する `dealloc` または `rin_free` まで有効に保つこと。
+  - `alloc` が非 `NULL` かつ `dealloc` が `NULL` の場合は個別解放を省略する（アリーナ用途）。その場合も、生存中の領域を早期に再利用してはならない。
+  - `dealloc` には確保時と同一の `ptr`・`size`・`align` が渡される。
+  - `size == 0` の要求では C の `alloc` / `dealloc` のいずれも呼び出さない。
+  - `ctx` と `alloc` / `dealloc` が指す関数は、`rin_new`（または `rin_new_with_config`）の呼び出しから `rin_free` が戻るまで有効に保つこと（`rin_free` は `Rin` 本体の解放にも `dealloc` を使用する）。
 - `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
 - `RinBinding`：`{ const char *name; const RinValue *value; }`
 - `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。**`rin_drop` へ渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等への入力引数として渡せる）

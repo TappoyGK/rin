@@ -219,7 +219,7 @@ impl<'a> AllocCore<'a> {
     /// 外部 `Allocator` から生ブロックを確保する。
     pub(crate) fn alloc_raw(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         if layout.size() == 0 {
-            return Some(NonNull::dangling());
+            return NonNull::new(std::ptr::without_provenance_mut(layout.align()));
         }
         let ptr = self.alloc.alloc(layout)?;
         self.raw_allocated_bytes = self.raw_allocated_bytes.saturating_add(layout.size());

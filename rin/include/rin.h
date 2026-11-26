@@ -53,6 +53,16 @@ typedef enum RinMathFma {
     RIN_MATH_FMA_FUSED = 1
 } RinMathFma;
 
+/* Rin が利用する外部メモリアロケータ。
+ * - alloc == NULL の場合は、dealloc の有無によらず標準ヒープ（HeapAllocator）で確保・解放する（dealloc は呼ばれない）。
+ * - alloc != NULL の場合は、成功時に align に整列した少なくとも size バイトの読み書き可能な有効領域を返し、
+ *   同時に生存する他の確保領域と重複させず、対応する dealloc または rin_free まで有効に保つこと。
+ * - dealloc == NULL（alloc != NULL）の場合は個別解放を省略する（アリーナ用途）。その場合も生存中の領域を早期に再利用してはならない。
+ * - dealloc に渡される ptr・size・align は確保時と同じ値である。
+ * - size == 0 の要求では alloc / dealloc のいずれも呼び出さない。
+ * - ctx と alloc / dealloc が指す関数は、rin_new（または rin_new_with_config）の呼び出しから
+ *   rin_free が戻るまで有効に保つこと（rin_free は Rin 本体の解放にも dealloc を使用する）。
+ */
 typedef struct RinAllocator {
     void *ctx;
     uint8_t *(*alloc)(void *ctx, size_t size, size_t align);
