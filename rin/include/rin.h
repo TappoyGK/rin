@@ -141,10 +141,13 @@ const RinError *rin_last_error(const Rin *rin);
 /* 値ハンドル構築・解放（すべて Rin のアロケータ上で確保される。使い終わったら rin_drop で返却）。
  * 確保失敗・NULL 引数・不正 UTF-8 等のエラー時は NULL（rin_struct_set は false）を返し、
  * rin_last_error を更新する。
- * 注意（以下はホスト側の誤用であり、してはならない。rin_last_error には記録されない）:
- * - RinEvalResult.value で返された借用ポインタを rin_drop に渡してはならない。
- * - 同じハンドルの連続二重 rin_drop は無視されるが、再利用後の古いポインタを rin_drop すると
- *   再利用先のハンドルを解放してしまう。解放済みハンドルの使用は Void や別値を読むことがある。
+ * 注意（以下はホスト側の誤用であり、してはならない。rin_struct_set の場合を除き rin_last_error には記録されない）:
+ * - RinEvalResult.value で返された借用ポインタを rin_drop や rin_struct_set の第 2 引数に渡してはならない
+ *   （rin_drop は無視、rin_struct_set は RIN_ERR_HOST を記録して false を返す）。
+ * - 同じハンドルの連続二重 rin_drop は無視されるが、スロット再利用後の古いポインタを渡すと、rin_drop では
+ *   再利用先のハンドルを解放し、rin_struct_set では再利用先のハンドルが持つ構造体を書き換えてしまう。
+ *   未再利用の解放済みハンドルは rin_struct_set で RIN_ERR_HOST を記録して false を返し、読み取り・入力では
+ *   Void や別値を読むことがある。
  * - 別の生存中 Rin で生成したハンドルを rin_drop に渡した場合は無視され、rin_struct_set の第 2 引数に
  *   渡した場合は RIN_ERR_HOST を記録して false を返す。読み取り・入力に渡すと、別値を読むか境界検査の
  *   panic でプロセスが中断（abort）する。rin_free した Rin のハンドルは無効なポインタであり、どの関数にも渡してはならない。
