@@ -48,6 +48,7 @@ pub enum RinTag {
     Ok = 13,
     Err = 14,
     Fn = 15,
+    Ident = 16,
 }
 
 #[repr(C)]

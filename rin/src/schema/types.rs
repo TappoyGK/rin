@@ -8,6 +8,7 @@ pub(crate) enum TypeExpr {
     Bool,
     Char,
     String,
+    Ident,
     List(Box<TypeExpr>),
     Array(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
@@ -36,6 +37,7 @@ pub(super) fn has_type_children(ty: &TypeExpr) -> bool {
             | TypeExpr::Bool
             | TypeExpr::Char
             | TypeExpr::String
+            | TypeExpr::Ident
             | TypeExpr::Ref(_)
     )
 }

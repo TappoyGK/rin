@@ -35,6 +35,105 @@ impl Runner<'_, '_> {
         self.stack_push(RVal::Void, span)
     }
 
+    pub(super) fn exec_make_list_splice(
+        &mut self,
+        chunk: &Chunk,
+        mask_idx: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let mask = chunk.splice_masks[mask_idx as usize].as_slice();
+        let n = mask.len();
+        let start = self.stack.len() - n;
+        let mut total_len = 0usize;
+        for (i, &is_splice) in mask.iter().enumerate() {
+            let val = self.stack.as_slice()[start + i];
+            if is_splice != 0 {
+                if !self.is_list(val) {
+                    let tname = val.type_name(self.pool);
+                    self.release_stack_from(start);
+                    return Err(self.err_runtime_fmt(
+                        "expr.quasiquote",
+                        span,
+                        format_args!("unquote-splicing ',@' expects list, got {tname}"),
+                    ));
+                }
+                total_len = total_len.saturating_add(self.pool.list_len(val));
+            } else {
+                total_len = total_len.saturating_add(1);
+            }
+        }
+        if !self.try_charge(total_len) {
+            self.release_stack_from(start);
+            return self.step_limit_result(span);
+        }
+        let mut acc = RVal::EmptyList;
+        for i in (0..n).rev() {
+            let item = self.stack.as_slice()[start + i];
+            if mask[i] == 0 {
+                match self.pool.alloc_cons(item, acc, span) {
+                    Ok(next) => {
+                        self.pool.release_val(acc);
+                        acc = next;
+                    }
+                    Err(e) => {
+                        self.pool.release_val(acc);
+                        self.release_stack_from(start);
+                        return Err(e);
+                    }
+                }
+                self.pool.release_val(item);
+                self.stack.pop();
+            } else if matches!(acc, RVal::EmptyList) {
+                acc = item;
+                self.stack.pop();
+            } else if matches!(item, RVal::EmptyList) {
+                self.stack.pop();
+            } else {
+                let mark = self.pool.work.mark(&self.pool.core);
+                let mut elems = RawVec::<RVal>::new();
+                let mut cur = item;
+                let mut oom = false;
+                while let RVal::Obj(id) = cur {
+                    let Obj::Cons { head, tail, .. } = *self.pool.get(id) else {
+                        break;
+                    };
+                    if elems
+                        .push_work(&mut self.pool.work, &mut self.pool.core, head)
+                        .is_none()
+                    {
+                        oom = true;
+                        break;
+                    }
+                    cur = tail;
+                }
+                if oom {
+                    self.pool.work.rewind(&mut self.pool.core, mark);
+                    self.pool.release_val(acc);
+                    self.release_stack_from(start);
+                    return Err(self.work_oom(span));
+                }
+                for &elem in elems.as_slice().iter().rev() {
+                    match self.pool.alloc_cons(elem, acc, span) {
+                        Ok(next) => {
+                            self.pool.release_val(acc);
+                            acc = next;
+                        }
+                        Err(e) => {
+                            self.pool.work.rewind(&mut self.pool.core, mark);
+                            self.pool.release_val(acc);
+                            self.release_stack_from(start);
+                            return Err(e);
+                        }
+                    }
+                }
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                self.pool.release_val(item);
+                self.stack.pop();
+            }
+        }
+        self.stack_push(acc, span)
+    }
+
     pub(super) fn exec_make_tuple(&mut self, n: u32, span: Span) -> Result<(), ErrRecorded> {
         let start = self.stack.len() - n as usize;
         let mark = self.pool.work.mark(&self.pool.core);

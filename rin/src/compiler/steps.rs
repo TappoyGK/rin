@@ -74,6 +74,7 @@ pub(super) enum Step<'a> {
         expr: &'a Expr,
         is_tail: bool,
     },
+    Datum(&'a Datum),
     EmitFlushed {
         op: Op,
         span: Span,
@@ -117,6 +118,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         while let Some(step) = steps.pop() {
             match step {
                 Step::Expr { expr, is_tail } => self.step_expr(expr, is_tail, steps)?,
+                Step::Datum(datum) => self.step_datum(datum, steps)?,
                 Step::EmitFlushed { op, span } => {
                     self.emit(op, span)?;
                 }

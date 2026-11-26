@@ -15,12 +15,11 @@ fn basic_whitespace_literals_comments_and_definitions() {
         formatted(";;hello\n(def a 1);tail\n;;;doc\n(def b 2)"),
         ";; hello\n(def a 1) ; tail\n\n;;; doc\n(def b 2)\n"
     );
-    assert_eq!(formatted("[ 1  2,3 ]"), "[1, 2, 3]\n");
-    assert_eq!(formatted("(1,2) (1,)"), "(1, 2)\n(1,)\n");
-    assert_eq!(
-        formatted("Foo{ x :1 y: [2 3]}"),
-        "Foo { x: 1, y: [2, 3] }\n"
-    );
+    assert_eq!(formatted("[ 1  2 3 ]"), "[1 2 3]\n");
+    assert_eq!(formatted("(tuple  1  2)"), "(tuple 1 2)\n");
+    assert_eq!(formatted("Foo{ x :1 y: [2 3]}"), "Foo { x: 1 y: [2 3] }\n");
+    assert_eq!(formatted("'(a  b)"), "'(a b)\n");
+    assert_eq!(formatted("`(a  ,b  ,@c)"), "`(a ,b ,@c)\n");
     for source in [
         "\"; \\\"\\n猫\"",
         "'\\n'",
@@ -127,11 +126,13 @@ fn nested_forms_width_boundaries_and_comments_are_stable() {
         "1",
         "a.b[0]",
         "some([1 2])",
-        "(1,)",
+        "(tuple 1 2)",
         "Foo {a: 1 b: [2 3]}",
         "(if true 1 2)",
         "(fn (x) x)",
         "Kind.A(1)",
+        "'foo",
+        "`(a ,b ,@c)",
     ];
     for a in seeds {
         for b in seeds {

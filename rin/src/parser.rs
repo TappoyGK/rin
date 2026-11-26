@@ -2,6 +2,7 @@
 //!
 //! 深い入れ子でもネイティブスタックを消費しないよう、明示的スタックで構文解析する。
 
+mod datum;
 mod frames;
 mod pattern;
 mod primary;
@@ -11,7 +12,8 @@ use frames::*;
 #[cfg(feature = "std-value")]
 use crate::alloc::HeapAllocator;
 use crate::ast::{
-    DefnExpr, Expr, ExprKind, FnExpr, LetExpr, MatchArm, Pattern, StructExpr, VariantExpr,
+    Datum, DatumKind, DefnExpr, Expr, ExprKind, FnExpr, LetExpr, MatchArm, Pattern, StructExpr,
+    VariantExpr,
 };
 #[cfg(feature = "std-value")]
 use crate::error::Error;
@@ -114,6 +116,8 @@ pub(crate) fn parse_frame_size() -> usize {
 enum NextStep {
     StartExpr,
     HaveExpr(Expr, usize),
+    StartDatum { qq_depth: usize, allow_splice: bool },
+    HaveDatum(Datum, usize, usize),
 }
 
 impl Parser<'_, '_, '_> {
@@ -147,6 +151,13 @@ impl Parser<'_, '_, '_> {
     pub(super) fn alloc_box<T>(&mut self, val: T, span: Span) -> Result<WorkBox<T>, ErrRecorded> {
         match WorkBox::new(self.work, self.core, val) {
             Some(b) => Ok(b),
+            None => Err(self.oom(span)),
+        }
+    }
+
+    pub(super) fn intern_work_str(&mut self, s: &str, span: Span) -> Result<RawStr, ErrRecorded> {
+        match RawStr::from_work(self.work, self.core, s) {
+            Some(raw) => Ok(raw),
             None => Err(self.oom(span)),
         }
     }
@@ -264,6 +275,65 @@ impl Parser<'_, '_, '_> {
                         return Ok(expr);
                     };
                     next = self.resume_frame(frame, expr, depth)?;
+                }
+                NextStep::StartDatum {
+                    qq_depth,
+                    allow_splice,
+                } => {
+                    let tok_span = self.peek().span;
+                    self.check_nesting(self.frames.len() + 1, tok_span)?;
+                    next = self.start_datum(qq_depth, allow_splice)?;
+                }
+                NextStep::HaveDatum(mut datum, mut depth, qq_depth) => {
+                    if !matches!(datum.kind, DatumKind::UnquoteSplicing(_)) {
+                        loop {
+                            let next_tok = self.peek();
+                            if next_tok.kind == WorkTokenKind::Dot {
+                                self.check_nesting(self.frames.len() + depth + 1, next_tok.span)?;
+                                self.advance()?;
+                                let (field, fspan) = self.expect_ident("field name after '.'")?;
+                                let span = datum.span;
+                                let field_kw = self.intern_work_str("field", span)?;
+                                let mut items = RawVec::new();
+                                for item in [
+                                    Datum::new(span, DatumKind::Ident(field_kw)),
+                                    datum,
+                                    Datum::new(fspan, DatumKind::Ident(field)),
+                                ] {
+                                    if items.push_work(self.work, self.core, item).is_none() {
+                                        return Err(self.oom(span));
+                                    }
+                                }
+                                datum = Datum::new(span, DatumKind::List(items));
+                                depth += 1;
+                            } else if next_tok.kind == WorkTokenKind::LBracket && next_tok.attached
+                            {
+                                self.check_nesting(self.frames.len() + depth + 1, next_tok.span)?;
+                                self.advance()?;
+                                let target = self.alloc_box(datum, next_tok.span)?;
+                                self.push_frame(
+                                    ParseFrame::DatumIndex {
+                                        target,
+                                        target_depth: depth,
+                                        qq_depth,
+                                    },
+                                    next_tok.span,
+                                )?;
+                                next = NextStep::StartDatum {
+                                    qq_depth,
+                                    allow_splice: false,
+                                };
+                                continue 'outer;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
+                    let Some(frame) = self.frames.pop() else {
+                        unreachable!("datum must always have a parent frame");
+                    };
+                    next = self.resume_datum_frame(frame, datum, depth, qq_depth)?;
                 }
             }
         }

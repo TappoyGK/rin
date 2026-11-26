@@ -144,11 +144,11 @@ fn globals_builtins_modules_and_private_names() {
 #[test]
 fn field_and_export_lists_are_sorted_and_bounded() {
     assert_eq!(
-        hint("Point{z: 1, a: 2}.bad"),
+        hint("Point{z: 1 a: 2}.bad"),
         "Point has no field 'bad'; fields: a, z"
     );
     assert_eq!(
-        hint("(with Point{z: 1, a: 2} {bad: 3})"),
+        hint("(with Point{z: 1 a: 2} {bad: 3})"),
         "Point has no field 'bad'; fields: a, z"
     );
     assert_eq!(
@@ -159,7 +159,7 @@ fn field_and_export_lists_are_sorted_and_bounded() {
         .rev()
         .map(|i| format!("f{i:02}: 0"))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(" ");
     let shown = (0..16)
         .map(|i| format!("f{i:02}"))
         .collect::<Vec<_>>()

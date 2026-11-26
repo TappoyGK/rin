@@ -50,6 +50,32 @@ pub struct LetExpr {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct Datum {
+    pub span: Span,
+    pub kind: DatumKind,
+}
+
+impl Datum {
+    pub fn new(span: Span, kind: DatumKind) -> Self {
+        Self { span, kind }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DatumKind {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Char(char),
+    Str(RawStr),
+    None,
+    Ident(RawStr),
+    List(RawVec<Datum>),
+    Unquote(WorkBox<Expr>),
+    UnquoteSplicing(WorkBox<Expr>),
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),
@@ -58,6 +84,8 @@ pub enum ExprKind {
     Str(RawStr),
     None,
     Ident(RawStr),
+    Quote(WorkBox<Datum>),
+    Quasiquote(WorkBox<Datum>),
     List(RawVec<Expr>),
     Tuple(RawVec<Expr>),
     Struct(WorkBox<StructExpr>),
@@ -123,6 +151,7 @@ pub enum Pattern {
     Bool(bool),
     Char(char),
     Str(RawStr),
+    Ident(RawStr),
     None,
     Some(Option<RawStr>),
     Ok(Option<RawStr>),
@@ -179,6 +208,22 @@ pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         ExprKind::Call { callee, args } => {
             out.push(callee.as_ref());
             out.extend(args.as_slice());
+        }
+        ExprKind::Quote(datum) | ExprKind::Quasiquote(datum) => {
+            let mut stack = vec![datum.as_ref()];
+            while let Some(d) = stack.pop() {
+                match &d.kind {
+                    DatumKind::List(items) => {
+                        for item in items.as_slice().iter().rev() {
+                            stack.push(item);
+                        }
+                    }
+                    DatumKind::Unquote(e) | DatumKind::UnquoteSplicing(e) => {
+                        out.push(e.as_ref());
+                    }
+                    _ => {}
+                }
+            }
         }
         _ => {}
     }

@@ -13,11 +13,11 @@ fn schema_validation_strict_open_recursive_and_ffi() {
     )
     .unwrap();
 
-    let ok_val = eval(r#"[Card { id: "strike", cost: 1, element: Element.Fire }]"#).unwrap();
+    let ok_val = eval(r#"[Card { id: "strike" cost: 1 element: Element.Fire }]"#).unwrap();
     assert!(s.check(&ok_val).is_ok());
 
     let extra_field =
-        eval(r#"[Card { id: "strike", cost: 1, element: Element.Fire, rarity: 2 }]"#).unwrap();
+        eval(r#"[Card { id: "strike" cost: 1 element: Element.Fire rarity: 2 }]"#).unwrap();
     assert!(s.check(&extra_field).is_err());
 
     let open_s =
@@ -31,7 +31,7 @@ fn schema_validation_strict_open_recursive_and_ffi() {
         "#,
     )
     .unwrap();
-    let tree = eval("Node { val: 1, next: some(Node { val: 2, next: none }) }").unwrap();
+    let tree = eval("Node { val: 1 next: some(Node { val: 2 next: none }) }").unwrap();
     assert!(rec.check(&tree).is_ok());
 
     unsafe {

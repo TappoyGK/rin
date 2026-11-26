@@ -6,7 +6,7 @@ use rin::{ArenaAllocator, Builder, ErrorKind, HeapAllocator, Limits, MemoryConfi
 fn oom_sweep_every_byte_across_phases() {
     let programs = [
         "(let (xs (range 0 20)) (fold + 0 (map (fn (x) (* x 2)) xs)))",
-        "Card { id: \"ember\", cost: 3, tags: [\"fire\" \"fast\"] }",
+        "Card { id: \"ember\" cost: 3 tags: [\"fire\" \"fast\"] }",
         "(sort_by (fn (x) (- 0 x)) [3 1 4 1 5 9 2 6])",
     ];
 

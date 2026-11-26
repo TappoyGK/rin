@@ -262,7 +262,7 @@ fn hints_are_in_ffi_message_and_text_with_original_rule() {
             "expr.name",
         ),
         (
-            "Point{z: 1, a: 2}.bad",
+            "Point{z: 1 a: 2}.bad",
             "Point has no field 'bad'; fields: a, z",
             "expr.field",
         ),

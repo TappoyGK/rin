@@ -140,6 +140,7 @@ pub(crate) struct Chunk {
     pub patterns: RawVec<Pattern>,
     pub protos: RawVec<FnProtoPtr>,
     pub export_lists: RawVec<RawVec<RawStr>>,
+    pub splice_masks: RawVec<RawVec<u8>>,
     pub names: Option<NameInfo>,
 }
 
@@ -270,6 +271,17 @@ impl Chunk {
         Some(idx)
     }
 
+    pub fn add_splice_mask(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        mask: RawVec<u8>,
+    ) -> Option<u32> {
+        let idx = self.splice_masks.len() as u32;
+        pool.push_code(region, &mut self.splice_masks, mask)?;
+        Some(idx)
+    }
+
     /// `WorkArena` 上で構築したチャンクを、`PermArena` へ余剰容量ゼロの密なスライスとしてコピーする。
     #[inline(never)]
     pub fn copy_to_perm(&self, pool: &mut Pool<'_>) -> Option<Self> {
@@ -350,6 +362,19 @@ impl Chunk {
             v
         };
 
+        let splice_masks = if self.splice_masks.is_empty() {
+            RawVec::new()
+        } else {
+            let mut v = RawVec::new();
+            v.reserve_perm(&mut pool.perm, &mut pool.core, self.splice_masks.len())?;
+            for &mask in self.splice_masks.as_slice() {
+                let inner =
+                    RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, mask.as_slice())?;
+                v.push_perm(&mut pool.perm, &mut pool.core, inner)?;
+            }
+            v
+        };
+
         Some(Self {
             local_count: self.local_count,
             code,
@@ -361,6 +386,7 @@ impl Chunk {
             patterns,
             protos,
             export_lists,
+            splice_masks,
             names: self.names,
         })
     }
@@ -387,6 +413,7 @@ fn copy_pattern_to_code(pool: &mut Pool<'_>, region: CodeRegion, pat: Pattern) -
         Pattern::Bool(b) => Pattern::Bool(b),
         Pattern::Char(c) => Pattern::Char(c),
         Pattern::Str(s) => Pattern::Str(pool.alloc_code_str(region, s.as_str())?),
+        Pattern::Ident(s) => Pattern::Ident(pool.alloc_code_str(region, s.as_str())?),
         Pattern::None => Pattern::None,
         Pattern::Some(b) => Pattern::Some(copy_opt_str(pool, region, b)?),
         Pattern::Ok(b) => Pattern::Ok(copy_opt_str(pool, region, b)?),
@@ -413,6 +440,7 @@ pub(crate) enum Op {
     Bool(bool),
     Char(char),
     Str(u32),
+    Ident(u32),
     None,
     EmptyList,
 
@@ -424,6 +452,7 @@ pub(crate) enum Op {
     DefFn(u32, u32), // (名前シンボルID, プロトタイプ添字)
 
     MakeList(u32),
+    MakeListSplice(u32),
     MakeTuple(u32),
     MakeStruct(u32),
     WithCheckStruct,

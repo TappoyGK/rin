@@ -176,7 +176,7 @@ fn checks_work_in_closures_and_iterative_compilation() {
         "(when true ".repeat(50),
         ")".repeat(50)
     );
-    let source = format!("(deftest \"deep\" {nested} (map (fn (x) (check_eq x 1)) [1, 2, 3]))");
+    let source = format!("(deftest \"deep\" {nested} (map (fn (x) (check_eq x 1)) [1 2 3]))");
     let r = run(&[("deep", &source)], &[], Limits::default());
     assert_eq!(r.tests[0].status, TestStatus::Failed);
     assert_eq!(r.tests[0].failures.len(), 3);
@@ -197,10 +197,7 @@ fn depth_and_memory_limits_are_errors() {
     );
     assert_eq!(r.tests[0].error.as_ref().unwrap().kind, ErrorKind::TooDeep);
     let r = run(
-        &[(
-            "memory",
-            "(deftest \"memory\" (check_eq [1, 2, 3] [1, 2, 3]))",
-        )],
+        &[("memory", "(deftest \"memory\" (check_eq [1 2 3] [1 2 3]))")],
         &[],
         Limits {
             memory_bytes: 0,

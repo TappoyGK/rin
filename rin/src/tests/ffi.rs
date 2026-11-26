@@ -119,7 +119,7 @@ fn c_ffi_struct_variant_field_extraction() {
             dealloc: None,
         },
     );
-    let src = CString::new(r#"Card { id: "strike", cost: 1, element: Element.Fire }"#).unwrap();
+    let src = CString::new(r#"Card { id: "strike" cost: 1 element: Element.Fire }"#).unwrap();
     let schema_src = CString::new(
         "(struct Card (id string) (cost i64) (element (variant Element (Plain) (Fire) (Frost))))",
     )

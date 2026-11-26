@@ -1,4 +1,4 @@
-use crate::ast::{Expr, ExprKind, children};
+use crate::ast::{Datum, DatumKind, Expr, ExprKind, children};
 use crate::lexer::{Token, TokenKind};
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -9,7 +9,6 @@ pub(super) enum Style {
     Body(usize),
     If,
     Data,
-    Tuple,
     Fields,
     Bindings,
     Params,
@@ -67,6 +66,9 @@ impl<'a> Syntax<'a> {
     }
     fn end(&self, e: &Expr) -> usize {
         let start = self.start(e);
+        if self.ends[start] != 0 {
+            return self.ends[start];
+        }
         match &e.kind {
             ExprKind::Field { target, .. } => self.end(target) + 2,
             ExprKind::Index { target, .. } => self.ends[self.end(target)],
@@ -79,9 +81,73 @@ impl<'a> Syntax<'a> {
                     start + 3
                 }
             }
-            _ if self.ends[start] != 0 => self.ends[start],
+            ExprKind::Quote(_) | ExprKind::Quasiquote(_) => self.datum_token_end(start),
             _ => start + 1,
         }
+    }
+    fn datum_token_end(&self, mut pos: usize) -> usize {
+        while pos < self.tokens.len()
+            && matches!(
+                self.tokens[pos].0.kind,
+                TokenKind::Quote
+                    | TokenKind::Quasiquote
+                    | TokenKind::Unquote
+                    | TokenKind::UnquoteSplicing
+            )
+        {
+            pos += 1;
+        }
+        if pos >= self.tokens.len() {
+            return pos;
+        }
+        let mut end = if self.ends[pos] != 0 {
+            self.ends[pos]
+        } else if let TokenKind::Ident(name) = &self.tokens[pos].0.kind {
+            let is_upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+            if (matches!(name.as_str(), "some" | "ok" | "err")
+                && self
+                    .tokens
+                    .get(pos + 1)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::LParen && t.attached))
+                || (is_upper
+                    && self
+                        .tokens
+                        .get(pos + 1)
+                        .is_some_and(|(t, _)| t.kind == TokenKind::LBrace))
+            {
+                self.ends[pos + 1]
+            } else if is_upper
+                && self
+                    .tokens
+                    .get(pos + 1)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::Dot)
+            {
+                if self
+                    .tokens
+                    .get(pos + 3)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::LParen && t.attached)
+                {
+                    self.ends[pos + 3]
+                } else {
+                    pos + 3
+                }
+            } else {
+                pos + 1
+            }
+        } else {
+            pos + 1
+        };
+        while end < self.tokens.len() {
+            let tok = &self.tokens[end].0;
+            if tok.kind == TokenKind::Dot {
+                end += 2;
+            } else if tok.kind == TokenKind::LBracket && tok.attached {
+                end = self.ends[end];
+            } else {
+                break;
+            }
+        }
+        end
     }
     fn range(&self, e: &Expr) -> Range<usize> {
         self.start(e)..self.end(e)
@@ -102,13 +168,14 @@ impl<'a> Syntax<'a> {
     fn plan(&mut self, e: &Expr) {
         let start = self.start(e);
         match &e.kind {
-            ExprKind::List(xs) | ExprKind::Tuple(xs) => self.add(
+            ExprKind::List(xs) => self.add(
                 start,
-                if matches!(e.kind, ExprKind::Tuple(_)) {
-                    Style::Tuple
-                } else {
-                    Style::Data
-                },
+                Style::Data,
+                xs.as_slice().iter().map(|e| self.range(e)).collect(),
+            ),
+            ExprKind::Tuple(xs) => self.add(
+                start,
+                Style::Call,
                 xs.as_slice().iter().map(|e| self.range(e)).collect(),
             ),
             ExprKind::Call { callee, args } => {
@@ -198,25 +265,44 @@ impl<'a> Syntax<'a> {
                     self.add(i, Style::Arm, parts);
                 }
             }
-            ExprKind::Struct(s) => self.fields(start + 1, s.fields.as_slice()),
+            ExprKind::Struct(s) if self.tokens[start].0.kind != TokenKind::LParen => {
+                self.fields(start + 1, s.fields.as_slice())
+            }
             ExprKind::With { target, fields } => {
                 let brace = self.end(target);
-                self.fields(brace, fields.as_slice());
-                self.add(
-                    start,
-                    Style::Call,
-                    vec![self.range(target), brace..self.ends[brace]],
-                );
+                if self
+                    .tokens
+                    .get(brace)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::LBrace)
+                {
+                    self.fields(brace, fields.as_slice());
+                    self.add(
+                        start,
+                        Style::Call,
+                        vec![self.range(target), brace..self.ends[brace]],
+                    );
+                } else {
+                    self.add(start, Style::Call, vec![self.range(target)]);
+                }
             }
             ExprKind::Some(x) | ExprKind::Ok(x) | ExprKind::Err(x) => {
-                self.add(start + 1, Style::Call, vec![self.range(x)])
+                let paren = if self.tokens[start].0.kind == TokenKind::LParen {
+                    start
+                } else {
+                    start + 1
+                };
+                self.add(paren, Style::Call, vec![self.range(x)])
             }
-            ExprKind::Variant(v) if v.data.is_some() => self.add(
-                start + 3,
-                Style::Call,
-                vec![self.range(v.data.as_ref().unwrap())],
-            ),
-            ExprKind::Index { target, index } => {
+            ExprKind::Variant(v)
+                if v.data.is_some() && self.tokens[start].0.kind != TokenKind::LParen =>
+            {
+                self.add(
+                    start + 3,
+                    Style::Call,
+                    vec![self.range(v.data.as_ref().unwrap())],
+                )
+            }
+            ExprKind::Index { target, index } if self.tokens[start].0.kind != TokenKind::LParen => {
                 self.add(self.end(target), Style::Call, vec![self.range(index)])
             }
             _ => {}
@@ -284,6 +370,10 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
                         .zip(b)
                         .all(|(a, b)| a.pattern == b.pattern && a.body.len() == b.body.len())
             }
+            (ExprKind::Quote(a), ExprKind::Quote(b))
+            | (ExprKind::Quasiquote(a), ExprKind::Quasiquote(b)) => {
+                datum_equivalent(a.as_ref(), b.as_ref())
+            }
             _ => true,
         };
         if !equal {
@@ -301,6 +391,38 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
     true
 }
 
+fn datum_equivalent(a: &Datum, b: &Datum) -> bool {
+    let mut stack = vec![(a, b)];
+    while let Some((a, b)) = stack.pop() {
+        if std::mem::discriminant(&a.kind) != std::mem::discriminant(&b.kind) {
+            return false;
+        }
+        match (&a.kind, &b.kind) {
+            (DatumKind::Int(x), DatumKind::Int(y)) if x != y => return false,
+            (DatumKind::Float(x), DatumKind::Float(y)) if x.to_bits() != y.to_bits() => {
+                return false;
+            }
+            (DatumKind::Bool(x), DatumKind::Bool(y)) if x != y => return false,
+            (DatumKind::Char(x), DatumKind::Char(y)) if x != y => return false,
+            (DatumKind::Str(x), DatumKind::Str(y)) | (DatumKind::Ident(x), DatumKind::Ident(y))
+                if x != y =>
+            {
+                return false;
+            }
+            (DatumKind::List(xs), DatumKind::List(ys)) => {
+                let xs = xs.as_slice();
+                let ys = ys.as_slice();
+                if xs.len() != ys.len() {
+                    return false;
+                }
+                stack.extend(xs.iter().zip(ys.iter()));
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::equivalent;
@@ -311,7 +433,7 @@ mod tests {
         for (before, after) in [
             ("1", "2"),
             ("0.0", "-0.0"),
-            ("[1 2]", "(1, 2)"),
+            ("[1 2]", "(tuple 1 2)"),
             ("(f 1 2)", "(f 2 1)"),
             ("(def x 1)", "(def y 1)"),
             ("(fn (x) x)", "(fn (y) x)"),
@@ -334,7 +456,7 @@ mod tests {
         }
         assert!(equivalent(
             parse_tests("[nan 1]").unwrap().exprs(),
-            parse_tests("\n[ nan,\n 1 ]\n").unwrap().exprs()
+            parse_tests("\n[ nan\n 1 ]\n").unwrap().exprs()
         ));
     }
 }

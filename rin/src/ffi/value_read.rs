@@ -23,6 +23,7 @@ fn tag_from_value_tag(t: ValueTag) -> RinTag {
         ValueTag::Ok => RinTag::Ok,
         ValueTag::Err => RinTag::Err,
         ValueTag::Fn => RinTag::Fn,
+        ValueTag::Ident => RinTag::Ident,
     }
 }
 
@@ -138,6 +139,30 @@ pub unsafe extern "C" fn rin_as_str(
         return std::ptr::null();
     }
     if let Some(s) = m.state_ref().value_ref(v.0).as_str() {
+        unsafe { *out_len = s.len() };
+        return s.as_ptr();
+    }
+    std::ptr::null()
+}
+
+/// `Ident` 値の UTF-8 バイト列を借用する（`val` の生存中のみ有効）。
+/// 識別子でない場合は `NULL` を返す。
+///
+/// # Safety
+/// `machine`・`val`・`out_len` は有効なポインタでなければならない。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_as_ident(
+    machine: *const Rin,
+    val: *const RinValue,
+    out_len: *mut usize,
+) -> *const u8 {
+    let (Some(m), Some(v)) = (unsafe { machine.as_ref() }, unsafe { val.as_ref() }) else {
+        return std::ptr::null();
+    };
+    if out_len.is_null() {
+        return std::ptr::null();
+    }
+    if let Some(s) = m.state_ref().value_ref(v.0).as_ident() {
         unsafe { *out_len = s.len() };
         return s.as_ptr();
     }

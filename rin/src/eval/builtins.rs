@@ -185,6 +185,72 @@ impl Runner<'_, '_> {
             BuiltinId::Unique => self.builtin_unique(args, span),
             BuiltinId::ListToArray => self.builtin_list_to_array(args, span),
             BuiltinId::ArrayToList => self.builtin_array_to_list(args, span),
+            BuiltinId::IdentToText => {
+                let [v] = args else {
+                    return Err(self.err_runtime(
+                        "fn.convert",
+                        span,
+                        "'ident->text' takes 1 argument",
+                    ));
+                };
+                let RVal::Obj(id) = *v else {
+                    let tname = v.type_name(self.pool);
+                    return Err(self.err_runtime_fmt(
+                        "fn.convert",
+                        span,
+                        format_args!("'ident->text' expects ident, got {tname}"),
+                    ));
+                };
+                let Obj::Ident(os) = *self.pool.get(id) else {
+                    let tname = v.type_name(self.pool);
+                    return Err(self.err_runtime_fmt(
+                        "fn.convert",
+                        span,
+                        format_args!("'ident->text' expects ident, got {tname}"),
+                    ));
+                };
+                if !self.try_charge(os.len()) {
+                    return self.step_limit_result(span);
+                }
+                let str_id = self.pool.alloc_str_from_obj_str(os, span)?;
+                Ok(RVal::Obj(str_id))
+            }
+            BuiltinId::TextToIdent => {
+                let [v] = args else {
+                    return Err(self.err_runtime(
+                        "fn.convert",
+                        span,
+                        "'text->ident' takes 1 argument",
+                    ));
+                };
+                let RVal::Obj(id) = *v else {
+                    let tname = v.type_name(self.pool);
+                    return Err(self.err_runtime_fmt(
+                        "fn.convert",
+                        span,
+                        format_args!("'text->ident' expects string, got {tname}"),
+                    ));
+                };
+                let Obj::Str(os) = *self.pool.get(id) else {
+                    let tname = v.type_name(self.pool);
+                    return Err(self.err_runtime_fmt(
+                        "fn.convert",
+                        span,
+                        format_args!("'text->ident' expects string, got {tname}"),
+                    ));
+                };
+                let len = os.len();
+                let valid = crate::lexer::is_valid_ident(os.as_str());
+                if !self.try_charge(len) {
+                    return self.step_limit_result(span);
+                }
+                if !valid {
+                    return Ok(RVal::None);
+                }
+                let ident_id = self.pool.alloc_ident_from_obj_str(os, span)?;
+                let some_id = self.pool.alloc_obj(Obj::Some(RVal::Obj(ident_id)), span)?;
+                Ok(RVal::Obj(some_id))
+            }
             BuiltinId::Find
             | BuiltinId::Any
             | BuiltinId::All

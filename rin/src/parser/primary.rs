@@ -21,6 +21,46 @@ impl Parser<'_, '_, '_> {
                 self.advance()?;
                 Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Char(c)), 1))
             }
+            WorkTokenKind::Quote => {
+                self.advance()?;
+                self.push_frame(
+                    ParseFrame::QuoteFinish {
+                        span,
+                        is_paren: false,
+                        is_quasiquote: false,
+                    },
+                    span,
+                )?;
+                Ok(NextStep::StartDatum {
+                    qq_depth: 0,
+                    allow_splice: false,
+                })
+            }
+            WorkTokenKind::Quasiquote => {
+                self.advance()?;
+                self.push_frame(
+                    ParseFrame::QuoteFinish {
+                        span,
+                        is_paren: false,
+                        is_quasiquote: true,
+                    },
+                    span,
+                )?;
+                Ok(NextStep::StartDatum {
+                    qq_depth: 1,
+                    allow_splice: false,
+                })
+            }
+            WorkTokenKind::Unquote => Err(self.parse_err(
+                "src.syntax",
+                span,
+                "unquote ',' is only allowed inside quasiquote",
+            )),
+            WorkTokenKind::UnquoteSplicing => Err(self.parse_err(
+                "src.syntax",
+                span,
+                "unquote-splicing ',@' is only allowed inside quasiquote",
+            )),
             WorkTokenKind::LBracket => {
                 self.advance()?;
                 if self.peek().kind == WorkTokenKind::RBracket {
@@ -138,6 +178,7 @@ impl Parser<'_, '_, '_> {
                     fields: RawVec::new(),
                     key,
                     max_child: 0,
+                    sexp: false,
                 },
                 span,
             )?;
@@ -190,17 +231,15 @@ impl Parser<'_, '_, '_> {
         // 先頭が '.' や '[' に続かない識別子の場合は特殊形式を確認する。
         let special = if let WorkTokenKind::Ident(head) = self.peek().kind {
             let next_tok = self.peek_next()?;
-            let is_plain_head = !matches!(
-                next_tok.map(|t| t.kind),
-                Some(WorkTokenKind::Dot) | Some(WorkTokenKind::Comma)
-            ) && !matches!(
-                next_tok,
-                Some(WorkToken {
-                    kind: WorkTokenKind::LBracket,
-                    attached: true,
-                    ..
-                })
-            );
+            let is_plain_head = !matches!(next_tok.map(|t| t.kind), Some(WorkTokenKind::Dot))
+                && !matches!(
+                    next_tok,
+                    Some(WorkToken {
+                        kind: WorkTokenKind::LBracket,
+                        attached: true,
+                        ..
+                    })
+                );
             if is_plain_head { Some(head) } else { None }
         } else {
             None
@@ -316,6 +355,172 @@ impl Parser<'_, '_, '_> {
                 "match" => {
                     self.advance()?; // match
                     self.push_frame(ParseFrame::MatchScrutinee { start }, start)?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "quote" => {
+                    self.advance()?; // quote
+                    self.push_frame(
+                        ParseFrame::QuoteFinish {
+                            span: start,
+                            is_paren: true,
+                            is_quasiquote: false,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartDatum {
+                        qq_depth: 0,
+                        allow_splice: false,
+                    });
+                }
+                "quasiquote" => {
+                    self.advance()?; // quasiquote
+                    self.push_frame(
+                        ParseFrame::QuoteFinish {
+                            span: start,
+                            is_paren: true,
+                            is_quasiquote: true,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartDatum {
+                        qq_depth: 1,
+                        allow_splice: false,
+                    });
+                }
+                "unquote" => {
+                    return Err(self.parse_err(
+                        "src.syntax",
+                        start,
+                        "'unquote' is only allowed inside quasiquote",
+                    ));
+                }
+                "unquote_splicing" => {
+                    return Err(self.parse_err(
+                        "src.syntax",
+                        start,
+                        "'unquote_splicing' is only allowed inside quasiquote",
+                    ));
+                }
+                "tuple" => {
+                    self.advance()?; // tuple
+                    if self.peek().kind == WorkTokenKind::RParen {
+                        return Err(self.parse_err(
+                            "src.syntax",
+                            start,
+                            "tuple requires at least 2 elements",
+                        ));
+                    }
+                    self.push_frame(
+                        ParseFrame::Tuple {
+                            start,
+                            items: RawVec::new(),
+                            max_child: 0,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "field" => {
+                    self.advance()?; // field
+                    self.push_frame(ParseFrame::FieldTarget { start }, start)?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "index" => {
+                    self.advance()?; // index
+                    self.push_frame(ParseFrame::IndexTarget { start }, start)?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "some" => {
+                    self.advance()?; // some
+                    self.push_frame(
+                        ParseFrame::BuiltinWrap {
+                            span: start,
+                            kind: WrapKind::Some,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "ok" => {
+                    self.advance()?; // ok
+                    self.push_frame(
+                        ParseFrame::BuiltinWrap {
+                            span: start,
+                            kind: WrapKind::Ok,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "err" => {
+                    self.advance()?; // err
+                    self.push_frame(
+                        ParseFrame::BuiltinWrap {
+                            span: start,
+                            kind: WrapKind::Err,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "variant" => {
+                    self.advance()?; // variant
+                    let (type_name, _) = self.expect_ident("type name")?;
+                    let (variant, _) = self.expect_ident("variant name")?;
+                    if self.peek().kind == WorkTokenKind::RParen {
+                        self.advance()?;
+                        let v = self.alloc_box(
+                            VariantExpr {
+                                type_name,
+                                variant,
+                                data: None,
+                            },
+                            start,
+                        )?;
+                        return Ok(NextStep::HaveExpr(
+                            Expr::new(start, ExprKind::Variant(v)),
+                            1,
+                        ));
+                    }
+                    self.push_frame(
+                        ParseFrame::VariantData {
+                            span: start,
+                            type_name,
+                            variant,
+                        },
+                        start,
+                    )?;
+                    return Ok(NextStep::StartExpr);
+                }
+                "struct" => {
+                    self.advance()?; // struct
+                    let (name, _) = self.expect_ident("struct name")?;
+                    if self.peek().kind == WorkTokenKind::RParen {
+                        self.advance()?;
+                        let s = self.alloc_box(
+                            StructExpr {
+                                name,
+                                fields: RawVec::new(),
+                            },
+                            start,
+                        )?;
+                        return Ok(NextStep::HaveExpr(Expr::new(start, ExprKind::Struct(s)), 1));
+                    }
+                    self.expect(WorkTokenKind::LParen, "'('")?;
+                    let (key, _) = self.expect_ident("field name")?;
+                    let sf = self.alloc_box(
+                        StructFieldFrame {
+                            brace_start: start,
+                            span: start,
+                            name,
+                            fields: RawVec::new(),
+                            key,
+                            max_child: 0,
+                            sexp: true,
+                        },
+                        start,
+                    )?;
+                    self.push_frame(ParseFrame::StructField(sf), start)?;
                     return Ok(NextStep::StartExpr);
                 }
                 _ => {}

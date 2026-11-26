@@ -4,6 +4,13 @@
 
 ## 未リリース
 
+- **構文・API の破壊的変更（字句整理・`quote` / `quasiquote`・`ident` 型・`(tuple ...)` の導入）**:
+  - リスト `[e1 e2 ...]`、構造体 `Name { f1: e1 f2: e2 }`、`with` のカンマ区切りと旧タプル構文 `(e1, e2)` を廃止し、空白区切りと `(tuple e1 e2 ...)`（2 要素以上）へ移行した。
+  - `'` を文字リテラル（`'a'` / `'\n'` / `'\u{H}'` 等、直後に区切り必須）と `quote` に割り当て、`` ` ``（`quasiquote`）・`,`（`unquote`）・`,@`（`unquote_splicing`）を導入した。識別子に `'` は含められない。
+  - 糖衣構文の正規 S 式形式（`(field ...)` / `(index ...)` / `(some ...)` / `(ok ...)` / `(err ...)` / `(variant ...)` / `(struct ...)` / `(with target (f v) ...)`）を通常のソース構文としても受け入れ、`quote` / `quasiquote` 内で糖衣を正規 S 式へ正規化するようにした。
+  - 不変の識別子値型 `ident`（`==` / `!=` / `<` / `<=` / `>` / `>=` / `sort` / `match` パターン `'foo` / 組み込み `(ident->text i)`・`(text->ident t)` / Rust `Value::Ident`・`ValueTag::Ident`・`val_ident`・`as_ident` / C FFI `RIN_TAG_IDENT`・`rin_ident`・`rin_as_ident` / スキーマ `ident`）を追加した。
+  - 値の `Display` 表現を Rin ソースとして再入力可能な形（`[1 2 3]`、`P { x: 1 y: 2 }`、`(tuple 1 2)`、`'foo`）へ更新し、`rin fmt` も新構文と `'` / `` ` `` / `,` / `,@` に対応した。
+
 - **Rust API の破壊的変更**: `Allocator` トレイトを `unsafe trait` に変更し、確保領域の有効性・整列・非重複・寿命およびサイズ 0 要求の安全性契約を実装側・呼び出し側それぞれについて定義した（独自実装には `unsafe impl Allocator` が必要）。`HeapAllocator` のサイズ 0 確保も要求アラインメントを満たす非 NULL ポインタを返すように統一し、C FFI の `RinAllocator` ではサイズ 0 要求で `alloc` / `dealloc` を呼ばず、`alloc == NULL` のときは `dealloc` の有無によらず標準ヒープで解放するようにした（[PR #73](https://github.com/TappoyGK/rin/pull/73)）。
 
 - **破壊的変更（メモリ管理・ホスト境界・C FFI の刷新）**: 内部のメモリ管理を 3 領域（永続領域 `PermArena`・オブジェクト領域 `ObjHeap`・作業領域 `WorkArena`）へ移行し、渡された `Allocator`（`ArenaAllocator` を含む）上だけでシステムヒープ確保 0 回で動作するようにした。VM・高階組み込み関数を非再帰化して呼び出し深さ `depth` をネイティブスタックから独立させ、`memory_bytes` は 3 領域（構文解析・コンパイル・作業領域・値）の合計論理使用バイト数へ統一した（同じ `memory_bytes` でも従来より早く `TooMuchMemory` になる場合がある）。エラーストアのインライン化に伴いエラーメッセージは最大 1024 バイト（UTF-8 文字境界切り詰め）・履歴文字列プールは最大 2048 バイトとした。`sort` / `sort_by` の自前安定マージソート化に伴い、比較不能エラー `cannot order A and B` はリスト上で左の要素を `A`・右の要素を `B` として報告する形へ統一した。Rust API にゼロヒープのホスト境界（`Val`・`ValueRef`・`ErrorRef`・`Builder::into_machine`・`Builder::with_memory_config`・`MemoryConfig`・`std-value` フィーチャによるゲート）を追加し、C FFI は `Rin` 本体・`RinValue` ハンドル・`RinError` バッファをすべて `RinAllocator` 上へ配置し、`rin_new_with_config` / `rin_memory_config_default` を追加、値コンストラクタ・読み取り関数に `Rin *` を受け取る形へ変更、値コンストラクタ・`rin_struct_set` の失敗（NULL 引数・不正 UTF-8 の `RIN_ERR_HOST` および確保失敗）と所有ハンドルを返す読み取り 5 関数の確保失敗を `rin_last_error` へ記録するようにし、`RinEvalResult.value` を借用ポインタ（`const RinValue *`）として `rin_res_free` を削除した（[PR #70](https://github.com/TappoyGK/rin/pull/70)）。

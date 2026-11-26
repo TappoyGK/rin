@@ -153,7 +153,7 @@ fn formatter_stdin_help_and_options() {
     child.stdin.take().unwrap().write_all(b"[1  2]").unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
-    assert_eq!(out.stdout, b"[1, 2]\n");
+    assert_eq!(out.stdout, b"[1 2]\n");
     assert!(f.run(&["fmt", "--help"]).status.success());
     for args in [
         vec!["fmt", "--check", "--check"],
@@ -190,8 +190,8 @@ fn formatter_preserves_permissions_and_skips_symlinks() {
 #[test]
 fn formatter_explicit_paths_and_stdin_marker() {
     let f = Fixture::new();
-    f.write("-", "[1 2]");
-    f.write("source", "[3 4]");
+    f.write("-", "[1  2]");
+    f.write("source", "[3  4]");
     for args in [
         vec!["fmt", "--check", "./-"],
         vec!["fmt", "--check", "--", "-"],
@@ -201,8 +201,8 @@ fn formatter_explicit_paths_and_stdin_marker() {
         assert!(String::from_utf8_lossy(&output.stdout).contains('/'));
     }
     assert!(f.run(&["fmt", "--", "-", "source"]).status.success());
-    assert_eq!(fs::read_to_string(f.0.join("-")).unwrap(), "[1, 2]\n");
-    assert_eq!(fs::read_to_string(f.0.join("source")).unwrap(), "[3, 4]\n");
+    assert_eq!(fs::read_to_string(f.0.join("-")).unwrap(), "[1 2]\n");
+    assert_eq!(fs::read_to_string(f.0.join("source")).unwrap(), "[3 4]\n");
     assert_eq!(f.run(&["fmt", "-", "source"]).status.code(), Some(2));
     assert_eq!(f.run(&["fmt", "-", "-"]).status.code(), Some(2));
 }

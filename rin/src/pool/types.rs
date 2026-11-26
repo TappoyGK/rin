@@ -49,6 +49,7 @@ impl RVal {
                 Obj::Cons { .. } => "list",
                 Obj::Array(_) => "array",
                 Obj::Str(_) => "string",
+                Obj::Ident(_) => "ident",
                 Obj::Tuple(_) => "tuple",
                 Obj::Struct { .. } => "struct",
                 Obj::Variant { .. } => "variant",
@@ -194,6 +195,7 @@ pub(crate) enum Obj {
     },
     Array(ObjSlice<RVal>),
     Str(ObjStr),
+    Ident(ObjStr),
     Tuple(ObjSlice<RVal>),
     Struct {
         desc: StructDescRef,

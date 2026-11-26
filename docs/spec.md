@@ -8,8 +8,8 @@ Rin は、ホストプログラムに組み込んで安全に実行できる、�
 
 Rin は次のものを含む。
 
-- 値と型：`i64`、`f64`、`bool`、`char`、`string`、`list`、`array`、`tuple`、`struct`、`variant`、`option`、`result`、`fn`、`void`
-- 構文：`def`、`defn`、`fn`、`let`、`if`、`when`、`match`、`with`、構造体リテラル、バリアントリテラル、リストリテラル、タプルリテラル、フィールド参照、添字アクセス、関数呼び出し
+- 値と型：`i64`、`f64`、`bool`、`char`、`string`、`ident`、`list`、`array`、`tuple`、`struct`、`variant`、`option`、`result`、`fn`、`void`
+- 構文：`def`、`defn`、`fn`、`let`、`if`、`when`、`match`、`with`、`quote`、`quasiquote`、構造体リテラル、バリアントリテラル、リストリテラル、タプルリテラル、フィールド参照、添字アクセス、関数呼び出し
 - 組み込み関数：算術・比較・論理・型変換・数学・リスト高階関数
 
 Rin は次のものを含まない。
@@ -54,14 +54,16 @@ Rin は次のものを含まない。
 
 **[src.attached]** 直前に空白文字およびコメントを挟まずに現れた `(` と `[` は、直前の式に隣接したトークンとして扱う。
 - `some(3)`、`ok(1)`、`err("ng")`、`Element.Gain(0.5)` の `(` は直前の識別子に隣接しなければならない。空白を挟んだ `some (3)` は 2 つの独立した式として読む。
-- `xs[0]`、`(f x)[i]` の `[` は直前の識別子または `)` に隣接しなければならない。空白または `(` の後に現れた `[`（例：`[1, 2]`、`(+ [1] ...)`）はリストリテラルとして読む。
+- `xs[0]`、`(f x)[i]` の `[` は直前の識別子または `)` に隣接しなければならない。空白または `(` の後に現れた `[`（例：`[1 2]`、`(+ [1] ...)`）はリストリテラルとして読む。
 
-**[src.ident]** 識別子は、ASCII 英字・`_`・演算子記号（`+ - * / % = ! < >`）のいずれかで始まり、ASCII 英字・ASCII 数字・`_`・演算子記号が続く。大文字と小文字を区別する。先頭が大文字の識別子は、構造体名および列挙型名として扱う。
+**[src.ident]** 識別子は、ASCII 英字・`_`・演算子記号（`+ - * / % = ! < >`）のいずれかで始まり、ASCII 英字・ASCII 数字・`_`・演算子記号が続く（`'` は含まない）。大文字と小文字を区別する。先頭が大文字の識別子は、構造体名および列挙型名として扱う。
 
 **[src.keywords]** 次の語は予約語または特殊リテラルである。
 
 ```text
 def defn fn let if when match with import export
+quote quasiquote unquote unquote_splicing
+tuple field index variant struct
 true false none some ok err inf nan
 ```
 
@@ -73,7 +75,7 @@ true false none some ok err inf nan
 
 **[src.escape]** 文字列・文字リテラルで、上記以外のエスケープ、または `\` の直後で入力が終わる場合は字句エラーである。共通のエスケープ処理の診断にはこの規則名を付ける。
 
-**[src.char]** 文字リテラルは `'` で囲まれた 1 文字（またはエスケープ 1 つ）で表す。
+**[src.char]** 文字リテラルは `'` の直後に 1 Unicode スカラー値または 1 エスケープ（`\n`、`\r`、`\t`、`\\`、`\"`、`\'`、`\0`、`\u{H}`（`H` は 1〜6 桁の 16 進数））が続き、直後に `'` で閉じる形で表す。文字リテラルの直後には空白・改行・`;`・区切り文字（`(` `)` `[` `]` `{` `}` `"` `'` `` ` `` `,`）または入力末尾が必要であり、`'a'b` のように識別子等が直結する場合は字句エラーである。上記に一致しない `'` は `quote` トークンとして扱う。また `` ` `` は `quasiquote`、`,` は `unquote`、`,@` は `unquote_splicing` トークンとして扱う。
 
 **[src.nesting-limit]** 構文木の深さ（リテラル・識別子・空リストなどの葉を 1 段と数えたノードの深さ。括弧・特殊形式・`{}`・`some(...)`・後置アクセス `.` / `[...]` ごとに 1 段増える。`let` の束縛リストや `match` の枝の括弧自体は段数に数えない）は最大 `256` 段までとし、上限を超える場合は構文解析中に検査して構文エラーを返す。上限を超えた時点でそれより内側や後ろの解析を止め、エラーには次の位置を示す。
 
@@ -92,13 +94,14 @@ true false none some ok err inf nan
 
 - `void`：値を持たない結果（`def`、`defn`、`when` の戻り値）
 - `i64`、`f64`、`bool`、`char`、`string`
-- `list`：コンスセルからなる不変の連結リスト `[e1, e2, ...]` / `(list e1 e2 ...)`（`cons`、`car`、`cdr`、`len`、`is_empty` は O(1) で末尾を共有する）
+- `ident`：不変の識別子名値（UTF-8 文字列と同じ内部表現。`'foo` のように表記する）
+- `list`：コンスセルからなる不変の連結リスト `[e1 e2 ...]` / `(list e1 e2 ...)`（`cons`、`car`、`cdr`、`len`、`is_empty` は O(1) で末尾を共有する）
 - `array`：連続メモリ上に配置された固定長配列（`list->array` で生成し、`arr[i]`・`len`・`get` を O(1) で実行でき、FFI 境界との受け渡しに適する）
-- `tuple`：2 要素以上の組 `(e1, e2, ...)`
-- `struct`：名前と名前付きフィールドを持つ複合値 `Name { field: expr, ... }`
-- `variant`：型名とバリアント名（および任意のペイロード 1 つ）を持つ値 `Type.Variant` / `Type.Variant(expr)`
-- `option`：`none` または `some(expr)`
-- `result`：`ok(expr)` または `err(expr)`
+- `tuple`：2 要素以上の組 `(tuple e1 e2 ...)`
+- `struct`：名前と名前付きフィールドを持つ複合値 `Name { field: expr ... }` / `(struct Name (field expr) ...)`
+- `variant`：型名とバリアント名（および任意のペイロード 1 つ）を持つ値 `Type.Variant` / `Type.Variant(expr)` / `(variant Type Variant)` / `(variant Type Variant expr)`
+- `option`：`none` または `some(expr)` / `(some expr)`
+- `result`：`ok(expr)` / `(ok expr)` または `err(expr)` / `(err expr)`
 - `fn`：関数値（ユーザー定義関数・無名関数・組み込み関数）
 
 ## 5. 式と構文
@@ -149,25 +152,29 @@ true false none some ok err inf nan
 
 - `_`：任意の値に一致するワイルドカード
 - `name`（小文字始まり）：任意の値に一致し、`name` に束縛する
-- リテラル：整数、`true` / `false`、文字、文字列
+- リテラル：整数、`true` / `false`、文字、文字列、`'ident`（`ident` 値に一致）
 - `none`、`some(name)`、`ok(name)`、`err(name)`（`name` には `_` も書ける）
 - `Type.Variant`、`Type.Variant(name)`
 
 ### 5.3 データ構築・アクセス・不変更新
 
-**[expr.list]** `[e1, e2, ...]`（要素間の `,` は任意）は、各要素を左から評価したリストを返す。
+**[expr.list]** `[e1 e2 ...]` は、各要素を左から評価したリストを返す。正規 S 式形式は `(list e1 e2 ...)` である。
 
-**[expr.tuple]** `(e1, e2, ...)` は、括弧内の最初の式の直後に `,` がある場合にタプルとして解析する。要素数が 1 のタプル構文はない。
+**[expr.tuple]** `(tuple e1 e2 ...)` は、2 要素以上のタプルを構築する。0 要素または 1 要素の `(tuple)` / `(tuple e1)` は構文エラーである。
 
-**[expr.struct]** 先頭が大文字の識別子に `{` が続く `Name { f1: e1, f2: e2, ... }` は、構造体値を構築する。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
+**[expr.struct]** 先頭が大文字の識別子に `{` が続く `Name { f1: e1 f2: e2 ... }`、または正規 S 式形式 `(struct Name (f1 e1) (f2 e2) ...)` は、構造体値を構築する。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
 
-**[expr.variant]** 先頭が大文字の識別子に `.` とバリアント名が続く `Type.Variant`、および隣接した `(` を伴う `Type.Variant(e)` は、バリアント値を構築する。
+**[expr.variant]** 先頭が大文字の識別子に `.` とバリアント名が続く `Type.Variant`、隣接した `(` を伴う `Type.Variant(e)`、または正規 S 式形式 `(variant Type Variant)` / `(variant Type Variant e)` は、バリアント値を構築する。
 
-**[expr.field]** `expr.field` は、構造体値からフィールド `field` の値を読む。構造体でない場合、または存在しないフィールドを指定した場合は実行時エラーである。
+**[expr.field]** `expr.field` または正規 S 式形式 `(field expr field)` は、構造体値からフィールド `field` の値を読む。構造体でない場合、または存在しないフィールドを指定した場合は実行時エラーである。
 
-**[expr.index]** `expr[index]`（`[` は直前に隣接）は、リスト・配列から `i64` 型の添字 `index` の要素を読む。対象がこれらの型でない場合、`index` が `i64` でない場合、負または要素数以上の場合は実行時エラーである。
+**[expr.index]** `expr[index]`（`[` は直前に隣接）または正規 S 式形式 `(index expr index)` は、リスト・配列から `i64` 型の添字 `index` の要素を読む。対象がこれらの型でない場合、`index` が `i64` でない場合、負または要素数以上の場合は実行時エラーである。
 
-**[expr.with]** `(with target { f1: e1, ... })` は、構造体 `target` の指定フィールドのみを新しい値で置き換えた構造体の複製を返す。`target` が構造体でない場合、または存在しないフィールドを含む場合は実行時エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
+**[expr.with]** `(with target { f1: e1 ... })` または正規 S 式形式 `(with target (f1 e1) ...)` は、構造体 `target` の指定フィールドのみを新しい値で置き換えた構造体の複製を返す。`target` が構造体でない場合、または存在しないフィールドを含む場合は実行時エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
+
+**[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードは `ident` 値、数値（`inf` / `nan` を含む）・`true` / `false` / `none`・文字・文字列はその値、`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。
+
+**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、深さ 1 の位置に現れる `,expr`（`unquote`）を通常の式として評価して埋め込み、リスト要素位置に現れる `,@expr`（`unquote_splicing`）をリストとして評価して展開する。入れ子の `quasiquote` にも対応する。`quasiquote` の外での `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外での `,@` は構文エラーである。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
 
 ### 5.4 関数呼び出し
 
@@ -179,11 +186,11 @@ true false none some ok err inf nan
 - `i64` の加算・減算・乗算・除算・剰余・符号反転でオーバーフローが生じる場合は実行時エラーである。
 - `i64` の `/` および `%` で右辺が `0` の場合は実行時エラーである。
 
-**[op.cmp]** `==`、`!=` は同じ型の値同士を比較して `bool` を返す。`<`、`<=`、`>`、`>=` は `i64` 同士または `f64` 同士を比較して `bool` を返す。異なる型同士の比較は実行時エラーである。
+**[op.cmp]** `==`、`!=` は同じ型の値同士を比較して `bool` を返す。`<`、`<=`、`>`、`>=` は `i64` 同士、`f64` 同士、または `ident` 同士（Unicode コードポイント辞書順）を比較して `bool` を返す。異なる型同士（`ident` と `string` を含む）の比較は実行時エラーである。
 
 **[op.logic]** `and` と `or` は 1 個以上の `bool` 式を受け取り、左から短絡評価して `bool` を返す。`not` は 1 個の `bool` 値を否定する。
 
-**[fn.convert]** `as_f64` は `i64` または `f64` を `f64` に変換する。`as_i64` は `i64` または `f64` を `i64` に変換する（`f64` が有限でない場合または `i64` の範囲外の場合は実行時エラーである）。
+**[fn.convert]** `as_f64` は `i64` または `f64` を `f64` に変換する。`as_i64` は `i64` または `f64` を `i64` に変換する（`f64` が有限でない場合または `i64` の範囲外の場合は実行時エラーである）。`ident->text` は `ident` を `string` に変換する。`text->ident` は `string` が識別子として有効なら `some(ident)`、無効なら `none` を返す。
 
 **[fn.math]** 組み込み定数 `pi`（円周率 `f64`）および組み込み関数 `sin`、`cos`、`sqrt`、`floor`、`ceil`（`f64 -> f64`）、`abs`（`i64 -> i64` または `f64 -> f64`）を提供する。
 
@@ -404,11 +411,11 @@ Decl       ::= "(" "def" IDENT Expr ")"
 Expr       ::= Primary ( "." IDENT | "[" Expr "]" )*
 Primary    ::= INT | FLOAT | STRING | CHAR
              | "true" | "false" | "none" | "inf" | "nan"
+             | "'" Datum | "`" Datum
              | ( "some" | "ok" | "err" ) "(" Expr ")"
-             | UpperIdent "{" ( IDENT ":" Expr ","? )* "}"
+             | UpperIdent "{" ( IDENT ":" Expr )* "}"
              | UpperIdent "." IDENT ( "(" Expr ")" )?
-             | "[" ( Expr ","? )* "]"
-             | "(" Expr "," ( Expr ","? )* ")"
+             | "[" Expr* "]"
              | SpecialForm
              | "(" Expr Expr* ")"
              | IDENT
@@ -417,8 +424,15 @@ SpecialForm ::= "(" "fn" "(" IDENT* ")" Expr+ ")"
               | "(" "if" Expr Expr Expr ")"
               | "(" "when" Expr Expr+ ")"
               | "(" "match" Expr ( "(" Pattern Expr+ ")" )* ")"
-              | "(" "with" Expr "{" ( IDENT ":" Expr ","? )* "}" ")"
-Pattern    ::= "_" | INT | STRING | CHAR | "true" | "false" | "none"
+              | "(" "with" Expr ( "{" ( IDENT ":" Expr )* "}" | ( "(" IDENT Expr ")" )* ) ")"
+              | "(" "tuple" Expr Expr+ ")"
+              | "(" "field" Expr IDENT ")"
+              | "(" "index" Expr Expr ")"
+              | "(" ( "some" | "ok" | "err" ) Expr ")"
+              | "(" "variant" IDENT IDENT Expr? ")"
+              | "(" "struct" IDENT ( "(" IDENT Expr ")" )* ")"
+              | "(" ( "quote" | "quasiquote" ) Datum ")"
+Pattern    ::= "_" | INT | STRING | CHAR | "'" IDENT | "true" | "false" | "none"
              | ( "some" | "ok" | "err" ) "(" ( IDENT | "_" ) ")"
              | UpperIdent "." IDENT ( "(" ( IDENT | "_" ) ")" )?
              | IDENT

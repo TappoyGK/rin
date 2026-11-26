@@ -119,6 +119,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
         self.run_steps(&mut steps)
     }
 
+    fn compile_datum_iter(&mut self, datum: &'a Datum) -> Result<(), Failed> {
+        let mut steps = RawVec::new();
+        self.push_step(&mut steps, Step::Datum(datum), datum.span)?;
+        self.run_steps(&mut steps)
+    }
+
     pub(super) fn compile_expr_shallow(
         &mut self,
         expr: &'a Expr,
@@ -162,6 +168,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         self.emit_raw(op, span)?;
                     }
                 }
+            }
+            ExprKind::Quote(datum) | ExprKind::Quasiquote(datum) => {
+                self.compile_datum_iter(datum.as_ref())?;
             }
             ExprKind::List(items) => {
                 let items = items.as_slice();

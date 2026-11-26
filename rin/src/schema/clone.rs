@@ -48,6 +48,7 @@ impl TypeExpr {
                     TypeExpr::Bool => next = CloneNext::Have(TypeExpr::Bool),
                     TypeExpr::Char => next = CloneNext::Have(TypeExpr::Char),
                     TypeExpr::String => next = CloneNext::Have(TypeExpr::String),
+                    TypeExpr::Ident => next = CloneNext::Have(TypeExpr::Ident),
                     TypeExpr::Ref(s) => next = CloneNext::Have(TypeExpr::Ref(s.clone())),
                     TypeExpr::List(t) => {
                         frames.push(CloneFrame::Unary(UnaryTypeKind::List));

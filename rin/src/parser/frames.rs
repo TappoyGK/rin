@@ -33,6 +33,7 @@ pub(super) struct StructFieldFrame {
     pub(super) fields: RawVec<(RawStr, Expr)>,
     pub(super) key: RawStr,
     pub(super) max_child: usize,
+    pub(super) sexp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +61,7 @@ pub(super) struct WithFieldFrame {
     pub(super) fields: RawVec<(RawStr, Expr)>,
     pub(super) key: RawStr,
     pub(super) max_child: usize,
+    pub(super) sexp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -74,8 +76,40 @@ pub(super) struct MatchArmFrame {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct DatumListFrame {
+    pub(super) start: Span,
+    pub(super) items: RawVec<Datum>,
+    pub(super) max_child: usize,
+    pub(super) qq_depth: usize,
+    pub(super) close: WorkTokenKind,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DatumStructFrame {
+    pub(super) start: Span,
+    pub(super) brace_start: Span,
+    pub(super) items: RawVec<Datum>,
+    pub(super) key: RawStr,
+    pub(super) key_span: Span,
+    pub(super) max_child: usize,
+    pub(super) qq_depth: usize,
+    pub(super) is_with: bool,
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum ParseFrame {
     PostfixIndex {
+        target: WorkBox<Expr>,
+        target_depth: usize,
+    },
+    FieldTarget {
+        start: Span,
+    },
+    IndexTarget {
+        start: Span,
+    },
+    IndexArg {
+        start: Span,
         target: WorkBox<Expr>,
         target_depth: usize,
     },
@@ -139,4 +173,32 @@ pub(super) enum ParseFrame {
         start: Span,
     },
     MatchArmBody(WorkBox<MatchArmFrame>),
+    QuoteFinish {
+        span: Span,
+        is_paren: bool,
+        is_quasiquote: bool,
+    },
+    DatumUnquote {
+        span: Span,
+        is_paren: bool,
+        is_splicing: bool,
+    },
+    DatumWrap {
+        span: Span,
+        tag: &'static str,
+        is_paren: bool,
+        outer_qq_depth: usize,
+    },
+    DatumList(WorkBox<DatumListFrame>),
+    DatumIndex {
+        target: WorkBox<Datum>,
+        target_depth: usize,
+        qq_depth: usize,
+    },
+    DatumVariantData {
+        span: Span,
+        type_name: RawStr,
+        variant: RawStr,
+    },
+    DatumStructFields(WorkBox<DatumStructFrame>),
 }

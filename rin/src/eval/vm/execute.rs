@@ -38,6 +38,12 @@ impl Runner<'_, '_> {
                         let id = self.pool.alloc_str(s.as_ref(), span)?;
                         self.stack_push(RVal::Obj(id), span)?;
                     }
+                    Op::Ident(idx) => {
+                        let s = &chunk.strings[idx as usize];
+                        let span = chunk.spans[ip - 1];
+                        let id = self.pool.alloc_ident(s.as_ref(), span)?;
+                        self.stack_push(RVal::Obj(id), span)?;
+                    }
                     Op::None => self.stack_push_at(RVal::None, chunk, ip - 1)?,
                     Op::EmptyList => self.stack_push_at(RVal::EmptyList, chunk, ip - 1)?,
                     Op::GetLocal(slot) => {
@@ -98,6 +104,10 @@ impl Runner<'_, '_> {
                         let start = self.stack.len() - n as usize;
                         let list = self.build_list_from_owned_slice(start, span)?;
                         self.stack_push(list, span)?;
+                    }
+                    Op::MakeListSplice(mask_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        self.exec_make_list_splice(chunk, mask_idx, span)?;
                     }
                     Op::MakeTuple(n) => {
                         let span = chunk.spans[ip - 1];

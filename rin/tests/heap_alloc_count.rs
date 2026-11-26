@@ -165,7 +165,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
                 (export make_card total_cost boom)
                 (defn helper (x) (* x 2))
                 (defn make_card (name cost)
-                  Card { name: name, cost: (helper cost), kind: Kind.Spell(cost) })
+                  Card { name: name cost: (helper cost) kind: Kind.Spell(cost) })
                 (defn total_cost (xs)
                   (fold (fn (acc c) (+ acc c.cost)) 0
                     (sort_by (fn (c) c.cost)
@@ -252,6 +252,19 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
                 .unwrap();
             assert_eq!(v2.as_int(), Some(102));
             machine.release_val(bv);
+
+            // quote / quasiquote / ident のゼロヒープ評価
+            let qv = machine.eval_ref("'(a b [1 2] Point { x: 3 })").unwrap();
+            assert_eq!(qv.tag(), ValueTag::List);
+            assert_eq!(qv.list_len(), Some(4));
+            let qqv = machine
+                .eval_ref("(let (xs [2 3]) `(1 ,@xs ,(+ 2 2)))")
+                .unwrap();
+            assert_eq!(qqv.tag(), ValueTag::List);
+            assert_eq!(qqv.list_len(), Some(4));
+            let idv = machine.eval_ref("'hello").unwrap();
+            assert_eq!(idv.tag(), ValueTag::Ident);
+            assert_eq!(idv.as_ident(), Some("hello"));
         }
 
         // Error paths + backtrace + suggestions + Display into FixedWriter
@@ -598,7 +611,7 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
             r#"
             (defn work (n)
               (let (xs (range 0 n)
-                    ys (map (fn (x) Item { k: x, label: "item" }) xs)
+                    ys (map (fn (x) Item { k: x label: "item" }) xs)
                     zs (filter (fn (it) (== (% it.k 2) 0)) ys))
                 (fold (fn (acc it) (+ acc it.k)) 0 zs)))
             "#,

@@ -76,6 +76,38 @@ pub unsafe extern "C" fn rin_str(machine: *mut Rin, s: *const c_char) -> *mut Ri
 }
 
 /// # Safety
+/// `machine` は有効な `Rin` ポインタ、`s` は有効な NUL 終端 UTF-8 識別子文字列でなければならない。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_ident(machine: *mut Rin, s: *const c_char) -> *mut RinValue {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if s.is_null() {
+        m.record_host_error("null pointer argument");
+        return std::ptr::null_mut();
+    }
+    let Ok(text) = (unsafe { CStr::from_ptr(s) }).to_str() else {
+        m.record_host_error("invalid UTF-8 string");
+        return std::ptr::null_mut();
+    };
+    if !crate::lexer::is_valid_ident(text) {
+        m.record_host_error("invalid identifier");
+        return std::ptr::null_mut();
+    }
+    let res = match m.state.as_mut().expect("Rin state present") {
+        RinState::Building(b) => b.val_ident(text).map_err(|e| m.last_error.set_from_ref(e)),
+        RinState::Frozen(f) => f.val_ident(text).map_err(|e| m.last_error.set_from_ref(e)),
+    };
+    match res {
+        Ok(v) => m.alloc_handle(v),
+        Err(()) => {
+            m.has_error = true;
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// # Safety
 /// `machine` は有効な `Rin` ポインタ、`ptr` は `len` 個の `i64` 要素を読み取れる有効なポインタでなければならない（`len == 0` を除く）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rin_i64s(machine: *mut Rin, ptr: *const i64, len: usize) -> *mut RinValue {

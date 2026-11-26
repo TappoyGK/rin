@@ -16,7 +16,7 @@ use steps::*;
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
-use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
+use crate::ast::{Datum, DatumKind, Expr, ExprKind, MatchArm, Pattern};
 use crate::bytecode::{
     Capture, Chunk, FnProto, FnProtoPtr, NameInfo, NameNode, NameSite, NameTable, Op, StructDesc,
     SymTable,
@@ -279,6 +279,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let region = self.current_region();
         let top = self.scopes.last_mut().unwrap();
         match top.chunk.add_pattern(self.pool, region, pat) {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    fn add_splice_mask(&mut self, mask: RawVec<u8>, span: Span) -> Result<u32, Failed> {
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.add_splice_mask(self.pool, region, mask) {
             Some(idx) => Ok(idx),
             None => Err(self.fail_oom(span)),
         }

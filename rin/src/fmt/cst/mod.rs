@@ -89,7 +89,6 @@ impl<'a> Cst<'a> {
                     let node = this.group(frame, i + 1, open, close, syntax.plans.get(&start));
                     frames.last_mut().unwrap().items.push(node);
                 }
-                TokenKind::Comma => {} // 各データ要素の間に正規化して付け直す。
                 _ => {
                     let node = this.add(Kind::Atom(&source[range.clone()]), i..i + 1, blank);
                     frames.last_mut().unwrap().items.push(node);
@@ -226,8 +225,14 @@ impl<'a> Cst<'a> {
         let b = &self.nodes[right];
         let previous = &self.tokens[a.range.end - 1].0.kind;
         let next = &self.tokens[b.range.start].0;
-        if matches!(previous, TokenKind::Dot)
-            || matches!(next.kind, TokenKind::Dot | TokenKind::Colon)
+        if matches!(
+            previous,
+            TokenKind::Dot
+                | TokenKind::Quote
+                | TokenKind::Quasiquote
+                | TokenKind::Unquote
+                | TokenKind::UnquoteSplicing
+        ) || matches!(next.kind, TokenKind::Dot | TokenKind::Colon)
         {
             return false;
         }
@@ -254,8 +259,6 @@ impl<'a> Cst<'a> {
                 0
             }
         });
-        let data =
-            group.is_some_and(|(_, _, s)| matches!(s, Style::Data | Style::Tuple | Style::Fields));
         for (i, &id) in items.iter().enumerate() {
             let node = &self.nodes[id];
             if node.blank {
@@ -263,18 +266,11 @@ impl<'a> Cst<'a> {
             }
             width += node.flat?;
             if i > 0 {
-                width += if data {
-                    2
-                } else {
-                    usize::from(self.space(items[i - 1], id))
-                };
+                width += usize::from(self.space(items[i - 1], id));
             }
             if width > WIDTH {
                 return None;
             }
-        }
-        if group.is_some_and(|(_, _, s)| matches!(s, Style::Tuple)) && items.len() == 1 {
-            width += 1;
         }
         (width <= WIDTH).then_some(width)
     }

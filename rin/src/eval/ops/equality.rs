@@ -140,7 +140,7 @@ fn objects_equal(
                         }
                         EqStep::Cons(*h1, *t1, *h2, *t2)
                     }
-                    (Obj::Str(s1), Obj::Str(s2)) => {
+                    (Obj::Str(s1), Obj::Str(s2)) | (Obj::Ident(s1), Obj::Ident(s2)) => {
                         if !try_charge_steps(remaining, s1.len().min(s2.len())) {
                             return None;
                         }

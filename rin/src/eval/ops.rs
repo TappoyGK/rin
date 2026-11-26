@@ -219,7 +219,7 @@ impl Runner<'_, '_> {
         let bytes = keys
             .map(|key| match key {
                 RVal::Obj(id) => match self.pool.get(id) {
-                    Obj::Str(s) => s.len(),
+                    Obj::Str(s) | Obj::Ident(s) => s.len(),
                     _ => 0,
                 },
                 _ => 0,
@@ -251,7 +251,9 @@ impl Runner<'_, '_> {
             },
             (RVal::Char(x), RVal::Char(y)) => Ok(x.cmp(&y)),
             (RVal::Obj(id1), RVal::Obj(id2)) => match (self.pool.get(id1), self.pool.get(id2)) {
-                (Obj::Str(s1), Obj::Str(s2)) => Ok(s1.as_str().cmp(s2.as_str())),
+                (Obj::Str(s1), Obj::Str(s2)) | (Obj::Ident(s1), Obj::Ident(s2)) => {
+                    Ok(s1.as_str().cmp(s2.as_str()))
+                }
                 _ => Err(self.compare_type_err(a, b, span)),
             },
             _ => Err(self.compare_type_err(a, b, span)),
@@ -422,6 +424,35 @@ impl Runner<'_, '_> {
                 BuiltinId::Ge => x >= y,
                 _ => unreachable!(),
             },
+            (RVal::Obj(id1), RVal::Obj(id2)) => {
+                let cmp = match (self.pool.get(id1), self.pool.get(id2)) {
+                    (Obj::Ident(s1), Obj::Ident(s2)) => {
+                        let cost = s1.len().min(s2.len());
+                        let ord = s1.as_str().cmp(s2.as_str());
+                        Some((cost, ord))
+                    }
+                    _ => None,
+                };
+                let Some((cost, ord)) = cmp else {
+                    let ta = a.type_name(self.pool);
+                    let tb = b.type_name(self.pool);
+                    return Err(self.err_runtime_fmt(
+                        "op.cmp",
+                        span,
+                        format_args!("cannot compare {ta} and {tb}"),
+                    ));
+                };
+                if !self.try_charge(cost) {
+                    return self.step_limit_result(span);
+                }
+                match op {
+                    BuiltinId::Lt => ord.is_lt(),
+                    BuiltinId::Le => ord.is_le(),
+                    BuiltinId::Gt => ord.is_gt(),
+                    BuiltinId::Ge => ord.is_ge(),
+                    _ => unreachable!(),
+                }
+            }
             _ => {
                 let ta = a.type_name(self.pool);
                 let tb = b.type_name(self.pool);
