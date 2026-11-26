@@ -111,6 +111,14 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + offset).copied()
     }
 
+    /// `start` バイト位置から始まる 1 Unicode スカラー値を返す。
+    fn char_at(&self, start: usize) -> char {
+        std::str::from_utf8(&self.src[start..])
+            .ok()
+            .and_then(|s| s.chars().next())
+            .unwrap_or(char::REPLACEMENT_CHARACTER)
+    }
+
     fn bump(&mut self) -> Option<u8> {
         let b = self.src.get(self.pos).copied()?;
         self.pos += 1;
@@ -219,10 +227,11 @@ impl<'a> Lexer<'a> {
             }
             _ if is_ident_start(b) => TokenKind::Ident(self.lex_ident(span)?),
             _ => {
+                let ch = self.char_at(self.pos);
                 return Err(Error::lex(
                     "src.token",
                     span,
-                    format!("unexpected character {:?}", b as char),
+                    format!("unexpected character {ch:?}"),
                 ));
             }
         };
@@ -235,6 +244,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_escape(&mut self, span: Span) -> Result<char, Error> {
+        let esc_pos = self.pos;
         let Some(esc) = self.bump() else {
             return Err(Error::lex(
                 "src.escape",
@@ -251,11 +261,17 @@ impl<'a> Lexer<'a> {
             b'\'' => Ok('\''),
             b'0' => Ok('\0'),
             b'u' => self.lex_unicode_escape(span),
-            other => Err(Error::lex(
-                "src.escape",
-                span,
-                format!("unknown escape sequence \\{}", other as char),
-            )),
+            _ => {
+                let ch = self.char_at(esc_pos);
+                for _ in 1..ch.len_utf8() {
+                    self.bump();
+                }
+                Err(Error::lex(
+                    "src.escape",
+                    span,
+                    format!("unknown escape sequence '\\{ch}'"),
+                ))
+            }
         }
     }
 
@@ -395,9 +411,16 @@ impl<'a> Lexer<'a> {
         if let Some(after) = self.peek()
             && !is_char_delimiter(after)
         {
-            (self.pos, self.line, self.col) = saved;
-            self.bump();
-            return Ok(TokenKind::Quote);
+            if is_quote_rewind_char(b) {
+                (self.pos, self.line, self.col) = saved;
+                self.bump();
+                return Ok(TokenKind::Quote);
+            }
+            return Err(Error::lex(
+                "src.char",
+                span,
+                "unexpected character immediately after char literal",
+            ));
         }
         Ok(TokenKind::Char(ch))
     }
@@ -537,4 +560,8 @@ pub(crate) fn is_valid_ident(s: &str) -> bool {
 
 pub(crate) fn is_char_delimiter(b: u8) -> bool {
     b.is_ascii_whitespace() || matches!(b, b';' | b')' | b']' | b'}')
+}
+
+pub(crate) fn is_quote_rewind_char(b: u8) -> bool {
+    matches!(b, b'`' | b',' | b'(' | b'[' | b'{')
 }

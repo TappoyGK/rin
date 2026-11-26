@@ -22,10 +22,15 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(eval("'\\u{20}'").unwrap(), Value::Char(' '));
     assert_eq!(eval("'\\u{3042}'").unwrap(), Value::Char('あ'));
 
-    // `'X'` の直後に区切り以外の文字が続く場合は先頭の `'` を quote として読み直す
+    // `'X'` の直後に区切り以外の文字が続く場合、エスケープでない X が前置記号・開き括弧のときだけ quote から読み直す
     assert_eq!(
         eval("'('a 'b)").unwrap(),
         eval("[['quote 'a] ['quote 'b]]").unwrap()
+    );
+    assert_eq!(eval("'('a')").unwrap(), eval("['a']").unwrap());
+    assert_eq!(
+        eval("'['a 'b]").unwrap(),
+        eval("['list ['quote 'a] ['quote 'b]]").unwrap()
     );
     assert_eq!(
         eval("(def x 1) ``(a ',',x)").unwrap(),
@@ -35,17 +40,65 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(err.kind, ErrorKind::Parse);
     assert_eq!(err.rule(), "src.syntax");
 
-    // 文字リテラルの直後に区切りがない場合、先頭の `'` を quote として読み直した上で識別子直後の `'` が字句エラーになる
+    // 単独の開き括弧・前置記号の文字リテラルは直後が区切りなら引き続き文字として読まれる
+    assert_eq!(
+        eval("(list '(' '[' '{' ',' '`')").unwrap(),
+        Value::list(vec![
+            Value::Char('('),
+            Value::Char('['),
+            Value::Char('{'),
+            Value::Char(','),
+            Value::Char('`'),
+        ])
+    );
+
+    // それ以外の `'X'`（英字・数字・`;`・`"`・非ASCII・エスケープ等）の直後に区切り以外が続く場合は src.char 字句エラー
     for bad in [
         "'a'b",
         "(list 'a'(list))",
         "(list 'a'[1])",
         "(list 'a'\"s\")",
         "(list 'a''b')",
+        "(list ';'a\n1)",
+        "(list '\"'x \" \"y\")",
+        "(list '1'a 1)",
+        "(list '9'(+ 1 2))",
+        "(list 'é'x 1)",
+        "'\\u{28}'a",
+        "'\\n'a",
     ] {
         let err = eval(bad).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Lex, "{bad}: {err}");
-        assert_eq!(err.rule(), "src.ident", "{bad}: {err}");
+        assert_eq!(err.rule(), "src.char", "{bad}: {err}");
+        let fmt_err = rin::fmt::format(bad).unwrap_err();
+        assert_eq!(fmt_err.kind, ErrorKind::Lex, "fmt {bad}: {fmt_err}");
+        assert_eq!(fmt_err.rule(), "src.char", "fmt {bad}: {fmt_err}");
+    }
+
+    // 非 ASCII 文字の字句エラー・未知エスケープエラーで文字化けしない（評価・rin fmt 双方）
+    for (src, rule, expected) in [
+        ("é", "src.token", "'é'"),
+        ("'é", "src.token", "'é'"),
+        ("あ", "src.token", "'あ'"),
+        ("\"\\é\"", "src.escape", "\\é"),
+        ("'\\é'", "src.escape", "\\é"),
+    ] {
+        let err = eval(src).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Lex, "{src}: {err}");
+        assert_eq!(err.rule(), rule, "{src}: {err}");
+        assert!(
+            err.message.contains(expected),
+            "{src}: expected {expected:?} in {:?}",
+            err.message
+        );
+        let fmt_err = rin::fmt::format(src).unwrap_err();
+        assert_eq!(fmt_err.kind, ErrorKind::Lex, "fmt {src}: {fmt_err}");
+        assert_eq!(fmt_err.rule(), rule, "fmt {src}: {fmt_err}");
+        assert!(
+            fmt_err.message.contains(expected),
+            "fmt {src}: expected {expected:?} in {:?}",
+            fmt_err.message
+        );
     }
 
     // 識別子直後の `'` は字句エラー

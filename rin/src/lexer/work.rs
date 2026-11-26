@@ -3,7 +3,7 @@
 use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{AllocCore, RawStr, RawVec, WorkArena};
 
-use super::{Lexer, is_char_delimiter, is_ident_continue, is_ident_start};
+use super::{Lexer, is_char_delimiter, is_ident_continue, is_ident_start, is_quote_rewind_char};
 
 /// 作業領域 (`WorkArena`) 上に構築する字句トークン種別（`Copy`・システムヒープ不使用）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,11 +129,12 @@ impl Lexer<'_> {
             }
             _ if is_ident_start(b) => WorkTokenKind::Ident(self.lex_work_ident(span, work, core)?),
             _ => {
+                let ch = self.char_at(self.pos);
                 return Err(core.err_fmt(
                     "src.token",
                     ErrorKind::Lex,
                     span,
-                    format_args!("unexpected character {:?}", b as char),
+                    format_args!("unexpected character {ch:?}"),
                 ));
             }
         };
@@ -150,6 +151,7 @@ impl Lexer<'_> {
         span: Span,
         core: &mut AllocCore<'_>,
     ) -> Result<char, ErrRecorded> {
+        let esc_pos = self.pos;
         let Some(esc) = self.bump() else {
             return Err(core.err_str(
                 "src.escape",
@@ -167,12 +169,18 @@ impl Lexer<'_> {
             b'\'' => Ok('\''),
             b'0' => Ok('\0'),
             b'u' => self.lex_work_unicode_escape(span, core),
-            other => Err(core.err_fmt(
-                "src.escape",
-                ErrorKind::Lex,
-                span,
-                format_args!("unknown escape sequence '\\{}'", other as char),
-            )),
+            _ => {
+                let ch = self.char_at(esc_pos);
+                for _ in 1..ch.len_utf8() {
+                    self.bump();
+                }
+                Err(core.err_fmt(
+                    "src.escape",
+                    ErrorKind::Lex,
+                    span,
+                    format_args!("unknown escape sequence '\\{ch}'"),
+                ))
+            }
         }
     }
 
@@ -299,9 +307,17 @@ impl Lexer<'_> {
         if let Some(after) = self.peek()
             && !is_char_delimiter(after)
         {
-            (self.pos, self.line, self.col) = saved;
-            self.bump();
-            return Ok(WorkTokenKind::Quote);
+            if is_quote_rewind_char(b) {
+                (self.pos, self.line, self.col) = saved;
+                self.bump();
+                return Ok(WorkTokenKind::Quote);
+            }
+            return Err(core.err_str(
+                "src.char",
+                ErrorKind::Lex,
+                span,
+                "unexpected character immediately after char literal",
+            ));
         }
         Ok(WorkTokenKind::Char(ch))
     }

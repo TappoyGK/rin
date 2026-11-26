@@ -110,7 +110,7 @@ fn language_diagnostics_and_display() {
         ("'\\q'", ErrorKind::Lex, "src.escape"),
         ("9223372036854775808", ErrorKind::Lex, "src.int"),
         ("1e", ErrorKind::Lex, "src.float"),
-        ("'a'b", ErrorKind::Lex, "src.ident"),
+        ("'a'b", ErrorKind::Lex, "src.char"),
         ("(", ErrorKind::Parse, "src.syntax"),
         ("(fn ())", ErrorKind::Parse, "expr.body"),
         ("(match 1 (1.5 0))", ErrorKind::Parse, "pat.kinds"),
