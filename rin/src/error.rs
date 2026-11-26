@@ -1,6 +1,11 @@
 //! ソース位置、資源上限、エラー型、および呼び出し履歴フレームを定義する。
 
 mod render;
+mod store;
+
+pub use store::ErrorRef;
+#[allow(unused_imports)]
+pub(crate) use store::{ErrRecorded, ErrorStore, FrameInput, InlineBuf};
 
 use std::fmt;
 
@@ -87,6 +92,7 @@ fn fmt_site(f: &mut fmt::Formatter<'_>, caller_module: Option<&str>, at: Span) -
     }
 }
 
+#[cfg(test)]
 impl StackFrame {
     fn same_site(&self, other: &Self) -> bool {
         self.module == other.module
@@ -244,6 +250,7 @@ impl Error {
         write!(f, " [{}]", self.rule)
     }
 
+    #[cfg(test)]
     pub(crate) fn push_frame(&mut self, frame: StackFrame) {
         if let Some(last) = self.backtrace.last_mut()
             && last.same_site(&frame)

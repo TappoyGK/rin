@@ -4,7 +4,7 @@ pub(super) mod callbacks;
 mod collections;
 
 use crate::bytecode::BuiltinId;
-use crate::error::{Error, Span};
+use crate::error::{ErrRecorded, Span};
 use crate::pool::{Obj, RVal};
 
 use super::Runner;
@@ -34,7 +34,7 @@ impl Runner<'_, '_> {
         b: BuiltinId,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         match b {
             BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div | BuiltinId::Rem => {
                 self.arith(b, args, span)
@@ -45,7 +45,7 @@ impl Runner<'_, '_> {
             }
             BuiltinId::And => {
                 if args.is_empty() {
-                    return Err(Error::runtime(
+                    return Err(self.err_runtime(
                         "op.logic",
                         span,
                         "'and' requires at least 1 argument",
@@ -59,10 +59,11 @@ impl Runner<'_, '_> {
                         RVal::Bool(true) => {}
                         RVal::Bool(false) => return Ok(RVal::Bool(false)),
                         other => {
-                            return Err(Error::runtime(
+                            let tname = other.type_name(self.pool);
+                            return Err(self.err_runtime_fmt(
                                 "op.logic",
                                 span,
-                                format!("expected bool, got {}", other.type_name(self.pool)),
+                                format_args!("expected bool, got {tname}"),
                             ));
                         }
                     }
@@ -71,7 +72,7 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Or => {
                 if args.is_empty() {
-                    return Err(Error::runtime(
+                    return Err(self.err_runtime(
                         "op.logic",
                         span,
                         "'or' requires at least 1 argument",
@@ -85,10 +86,11 @@ impl Runner<'_, '_> {
                         RVal::Bool(true) => return Ok(RVal::Bool(true)),
                         RVal::Bool(false) => {}
                         other => {
-                            return Err(Error::runtime(
+                            let tname = other.type_name(self.pool);
+                            return Err(self.err_runtime_fmt(
                                 "op.logic",
                                 span,
-                                format!("expected bool, got {}", other.type_name(self.pool)),
+                                format_args!("expected bool, got {tname}"),
                             ));
                         }
                     }
@@ -97,51 +99,46 @@ impl Runner<'_, '_> {
             }
             BuiltinId::Not => {
                 let [v] = args else {
-                    return Err(Error::runtime("op.logic", span, "'not' takes 1 argument"));
+                    return Err(self.err_runtime("op.logic", span, "'not' takes 1 argument"));
                 };
                 match v {
                     RVal::Bool(b) => Ok(RVal::Bool(!b)),
-                    other => Err(Error::runtime(
-                        "op.logic",
-                        span,
-                        format!("'not' expects bool, got {}", other.type_name(self.pool)),
-                    )),
+                    other => {
+                        let tname = other.type_name(self.pool);
+                        Err(self.err_runtime_fmt(
+                            "op.logic",
+                            span,
+                            format_args!("'not' expects bool, got {tname}"),
+                        ))
+                    }
                 }
             }
             BuiltinId::AsF64 => {
                 let [v] = args else {
-                    return Err(Error::runtime(
-                        "fn.convert",
-                        span,
-                        "'as_f64' takes 1 argument",
-                    ));
+                    return Err(self.err_runtime("fn.convert", span, "'as_f64' takes 1 argument"));
                 };
                 match v {
                     RVal::Int(n) => Ok(RVal::Float(*n as f64)),
                     RVal::Float(x) => Ok(RVal::Float(*x)),
-                    other => Err(Error::runtime(
-                        "fn.convert",
-                        span,
-                        format!(
-                            "'as_f64' expects number, got {}",
-                            other.type_name(self.pool)
-                        ),
-                    )),
+                    other => {
+                        let tname = other.type_name(self.pool);
+                        Err(self.err_runtime_fmt(
+                            "fn.convert",
+                            span,
+                            format_args!("'as_f64' expects number, got {tname}"),
+                        ))
+                    }
                 }
             }
             BuiltinId::AsI64 => {
                 let [v] = args else {
-                    return Err(Error::runtime(
-                        "fn.convert",
-                        span,
-                        "'as_i64' takes 1 argument",
-                    ));
+                    return Err(self.err_runtime("fn.convert", span, "'as_i64' takes 1 argument"));
                 };
                 match v {
                     RVal::Int(n) => Ok(RVal::Int(*n)),
                     RVal::Float(x) => {
                         if !x.is_finite() || *x < (i64::MIN as f64) || *x > (i64::MAX as f64) {
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime(
                                 "fn.convert",
                                 span,
                                 "float out of i64 range",
@@ -149,14 +146,14 @@ impl Runner<'_, '_> {
                         }
                         Ok(RVal::Int(*x as i64))
                     }
-                    other => Err(Error::runtime(
-                        "fn.convert",
-                        span,
-                        format!(
-                            "'as_i64' expects number, got {}",
-                            other.type_name(self.pool)
-                        ),
-                    )),
+                    other => {
+                        let tname = other.type_name(self.pool);
+                        Err(self.err_runtime_fmt(
+                            "fn.convert",
+                            span,
+                            format_args!("'as_i64' expects number, got {tname}"),
+                        ))
+                    }
                 }
             }
             BuiltinId::Sin

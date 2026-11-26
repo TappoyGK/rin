@@ -11,7 +11,7 @@ impl Runner<'_, '_> {
         arg_start: usize,
         argc: usize,
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if argc == 2 {
             let s = self.stack.as_slice();
             let lhs = s[arg_start];
@@ -35,7 +35,7 @@ impl Runner<'_, '_> {
                 }
                 return match value {
                     Some(value) => Ok(value),
-                    None => Self::integer_overflow(span),
+                    None => self.integer_overflow(span),
                 };
             }
         }
@@ -49,7 +49,7 @@ impl Runner<'_, '_> {
         arg_start: usize,
         argc: usize,
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if !self.try_charge(1) {
             self.release_stack_from(arg_start - 1);
             return self.step_limit_result(span);
@@ -114,7 +114,7 @@ impl Runner<'_, '_> {
 impl Runner<'_, '_> {
     #[cold]
     #[inline(never)]
-    fn integer_overflow(span: Span) -> Result<RVal, Error> {
-        Err(Error::runtime("op.arith", span, "i64 overflow"))
+    fn integer_overflow(&mut self, span: Span) -> Result<RVal, ErrRecorded> {
+        Err(self.err_runtime("op.arith", span, "i64 overflow"))
     }
 }

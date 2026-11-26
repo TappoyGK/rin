@@ -1,9 +1,14 @@
+use std::fmt::Write;
+
 use super::*;
 use crate::mem::RawVec;
 
 impl Runner<'_, '_> {
     #[inline(always)]
-    pub(super) fn exec_rin_frame(&mut self, frame: &mut RinFrame<'_>) -> Result<FrameAction, Error> {
+    pub(super) fn exec_rin_frame(
+        &mut self,
+        frame: &mut RinFrame<'_>,
+    ) -> Result<FrameAction, ErrRecorded> {
         let mut ip = frame.ip;
         let mut frame_stack_start = frame.frame_stack_start;
         let base = frame.base;
@@ -86,7 +91,7 @@ impl Runner<'_, '_> {
                         let v = self.stack.pop().expect("stack underflow on DefGlobal");
                         if self.frozen {
                             self.pool.release_val(v);
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime(
                                 "env.frozen",
                                 span,
                                 "'def' is not allowed in a frozen environment",
@@ -98,7 +103,7 @@ impl Runner<'_, '_> {
                     Op::DefFn(name_id, proto_idx) => {
                         let span = chunk.spans[ip - 1];
                         if self.frozen {
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime(
                                 "env.frozen",
                                 span,
                                 "'defn' is not allowed in a frozen environment",
@@ -240,10 +245,10 @@ impl Runner<'_, '_> {
                         );
                         if !is_struct {
                             let tname = base_val.type_name(self.pool);
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime_fmt(
                                 "expr.with",
                                 span,
-                                format!("'with' requires a struct, got {tname}"),
+                                format_args!("'with' requires a struct, got {tname}"),
                             ));
                         }
                     }
@@ -259,16 +264,11 @@ impl Runner<'_, '_> {
                             unreachable!();
                         };
                         if self.pool.struct_desc_find_field(desc, fname.as_ref()).is_none() {
-                            let name = self.pool.struct_desc_name(desc);
-                            let count = self.pool.struct_desc_field_count(desc);
-                            return Err(Error::runtime(
+                            return Err(self.pool.err_struct_missing_field(
                                 "expr.with",
                                 span,
-                                available(
-                                    format!("{name} has no field '{fname}'"),
-                                    "fields",
-                                    (0..count).map(|i| self.pool.struct_desc_field_name(desc, i)),
-                                ),
+                                desc,
+                                fname.as_ref(),
                             ));
                         }
                     }
@@ -374,21 +374,12 @@ impl Runner<'_, '_> {
                                             self.pool.retain_val(fv);
                                             Ok(fv)
                                         }
-                                        None => {
-                                            let name = self.pool.struct_desc_name(desc);
-                                            let count = self.pool.struct_desc_field_count(desc);
-                                            Err(Error::runtime(
-                                                "expr.field",
-                                                span,
-                                                available(
-                                                    format!("{name} has no field '{field}'"),
-                                                    "fields",
-                                                    (0..count).map(|i| {
-                                                        self.pool.struct_desc_field_name(desc, i)
-                                                    }),
-                                                ),
-                                            ))
-                                        }
+                                        None => Err(self.pool.err_struct_missing_field(
+                                            "expr.field",
+                                            span,
+                                            desc,
+                                            field.as_ref(),
+                                        )),
                                     }
                                 }
                                 Obj::Module { name, exports } => {
@@ -400,37 +391,43 @@ impl Runner<'_, '_> {
                                             self.pool.retain_val(fv);
                                             Ok(fv)
                                         }
-                                        None => Err(Error::runtime(
-                                            "expr.module",
-                                            span,
-                                            available(
-                                                format!(
-                                                    "module '{}' has no export '{field}'",
-                                                    name.as_str()
-                                                ),
+                                        None => {
+                                            let out = self.pool.core.error.begin_msg(
+                                                "expr.module",
+                                                ErrorKind::Runtime,
+                                                span,
+                                            );
+                                            let _ = write!(
+                                                out,
+                                                "module '{}' has no export '{field}'",
+                                                name.as_str()
+                                            );
+                                            write_available(
+                                                out,
                                                 "exports",
                                                 exports.iter().map(|e| e.name.as_str()),
-                                            ),
-                                        )),
+                                            );
+                                            Err(ErrRecorded)
+                                        }
                                     }
                                 }
-                                _ => Err(Error::runtime(
+                                _ => {
+                                    let tname = val.type_name(self.pool);
+                                    Err(self.err_runtime_fmt(
+                                        "expr.field",
+                                        span,
+                                        format_args!("cannot read field '{field}' on {tname}"),
+                                    ))
+                                }
+                            },
+                            other => {
+                                let tname = other.type_name(self.pool);
+                                Err(self.err_runtime_fmt(
                                     "expr.field",
                                     span,
-                                    format!(
-                                        "cannot read field '{field}' on {}",
-                                        val.type_name(self.pool)
-                                    ),
-                                )),
-                            },
-                            other => Err(Error::runtime(
-                                "expr.field",
-                                span,
-                                format!(
-                                    "cannot read field '{field}' on {}",
-                                    other.type_name(self.pool)
-                                ),
-                            )),
+                                    format_args!("cannot read field '{field}' on {tname}"),
+                                ))
+                            }
                         };
                         self.pool.release_val(val);
                         self.stack_push(res?, span)?;
@@ -445,23 +442,23 @@ impl Runner<'_, '_> {
                                 let tname = other.type_name(self.pool);
                                 self.pool.release_val(idx_val);
                                 self.pool.release_val(list_val);
-                                return Err(Error::runtime(
+                                return Err(self.err_runtime_fmt(
                                     "expr.index",
                                     span,
-                                    format!("index must be i64, got {tname}"),
+                                    format_args!("index must be i64, got {tname}"),
                                 ));
                             }
                         };
                         self.pool.release_val(idx_val);
 
                         let res = if let RVal::Obj(id) = list_val
-                            && let Obj::Array(arr) = self.pool.get(id)
+                            && let Obj::Array(arr) = *self.pool.get(id)
                         {
                             if idx < 0 || (idx as usize) >= arr.len() {
-                                Err(Error::runtime(
+                                Err(self.err_runtime_fmt(
                                     "expr.index",
                                     span,
-                                    format!("index {idx} out of range (length {})", arr.len()),
+                                    format_args!("index {idx} out of range (length {})", arr.len()),
                                 ))
                             } else {
                                 let v = arr[idx as usize];
@@ -469,19 +466,18 @@ impl Runner<'_, '_> {
                                 Ok(v)
                             }
                         } else if !self.is_list(list_val) {
-                            Err(Error::runtime(
+                            let tname = list_val.type_name(self.pool);
+                            Err(self.err_runtime_fmt(
                                 "expr.index",
                                 span,
-                                format!("cannot index into {}", list_val.type_name(self.pool)),
+                                format_args!("cannot index into {tname}"),
                             ))
                         } else if idx < 0 {
-                            Err(Error::runtime(
+                            let len = self.pool.list_len(list_val);
+                            Err(self.err_runtime_fmt(
                                 "expr.index",
                                 span,
-                                format!(
-                                    "index {idx} out of range (length {})",
-                                    self.pool.list_len(list_val)
-                                ),
+                                format_args!("index {idx} out of range (length {len})"),
                             ))
                         } else {
                             match self.list_get(list_val, idx as usize, span) {
@@ -490,14 +486,14 @@ impl Runner<'_, '_> {
                                     self.pool.retain_val(v);
                                     Ok(v)
                                 }
-                                Ok(None) => Err(Error::runtime(
-                                    "expr.index",
-                                    span,
-                                    format!(
-                                        "index {idx} out of range (length {})",
-                                        self.pool.list_len(list_val)
-                                    ),
-                                )),
+                                Ok(None) => {
+                                    let len = self.pool.list_len(list_val);
+                                    Err(self.err_runtime_fmt(
+                                        "expr.index",
+                                        span,
+                                        format_args!("index {idx} out of range (length {len})"),
+                                    ))
+                                }
                             }
                         };
                         self.pool.release_val(list_val);
@@ -596,7 +592,7 @@ impl Runner<'_, '_> {
                     }
                     Op::And => {
                         let span = chunk.spans[ip - 1];
-                        return Err(Error::runtime(
+                        return Err(self.err_runtime(
                             "op.logic",
                             span,
                             "'and' requires at least 1 argument",
@@ -604,7 +600,7 @@ impl Runner<'_, '_> {
                     }
                     Op::Or => {
                         let span = chunk.spans[ip - 1];
-                        return Err(Error::runtime(
+                        return Err(self.err_runtime(
                             "op.logic",
                             span,
                             "'or' requires at least 1 argument",
@@ -622,10 +618,10 @@ impl Runner<'_, '_> {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
                                 self.pool.release_val(cond);
-                                return Err(Error::runtime(
+                                return Err(self.err_runtime_fmt(
                                     "expr.condition",
                                     span,
-                                    format!("expected bool, got {tname}"),
+                                    format_args!("expected bool, got {tname}"),
                                 ));
                             }
                         }
@@ -643,10 +639,10 @@ impl Runner<'_, '_> {
                             other => {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
-                                return Err(Error::runtime(
+                                return Err(self.err_runtime_fmt(
                                     "op.logic",
                                     span,
-                                    format!("expected bool, got {tname}"),
+                                    format_args!("expected bool, got {tname}"),
                                 ));
                             }
                         }
@@ -664,10 +660,10 @@ impl Runner<'_, '_> {
                             other => {
                                 let span = chunk.spans[ip - 1];
                                 let tname = other.type_name(self.pool);
-                                return Err(Error::runtime(
+                                return Err(self.err_runtime_fmt(
                                     "op.logic",
                                     span,
-                                    format!("expected bool, got {tname}"),
+                                    format_args!("expected bool, got {tname}"),
                                 ));
                             }
                         }
@@ -689,12 +685,16 @@ impl Runner<'_, '_> {
                     }
                     Op::MatchFail => {
                         let span = chunk.spans[ip - 1];
-                        return Err(Error::runtime("expr.match", span, "non-exhaustive match"));
+                        return Err(self.err_runtime(
+                            "expr.match",
+                            span,
+                            "non-exhaustive match",
+                        ));
                     }
                     Op::Import(id) => {
                         let span = chunk.spans[ip - 1];
                         if self.frozen {
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime(
                                 "env.frozen",
                                 span,
                                 "'import' is not allowed in a frozen environment",
@@ -702,15 +702,14 @@ impl Runner<'_, '_> {
                         }
                         let name = self.syms.name(id).unwrap_or("?");
                         let Some(mod_val) = self.modules.get_val(name) else {
-                            return Err(Error::runtime(
+                            let out = self.pool.core.error.begin_msg(
                                 "expr.module",
+                                ErrorKind::Runtime,
                                 span,
-                                suggest(
-                                    format!("unknown module '{name}'"),
-                                    name,
-                                    self.modules.loaded_names(),
-                                ),
-                            ));
+                            );
+                            let _ = write!(out, "unknown module '{name}'");
+                            write_suggest(out, name, self.modules.loaded_names());
+                            return Err(ErrRecorded);
                         };
                         self.pool.retain_val(mod_val);
                         self.define_top(id, mod_val, span)?;
@@ -719,14 +718,14 @@ impl Runner<'_, '_> {
                     Op::Export(idx) => {
                         let span = chunk.spans[ip - 1];
                         if self.frozen {
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime(
                                 "env.frozen",
                                 span,
                                 "'export' is not allowed in a frozen environment",
                             ));
                         }
                         if self.active_module.is_none() {
-                            return Err(Error::runtime(
+                            return Err(self.err_runtime(
                                 "expr.module",
                                 span,
                                 "'export' can only be used inside a module",
@@ -740,9 +739,9 @@ impl Runner<'_, '_> {
                                 &mut self.pool.core,
                                 sym.as_str(),
                             ) else {
-                                return Err(Error::new(
+                                return Err(self.pool.core.err_str(
                                     "eval.limits",
-                                    crate::error::ErrorKind::TooMuchMemory,
+                                    ErrorKind::TooMuchMemory,
                                     span,
                                     "memory limit exceeded",
                                 ));
@@ -751,9 +750,9 @@ impl Runner<'_, '_> {
                                 .push_work(&mut self.pool.work, &mut self.pool.core, raw)
                                 .is_none()
                             {
-                                return Err(Error::new(
+                                return Err(self.pool.core.err_str(
                                     "eval.limits",
-                                    crate::error::ErrorKind::TooMuchMemory,
+                                    ErrorKind::TooMuchMemory,
                                     span,
                                     "memory limit exceeded",
                                 ));

@@ -107,7 +107,7 @@ impl Pool<'_> {
         val: &Value,
         span: Span,
         depth: usize,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if depth == 32
             && matches!(
                 val,
@@ -136,7 +136,12 @@ impl Pool<'_> {
                 .find(|b| b.name() == *name)
                 .map(RVal::Builtin)
                 .ok_or_else(|| {
-                    Error::runtime("host.value", span, format!("cannot import '{name}'"))
+                    self.core.err_fmt(
+                        "host.value",
+                        ErrorKind::Runtime,
+                        span,
+                        format_args!("cannot import '{name}'"),
+                    )
                 }),
             Value::Str(s) => self.alloc_str(s.as_str(), span).map(RVal::Obj),
             Value::List(xs) => {

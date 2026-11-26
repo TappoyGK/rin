@@ -2,8 +2,8 @@
 
 use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
-use crate::diagnostic::{available, suggest};
-use crate::error::{Error, Span, StackFrame};
+use crate::diagnostic::{write_available, write_suggest};
+use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::RawVec;
 use crate::pool::{Obj, ObjSlice, RVal};
 
@@ -24,7 +24,7 @@ pub(super) struct RinFrame<'a> {
     pub(super) base: usize,
     pub(super) frame_stack_start: usize,
     pub(super) ip: usize,
-    pub(super) origin: Option<CallOrigin<'a>>,
+    pub(super) origin: Option<CallOrigin>,
     pub(super) caller_module: Option<u32>,
     pub(super) prev_active_module: Option<u32>,
     pub(super) cleanup_stack_to: usize,
@@ -53,7 +53,7 @@ pub(super) enum FrameAction {
 
 impl<'a> Runner<'a, '_> {
     /// 最初のフレームを受け取り、ネイティブスタックを再帰させずに VM 全体を実行する。
-    pub(super) fn run_vm<'f>(&mut self, initial: RinFrame<'f>) -> Result<RVal, Error> {
+    pub(super) fn run_vm<'f>(&mut self, initial: RinFrame<'f>) -> Result<RVal, ErrRecorded> {
         self.drive_frames(RawVec::new(), Some(initial))
     }
 
@@ -63,7 +63,7 @@ impl<'a> Runner<'a, '_> {
         b: BuiltinId,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         let cleanup_to = self.stack.len();
         let (frame_opt, step) = self.start_callback_builtin(b, args, span, cleanup_to)?;
         let Some(bframe) = frame_opt else {
@@ -92,7 +92,7 @@ impl<'a> Runner<'a, '_> {
         &mut self,
         mut frames: RawVec<FrameEntry<'f>>,
         mut current: Option<RinFrame<'f>>,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         loop {
             let mut frame = if let Some(f) = current.take() {
                 f
@@ -111,8 +111,8 @@ impl<'a> Runner<'a, '_> {
 
             let action = match self.exec_rin_frame(&mut frame) {
                 Ok(a) => a,
-                Err(mut err) => {
-                    self.unwind_rin_frame(frame, &mut err);
+                Err(err) => {
+                    self.unwind_rin_frame(frame);
                     return Err(self.unwind_frames(frames, err));
                 }
             };
@@ -184,7 +184,7 @@ impl<'a> Runner<'a, '_> {
         &mut self,
         frames: &mut RawVec<FrameEntry<'f>>,
         mut val: RVal,
-    ) -> Result<Option<RVal>, Error> {
+    ) -> Result<Option<RVal>, ErrRecorded> {
         loop {
             let Some(parent) = frames.last_mut() else {
                 return Ok(Some(val));
@@ -238,7 +238,7 @@ impl<'a> Runner<'a, '_> {
         arg_start: usize,
         argc: usize,
         span: Span,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrRecorded> {
         if !self.try_charge(1) {
             self.release_stack_from(arg_start - 1);
             return self.step_limit_result(span);
@@ -293,7 +293,7 @@ impl<'a> Runner<'a, '_> {
         &mut self,
         frames: &mut RawVec<FrameEntry<'f>>,
         mut step: CallbackStep,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrRecorded> {
         loop {
             let CallbackStep::Invoke {
                 callee,
@@ -425,7 +425,7 @@ impl<'a> Runner<'a, '_> {
         &mut self,
         frames: &mut RawVec<FrameEntry<'f>>,
         mut val: RVal,
-    ) -> Result<Option<CallbackStep>, Error> {
+    ) -> Result<Option<CallbackStep>, ErrRecorded> {
         loop {
             let Some(parent) = frames.last_mut() else {
                 // 最上位が `BuiltinFrame` で完了した場合：結果をスタックへ積まず呼び出し元へ返すため
@@ -464,7 +464,7 @@ impl<'a> Runner<'a, '_> {
         arg_start: usize,
         argc: usize,
         span: Span,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrRecorded> {
         let callee = self.stack.as_slice()[arg_start - 1];
         let RVal::Obj(id) = callee else {
             return Err(self.call_type_error(callee, span));
@@ -516,9 +516,8 @@ impl<'a> Runner<'a, '_> {
 
     #[cold]
     #[inline(never)]
-    fn unwind_rin_frame(&mut self, frame: RinFrame<'_>, err: &mut Error) {
+    fn unwind_rin_frame(&mut self, frame: RinFrame<'_>) {
         self.record_unwind_frame(
-            err,
             &frame.entry,
             frame.tail_source.as_ref(),
             frame.tail_calls,
@@ -534,11 +533,15 @@ impl<'a> Runner<'a, '_> {
 
     #[cold]
     #[inline(never)]
-    fn unwind_frames<'f>(&mut self, mut frames: RawVec<FrameEntry<'f>>, mut err: Error) -> Error {
+    fn unwind_frames<'f>(
+        &mut self,
+        mut frames: RawVec<FrameEntry<'f>>,
+        err: ErrRecorded,
+    ) -> ErrRecorded {
         while let Some(entry) = frames.pop() {
             match entry {
                 FrameEntry::Rin(frame) => {
-                    self.unwind_rin_frame(frame, &mut err);
+                    self.unwind_rin_frame(frame);
                 }
                 FrameEntry::Builtin(bframe) => {
                     let cleanup_to = bframe.cleanup_stack_to;

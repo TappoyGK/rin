@@ -3,9 +3,9 @@ use super::*;
 use crate::mem::RawVec;
 
 impl Runner<'_, '_> {
-    pub(super) fn builtin_len(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_len(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [v] = args else {
-            return Err(Error::runtime("fn.list", span, "'len' takes 1 argument"));
+            return Err(self.err_runtime("fn.list", span, "'len' takes 1 argument"));
         };
         if self.is_list(*v) {
             return Ok(RVal::Int(self.pool.list_len(*v) as i64));
@@ -22,24 +22,26 @@ impl Runner<'_, '_> {
                 _ => {}
             }
         }
-        Err(Error::runtime(
+        let tname = v.type_name(self.pool);
+        Err(self.err_runtime_fmt(
             "fn.list",
             span,
-            format!(
-                "'len' expects list, array, or string, got {}",
-                v.type_name(self.pool)
-            ),
+            format_args!("'len' expects list, array, or string, got {tname}"),
         ))
     }
 
-    pub(super) fn builtin_is_empty(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_is_empty(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("is_empty", args, span)?;
         Ok(RVal::Bool(self.pool.list_len(xs) == 0))
     }
 
-    pub(super) fn builtin_get(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_get(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, idx_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'get' takes 2 arguments (seq, index)",
@@ -69,7 +71,7 @@ impl Runner<'_, '_> {
         }
     }
 
-    pub(super) fn builtin_car(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_car(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("car", args, span)?;
         match self.list_head(xs) {
             Some(head) => {
@@ -80,14 +82,14 @@ impl Runner<'_, '_> {
         }
     }
 
-    pub(super) fn builtin_cdr(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_cdr(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("cdr", args, span)?;
         let tail = self.list_tail(xs);
         self.pool.retain_val(tail);
         Ok(tail)
     }
 
-    pub(super) fn builtin_last(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_last(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("last", args, span)?;
         let len = self.pool.list_len(xs);
         if !self.try_charge(len) {
@@ -111,9 +113,9 @@ impl Runner<'_, '_> {
         }
     }
 
-    pub(super) fn builtin_cons(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_cons(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [item, list_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'cons' takes 2 arguments (item, list)",
@@ -123,9 +125,9 @@ impl Runner<'_, '_> {
         self.pool.alloc_cons(*item, *list_v, span)
     }
 
-    pub(super) fn builtin_push(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_push(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, item] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'push' takes 2 arguments (list, item)",
@@ -147,7 +149,11 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_append(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_append(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         if !self.try_charge(args.len()) {
             return self.step_limit_result(span);
         }
@@ -170,7 +176,11 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_flatten(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_flatten(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("flatten", args, span)?;
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -196,9 +206,9 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_slice(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_slice(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, start_v, end_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'slice' takes 3 arguments (list, start, end)",
@@ -209,10 +219,10 @@ impl Runner<'_, '_> {
         let end = self.expect_int("slice", *end_v, span)?;
         let len = self.pool.list_len(*list_v) as i64;
         if start < 0 || end < start || end > len {
-            return Err(Error::runtime(
+            return Err(self.err_runtime_fmt(
                 "fn.list",
                 span,
-                format!("slice range {start}..{end} out of range (length {len})"),
+                format_args!("slice range {start}..{end} out of range (length {len})"),
             ));
         }
         let mark = self.pool.work.mark(&self.pool.core);
@@ -224,9 +234,9 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_take(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_take(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, n_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'take' takes 2 arguments (list, n)",
@@ -235,7 +245,7 @@ impl Runner<'_, '_> {
         self.expect_list("take", *list_v, span)?;
         let n = self.expect_int("take", *n_v, span)?;
         if n < 0 {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'take' count cannot be negative",
@@ -251,9 +261,9 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_drop(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_drop(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [list_v, n_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'drop' takes 2 arguments (list, n)",
@@ -262,7 +272,7 @@ impl Runner<'_, '_> {
         self.expect_list("drop", *list_v, span)?;
         let mut n = self.expect_int("drop", *n_v, span)?;
         if n < 0 {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'drop' count cannot be negative",
@@ -280,7 +290,11 @@ impl Runner<'_, '_> {
         Ok(cur)
     }
 
-    pub(super) fn builtin_reverse(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_reverse(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("reverse", args, span)?;
         if !self.try_charge(self.pool.list_len(xs)) {
             return self.step_limit_result(span);
@@ -303,9 +317,9 @@ impl Runner<'_, '_> {
         Ok(acc)
     }
 
-    pub(super) fn builtin_range(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_range(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [start_v, end_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'range' takes 2 arguments (start, end)",
@@ -337,9 +351,13 @@ impl Runner<'_, '_> {
         Ok(acc)
     }
 
-    pub(super) fn builtin_contains(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_contains(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let [list_v, target] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'contains' takes 2 arguments (list, value)",
@@ -350,15 +368,13 @@ impl Runner<'_, '_> {
         let res = (|| {
             let items = self.list_to_work_vec(*list_v, span)?;
             for &x in items.as_slice() {
-                if x.type_name(self.pool) != target.type_name(self.pool) {
-                    return Err(Error::runtime(
+                let tx = x.type_name(self.pool);
+                let tt = target.type_name(self.pool);
+                if tx != tt {
+                    return Err(self.err_runtime_fmt(
                         "fn.list",
                         span,
-                        format!(
-                            "cannot compare {} and {}",
-                            x.type_name(self.pool),
-                            target.type_name(self.pool)
-                        ),
+                        format_args!("cannot compare {tx} and {tt}"),
                     ));
                 }
                 let Some(equal) = self.values_equal(x, *target) else {
@@ -374,9 +390,9 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_zip(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_zip(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let [a_v, b_v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'zip' takes 2 arguments (list, list)",
@@ -418,7 +434,11 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_enumerate(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_enumerate(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("enumerate", args, span)?;
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -452,7 +472,7 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_sort(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_sort(&mut self, args: &[RVal], span: Span) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("sort", args, span)?;
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -471,11 +491,7 @@ impl Runner<'_, '_> {
             for &x in items.as_slice() {
                 let _ = keyed.push_work(&mut self.pool.work, &mut self.pool.core, (x, x));
             }
-            let mut sort_err = None;
-            self.sort_keyed_work(keyed.as_mut_slice(), span, &mut sort_err)?;
-            if let Some(e) = sort_err {
-                return Err(e);
-            }
+            self.sort_keyed_work(keyed.as_mut_slice(), span)?;
             let mut sorted = RawVec::<RVal>::new();
             if sorted
                 .reserve_work(&mut self.pool.work, &mut self.pool.core, n)
@@ -492,7 +508,11 @@ impl Runner<'_, '_> {
         res
     }
 
-    pub(super) fn builtin_unique(&mut self, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn builtin_unique(
+        &mut self,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("unique", args, span)?;
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -547,7 +567,7 @@ impl Runner<'_, '_> {
         &mut self,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         let xs = self.expect_one_list("list->array", args, span)?;
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -567,9 +587,9 @@ impl Runner<'_, '_> {
         &mut self,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         let [v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime(
                 "fn.list",
                 span,
                 "'array->list' takes 1 argument",
@@ -584,24 +604,20 @@ impl Runner<'_, '_> {
                     arr
                 }
                 _ => {
-                    return Err(Error::runtime(
+                    let tname = v.type_name(self.pool);
+                    return Err(self.err_runtime_fmt(
                         "fn.list",
                         span,
-                        format!(
-                            "'array->list' expects array, got {}",
-                            v.type_name(self.pool)
-                        ),
+                        format_args!("'array->list' expects array, got {tname}"),
                     ));
                 }
             },
             other => {
-                return Err(Error::runtime(
+                let tname = other.type_name(self.pool);
+                return Err(self.err_runtime_fmt(
                     "fn.list",
                     span,
-                    format!(
-                        "'array->list' expects array, got {}",
-                        other.type_name(self.pool)
-                    ),
+                    format_args!("'array->list' expects array, got {tname}"),
                 ));
             }
         };

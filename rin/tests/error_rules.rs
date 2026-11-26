@@ -37,9 +37,36 @@ fn all_implementation_rules_are_documented() {
             "Error::lex(",
             "Error::parse(",
             "Error::runtime(",
+            ".err_str(",
+            ".err_fmt(",
+            ".err_runtime(",
+            ".err_runtime_fmt(",
+            ".begin_msg(",
+            ".err_lex(",
+            ".err_lex_fmt(",
+            ".err_parse(",
+            ".err_parse_fmt(",
         ] {
             for rest in source.split(constructor).skip(1) {
                 let rest = rest.trim_start();
+                if path.ends_with("error/store.rs") && rest.starts_with("self.rule") {
+                    continue;
+                }
+                if !rest.starts_with('"')
+                    && matches!(
+                        constructor,
+                        ".err_str("
+                            | ".err_fmt("
+                            | ".err_runtime("
+                            | ".err_runtime_fmt("
+                            | ".begin_msg("
+                    )
+                {
+                    // 転送ラッパー (例: `self.pool.core.err_str(rule, ...)`) はスキップする。
+                    if rest.starts_with("rule") {
+                        continue;
+                    }
+                }
                 let literal = rest.strip_prefix('"').unwrap_or_else(|| {
                     panic!(
                         "{}: {constructor} must specify a literal rule",

@@ -127,15 +127,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     self.flush_ticks(Span::default())?;
                 }
                 Step::BindLocal { name, span } => {
-                    let slot = match self
+                    let slot = self
                         .scopes
                         .last_mut()
                         .unwrap()
-                        .alloc_slot(self.pool, name, span)
-                    {
-                        Ok(s) => s,
-                        Err(e) => return Err(self.fail(e)),
-                    };
+                        .alloc_slot(self.pool, name, span)?;
                     self.emit_raw(Op::SetLocal(slot), span)?;
                 }
                 Step::RestoreLocals {
@@ -245,15 +241,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     let saved_locals_len = self.scopes.last().unwrap().locals.len();
                     let saved_next_slot = self.scopes.last().unwrap().next_slot;
                     if let Some(bind_name) = pattern_binding(&arm.pattern) {
-                        let slot = match self
+                        let slot = self
                             .scopes
                             .last_mut()
                             .unwrap()
-                            .alloc_slot(self.pool, bind_name, arm.span)
-                        {
-                            Ok(s) => s,
-                            Err(e) => return Err(self.fail(e)),
-                        };
+                            .alloc_slot(self.pool, bind_name, arm.span)?;
                         self.emit_raw(Op::SetLocal(slot), arm.span)?;
                     }
                     self.emit_raw(Op::Pop, arm.span)?;

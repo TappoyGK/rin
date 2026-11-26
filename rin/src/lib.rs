@@ -18,15 +18,17 @@ mod pool;
 pub mod schema;
 pub mod test;
 pub mod value;
+pub mod value_ref;
 mod work;
 
 pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
-pub use error::{Error, ErrorKind, Limits, Span, StackFrame};
+pub use error::{Error, ErrorKind, ErrorRef, Limits, Span, StackFrame};
 pub use eval::{Builder, Machine, eval_with, eval_with_allocator};
 pub use math::MathFma;
 pub use mem::{MemoryConfig, RegionConfig};
 pub use schema::Schema;
 pub use value::Value;
+pub use value_ref::{ListIter, SliceView, StructRef, Val, ValueRef, ValueTag, VariantRef};
 
 /// 既定の上限値・外部束縛なしで Rin ソースを評価する。
 pub fn eval(source: &str) -> Result<Value, Error> {

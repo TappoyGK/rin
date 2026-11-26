@@ -1,6 +1,7 @@
 //! バイトコード VM の実行環境 `Builder`・`Machine` と `Runner` を定義する。
 
 mod builtins;
+mod host_vals;
 mod machine;
 mod modules;
 mod ops;
@@ -12,13 +13,14 @@ use crate::bytecode::{
     BuiltinId, Capture, Chunk, FnProtoPtr, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name,
 };
 use crate::compiler::{compile_program, compile_program_parts};
-use crate::diagnostic::{available, suggest};
-use crate::error::{Error, ErrorKind, Limits, Span};
+use crate::diagnostic::{write_available, write_suggest};
+use crate::error::{ErrRecorded, Error, ErrorKind, ErrorRef, Limits, Span};
 use crate::math::MathFma;
 use crate::mem::{RawMap, RawStr, RawVec, fnv1a_bytes, fnv1a_u32};
 use crate::parser::parse_program_work;
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
+use crate::value_ref::{Val, ValueRef};
 
 /// 既定の `HeapAllocator` を用いて Rin ソースを評価する。
 ///
@@ -102,7 +104,7 @@ impl EnvSlots {
         id: u32,
         val: RVal,
         span: Span,
-    ) -> Result<Option<RVal>, Error> {
+    ) -> Result<Option<RVal>, ErrRecorded> {
         if id >= STATIC_SYM_COUNT {
             set_slot_perm(&mut self.dynamic, pool, id - STATIC_SYM_COUNT, val, span)
         } else {
@@ -116,7 +118,7 @@ impl EnvSlots {
                 .push_perm(&mut pool.perm, &mut pool.core, (id, val))
                 .is_none()
             {
-                return Err(Error::new(
+                return Err(pool.core.err_str(
                     "eval.limits",
                     ErrorKind::TooMuchMemory,
                     span,
@@ -189,30 +191,47 @@ impl ModuleTable {
         (0..names.len()).filter_map(move |i| vals[i].map(|_| names[i].as_str()))
     }
 
-    pub(super) fn ensure_module(&mut self, pool: &mut Pool<'_>, name: &str) -> Result<u32, Error> {
+    pub(super) fn ensure_module(
+        &mut self,
+        pool: &mut Pool<'_>,
+        name: &str,
+    ) -> Result<u32, ErrRecorded> {
         if let Some(id) = self.get_id(name) {
             return Ok(id);
         }
         let id = self.names.len() as u32;
-        let oom = || {
-            Error::new(
+        let Some(raw) = RawStr::from_perm(&mut pool.perm, &mut pool.core, name) else {
+            return Err(pool.core.err_str(
                 "eval.limits",
                 ErrorKind::TooMuchMemory,
                 Span::default(),
                 "memory limit exceeded",
-            )
+            ));
         };
-        let raw = RawStr::from_perm(&mut pool.perm, &mut pool.core, name).ok_or_else(oom)?;
-        self.names
+        if self
+            .names
             .push_perm(&mut pool.perm, &mut pool.core, raw)
-            .ok_or_else(oom)?;
+            .is_none()
+        {
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        }
         if self
             .vals
             .push_perm(&mut pool.perm, &mut pool.core, None)
             .is_none()
         {
             self.names.pop();
-            return Err(oom());
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
         }
         if self
             .envs
@@ -221,7 +240,12 @@ impl ModuleTable {
         {
             self.vals.pop();
             self.names.pop();
-            return Err(oom());
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
         }
         let hash = fnv1a_bytes(name.as_bytes());
         if self
@@ -239,7 +263,12 @@ impl ModuleTable {
             self.envs.pop();
             self.vals.pop();
             self.names.pop();
-            return Err(oom());
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
         }
         Ok(id)
     }
@@ -255,7 +284,7 @@ impl ModuleTable {
         sym_id: u32,
         val: RVal,
         span: Span,
-    ) -> Result<Option<RVal>, Error> {
+    ) -> Result<Option<RVal>, ErrRecorded> {
         self.envs.as_mut_slice()[mod_id as usize].set(pool, sym_id, val, span)
     }
 
@@ -286,6 +315,7 @@ pub(super) struct EnvState<'a> {
     syms: SymTable,
     globals: EnvSlots,
     modules: ModuleTable,
+    last_result: RVal,
 }
 
 #[inline]
@@ -331,14 +361,14 @@ fn set_slot_perm(
     id: u32,
     val: RVal,
     span: Span,
-) -> Result<Option<RVal>, Error> {
+) -> Result<Option<RVal>, ErrRecorded> {
     let idx = id as usize;
     if idx >= slots.len()
         && slots
             .resize_perm(&mut pool.perm, &mut pool.core, idx + 1, None)
             .is_none()
     {
-        return Err(Error::new(
+        return Err(pool.core.err_str(
             "eval.limits",
             ErrorKind::TooMuchMemory,
             span,
@@ -349,10 +379,10 @@ fn set_slot_perm(
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum CallOrigin<'a> {
+pub(super) enum CallOrigin {
     Rin(Span),
     Host,
-    Builtin { name: &'a str, at: Span },
+    Builtin { name: &'static str, at: Span },
 }
 
 pub(super) const INLINE_EVAL_BINDINGS: usize = 8;
@@ -382,7 +412,7 @@ impl EvalBindingValues {
         pool: &mut Pool<'_>,
         id: u32,
         val: RVal,
-    ) -> Result<Option<RVal>, Error> {
+    ) -> Result<Option<RVal>, ErrRecorded> {
         match self {
             Self::Inline { entries, len } => {
                 for entry in &mut entries[..*len] {
@@ -395,9 +425,16 @@ impl EvalBindingValues {
                 Ok(None)
             }
             Self::Map(map) => map
-                .insert_work(&mut pool.work, &mut pool.core, fnv1a_u32(id), id, val, |a, b| a == b)
+                .insert_work(
+                    &mut pool.work,
+                    &mut pool.core,
+                    fnv1a_u32(id),
+                    id,
+                    val,
+                    |a, b| a == b,
+                )
                 .ok_or_else(|| {
-                    Error::new(
+                    pool.core.err_str(
                         "eval.limits",
                         ErrorKind::TooMuchMemory,
                         Span::default(),
@@ -437,9 +474,14 @@ impl EvalBindingValues {
     }
 }
 
+pub(super) enum EvalBindingNames<'a> {
+    Values(&'a [(&'a str, Value)]),
+    Vals(&'a [(&'a str, Val)]),
+}
+
 pub(super) struct EvalBindings<'a> {
     pub(super) values: EvalBindingValues,
-    pub(super) raw: &'a [(&'a str, Value)],
+    pub(super) names: EvalBindingNames<'a>,
 }
 
 pub(super) const INLINE_VALUE_STACK: usize = 16;

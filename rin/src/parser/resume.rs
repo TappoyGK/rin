@@ -6,7 +6,7 @@ impl Parser<'_, '_, '_> {
         frame: ParseFrame,
         expr: Expr,
         depth: usize,
-    ) -> Result<NextStep, Error> {
+    ) -> Result<NextStep, ErrRecorded> {
         match frame {
             ParseFrame::PostfixIndex {
                 target,
@@ -14,7 +14,7 @@ impl Parser<'_, '_, '_> {
             } => {
                 self.expect(WorkTokenKind::RBracket, "']'")?;
                 let combined = 1 + target_depth.max(depth);
-                Self::check_nesting(self.frames.len() + combined, target.span)?;
+                self.check_nesting(self.frames.len() + combined, target.span)?;
                 let span = target.span;
                 let index = self.alloc_box(expr, span)?;
                 Ok(NextStep::HaveExpr(
@@ -42,7 +42,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse("src.syntax", start, "unterminated '['"));
+                    return Err(self.parse_err("src.syntax", start, "unterminated '['"));
                 }
                 self.push_frame(
                     ParseFrame::List {
@@ -69,7 +69,7 @@ impl Parser<'_, '_, '_> {
                         ));
                     }
                     if self.at_eof() {
-                        return Err(Error::parse("src.syntax", start, "unterminated tuple '('"));
+                        return Err(self.parse_err("src.syntax", start, "unterminated tuple '('"));
                     }
                     self.push_frame(
                         ParseFrame::Tuple {
@@ -96,7 +96,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse("src.syntax", start, "unterminated '('"));
+                    return Err(self.parse_err("src.syntax", start, "unterminated '('"));
                 }
                 self.push_frame(
                     ParseFrame::Call {
@@ -128,7 +128,7 @@ impl Parser<'_, '_, '_> {
                         ));
                     }
                     if self.at_eof() {
-                        return Err(Error::parse("src.syntax", start, "unterminated tuple '('"));
+                        return Err(self.parse_err("src.syntax", start, "unterminated tuple '('"));
                     }
                     self.push_frame(
                         ParseFrame::Tuple {
@@ -164,7 +164,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse("src.syntax", start, "unterminated '('"));
+                    return Err(self.parse_err("src.syntax", start, "unterminated '('"));
                 }
                 self.push_frame(
                     ParseFrame::Call {
@@ -216,7 +216,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(
+                    return Err(self.parse_err(
                         "src.syntax",
                         sf.as_ref().brace_start,
                         "unterminated '{'",
@@ -270,7 +270,7 @@ impl Parser<'_, '_, '_> {
                     return Ok(NextStep::HaveExpr(finished, 1 + b.max_child));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(
+                    return Err(self.parse_err(
                         "src.syntax",
                         bf.as_ref().start,
                         "unterminated '('",
@@ -302,7 +302,7 @@ impl Parser<'_, '_, '_> {
                     );
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(
+                    return Err(self.parse_err(
                         "src.syntax",
                         lf.as_ref().bind_start,
                         "unterminated let bindings",
@@ -332,7 +332,7 @@ impl Parser<'_, '_, '_> {
                 max_child,
             } => {
                 if self.peek().kind == WorkTokenKind::RParen {
-                    return Err(Error::parse(
+                    return Err(self.parse_err(
                         "expr.if",
                         start,
                         "'if' requires 3 arguments (cond, then, else); use 'when' when no value is needed",
@@ -436,7 +436,7 @@ impl Parser<'_, '_, '_> {
                     ));
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(
+                    return Err(self.parse_err(
                         "src.syntax",
                         wf.as_ref().brace_start,
                         "unterminated '{'",
@@ -473,7 +473,7 @@ impl Parser<'_, '_, '_> {
                     return self.start_next_match_arm(m.start, m.scrutinee, m.arms, m.max_child);
                 }
                 if self.at_eof() {
-                    return Err(Error::parse(
+                    return Err(self.parse_err(
                         "src.syntax",
                         mf.as_ref().arm_start,
                         "unterminated '('",

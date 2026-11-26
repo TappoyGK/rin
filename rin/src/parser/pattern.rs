@@ -1,16 +1,12 @@
 use super::*;
 
 impl Parser<'_, '_, '_> {
-    pub(super) fn parse_param_list(&mut self) -> Result<RawVec<RawStr>, Error> {
+    pub(super) fn parse_param_list(&mut self) -> Result<RawVec<RawStr>, ErrRecorded> {
         let start = self.expect(WorkTokenKind::LParen, "parameter list '('")?;
         let mut params = RawVec::new();
         while self.peek().kind != WorkTokenKind::RParen {
             if self.at_eof() {
-                return Err(Error::parse(
-                    "src.syntax",
-                    start,
-                    "unterminated parameter list",
-                ));
+                return Err(self.parse_err("src.syntax", start, "unterminated parameter list"));
             }
             let (param, pspan) = self.expect_ident("parameter name")?;
             if params.push_work(self.work, self.core, param).is_none() {
@@ -21,7 +17,7 @@ impl Parser<'_, '_, '_> {
         Ok(params)
     }
 
-    pub(super) fn parse_pattern(&mut self) -> Result<Pattern, Error> {
+    pub(super) fn parse_pattern(&mut self) -> Result<Pattern, ErrRecorded> {
         let tok = self.bump()?;
         match tok.kind {
             WorkTokenKind::Int(n) => Ok(Pattern::Int(n)),
@@ -58,11 +54,11 @@ impl Parser<'_, '_, '_> {
                 }
                 _ => Ok(Pattern::Var(name)),
             },
-            _ => Err(Error::parse("pat.kinds", tok.span, "invalid match pattern")),
+            _ => Err(self.parse_err("pat.kinds", tok.span, "invalid match pattern")),
         }
     }
 
-    fn parse_opt_binding(&mut self) -> Result<Option<RawStr>, Error> {
+    fn parse_opt_binding(&mut self) -> Result<Option<RawStr>, ErrRecorded> {
         self.expect(WorkTokenKind::LParen, "'('")?;
         let (name, _) = self.expect_ident("binding name or '_'")?;
         self.expect(WorkTokenKind::RParen, "')'")?;

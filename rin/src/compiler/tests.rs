@@ -141,7 +141,8 @@ fn local_slot_overflow_reports_capacity_rule() {
     let last = RawStr::from_work(&mut pool.work, &mut pool.core, "last").unwrap();
     let overflow = RawStr::from_work(&mut pool.work, &mut pool.core, "overflow").unwrap();
     assert_eq!(scope.alloc_slot(&mut pool, last, at).unwrap(), u32::MAX - 1);
-    let err = scope.alloc_slot(&mut pool, overflow, at).unwrap_err();
+    assert!(scope.alloc_slot(&mut pool, overflow, at).is_err());
+    let err = pool.core.error.to_owned_error();
     assert_eq!(err.kind, ErrorKind::Parse);
     assert_eq!(err.rule(), "compile.capacity");
     assert_eq!(err.at, at);

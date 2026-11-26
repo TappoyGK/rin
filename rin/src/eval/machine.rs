@@ -1,4 +1,6 @@
 //! `Builder`・`Machine` の生成・凍結・評価・ホスト呼び出しと後始末。
+use std::fmt::Write;
+
 use super::*;
 
 impl<'a> Builder<'a> {
@@ -128,11 +130,15 @@ impl<'a> EnvState<'a> {
             syms: SymTable::new(),
             globals: EnvSlots::new(),
             modules: ModuleTable::new(),
+            last_result: RVal::Void,
         }
     }
 
     pub(super) fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
-        let rval = self.pool.import(value, Span::default())?;
+        let rval = self
+            .pool
+            .import(value, Span::default())
+            .map_err(|_| self.pool.core.error.to_owned_error())?;
         let Some(id) = self.syms.intern(&mut self.pool, name) else {
             self.pool.release_val(rval);
             return Err(Error::new(
@@ -148,9 +154,9 @@ impl<'a> EnvState<'a> {
         {
             Ok(Some(prev)) => self.pool.release_val(prev),
             Ok(None) => {}
-            Err(e) => {
+            Err(_) => {
                 self.pool.release_val(rval);
-                return Err(e);
+                return Err(self.pool.core.error.to_owned_error());
             }
         }
         Ok(())
@@ -173,7 +179,10 @@ impl<'a> EnvState<'a> {
             runner.run_top_chunk(&chunk)
         })();
         self.pool.work.rewind(&mut self.pool.core, mark);
-        let last = res?;
+        let last = match res {
+            Ok(v) => v,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
+        };
         let exported = self.pool.export(last);
         self.pool.release_val(last);
         Ok(exported)
@@ -196,8 +205,9 @@ impl<'a> EnvState<'a> {
         source: &str,
         bindings: &[(&str, Value)],
     ) -> Result<Value, Error> {
-        let chunk = {
-            let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+        let chunk = match (|| {
+            let exprs =
+                parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
             compile_program(
                 exprs.as_slice(),
                 None,
@@ -205,7 +215,10 @@ impl<'a> EnvState<'a> {
                 &mut self.pool,
                 &self.globals,
                 true,
-            )?
+            )
+        })() {
+            Ok(c) => c,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
         };
 
         if bindings.is_empty() {
@@ -213,7 +226,10 @@ impl<'a> EnvState<'a> {
                 let mut runner = self.runner(None, true);
                 runner.run_top_chunk(&chunk)
             };
-            let last = res?;
+            let last = match res {
+                Ok(v) => v,
+                Err(_) => return Err(self.pool.core.error.to_owned_error()),
+            };
             let exported = self.pool.export(last);
             self.pool.release_val(last);
             return Ok(exported);
@@ -228,24 +244,24 @@ impl<'a> EnvState<'a> {
                     Ok(rval) => match values.insert(&mut self.pool, id, rval) {
                         Ok(Some(prev)) => self.pool.release_val(prev),
                         Ok(None) => {}
-                        Err(e) => {
+                        Err(_) => {
                             self.pool.release_val(rval);
                             values.release_all(&mut self.pool);
-                            return Err(e);
+                            return Err(self.pool.core.error.to_owned_error());
                         }
                     },
-                    Err(e) => {
+                    Err(_) => {
                         values.release_all(&mut self.pool);
-                        return Err(e);
+                        return Err(self.pool.core.error.to_owned_error());
                     }
                 }
             } else {
                 // ソース中で参照されない束縛もメモリ上限検査だけは行うため、取り込んで即解放する。
                 match self.pool.import(value, Span::default()) {
                     Ok(rval) => self.pool.release_val(rval),
-                    Err(e) => {
+                    Err(_) => {
                         values.release_all(&mut self.pool);
-                        return Err(e);
+                        return Err(self.pool.core.error.to_owned_error());
                     }
                 }
             }
@@ -253,7 +269,7 @@ impl<'a> EnvState<'a> {
 
         let eval_bindings = EvalBindings {
             values,
-            raw: bindings,
+            names: EvalBindingNames::Values(bindings),
         };
         let res = {
             let mut runner = self.runner(None, true);
@@ -261,7 +277,10 @@ impl<'a> EnvState<'a> {
             runner.run_top_chunk(&chunk)
         };
         eval_bindings.values.release_all(&mut self.pool);
-        let last = res?;
+        let last = match res {
+            Ok(v) => v,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
+        };
         let exported = self.pool.export(last);
         self.pool.release_val(last);
         Ok(exported)
@@ -283,9 +302,9 @@ impl<'a> EnvState<'a> {
             false,
         ) {
             Ok(chunk) => chunk,
-            Err(error) => {
+            Err(_) => {
                 self.pool.work.rewind(&mut self.pool.core, mark);
-                return (Vec::new(), Err(error));
+                return (Vec::new(), Err(self.pool.core.error.to_owned_error()));
             }
         };
         let (failures, result) = {
@@ -296,6 +315,7 @@ impl<'a> EnvState<'a> {
             (std::mem::take(&mut runner.check_failures), result)
         };
         self.pool.work.rewind(&mut self.pool.core, mark);
+        let result = result.map_err(|_| self.pool.core.error.to_owned_error());
         (failures, result)
     }
 
@@ -310,15 +330,14 @@ impl<'a> EnvState<'a> {
             .get(fn_name)
             .and_then(|id| global_slot(&self.globals, id))
         else {
-            return Err(Error::runtime(
-                "expr.name",
-                Span::default(),
-                suggest(
-                    format!("unknown function '{fn_name}'"),
-                    fn_name,
-                    global_bound_names(&self.syms, &self.globals),
-                ),
-            ));
+            let out =
+                self.pool
+                    .core
+                    .error
+                    .begin_msg("expr.name", ErrorKind::Runtime, Span::default());
+            let _ = write!(out, "unknown function '{fn_name}'");
+            write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
+            return Err(self.pool.core.error.to_owned_error());
         };
         self.call_rval(callee, args, frozen)
     }
@@ -364,12 +383,12 @@ impl<'a> EnvState<'a> {
                         ));
                     }
                 }
-                Err(e) => {
+                Err(_) => {
                     for &v in r_args.as_slice() {
                         self.pool.release_val(v);
                     }
                     self.pool.work.rewind(&mut self.pool.core, mark);
-                    return Err(e);
+                    return Err(self.pool.core.error.to_owned_error());
                 }
             }
         }
@@ -384,7 +403,10 @@ impl<'a> EnvState<'a> {
             res
         };
         self.pool.work.rewind(&mut self.pool.core, mark);
-        let val = res?;
+        let val = match res {
+            Ok(v) => v,
+            Err(_) => return Err(self.pool.core.error.to_owned_error()),
+        };
         let exported = self.pool.export(val);
         self.pool.release_val(val);
         Ok(exported)
@@ -412,6 +434,8 @@ impl<'a> EnvState<'a> {
 
 impl Drop for EnvState<'_> {
     fn drop(&mut self) {
+        let last = std::mem::replace(&mut self.last_result, RVal::Void);
+        self.pool.release_val(last);
         self.modules.release_all(&mut self.pool);
         self.globals.clear(&mut self.pool);
     }

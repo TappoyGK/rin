@@ -10,7 +10,7 @@ enum ImportTask<'a> {
 }
 
 impl Pool<'_> {
-    pub fn import(&mut self, value: &Value, span: Span) -> Result<RVal, Error> {
+    pub fn import(&mut self, value: &Value, span: Span) -> Result<RVal, ErrRecorded> {
         match value {
             Value::Void => return Ok(RVal::Void),
             Value::Int(n) => return Ok(RVal::Int(*n)),
@@ -24,7 +24,7 @@ impl Pool<'_> {
     }
 
     #[inline(never)]
-    pub(super) fn import_deep(&mut self, value: &Value, span: Span) -> Result<RVal, Error> {
+    pub(super) fn import_deep(&mut self, value: &Value, span: Span) -> Result<RVal, ErrRecorded> {
         let mut tasks = crate::work::Work::<_, 16>::with(ImportTask::Visit(value));
         let mut values = Vec::new();
         let result = (|| {
@@ -44,10 +44,11 @@ impl Pool<'_> {
                                     .copied()
                                     .find(|b| b.name() == *name)
                                     .ok_or_else(|| {
-                                        Error::runtime(
+                                        self.core.err_fmt(
                                             "host.value",
+                                            ErrorKind::Runtime,
                                             span,
-                                            format!("cannot import '{name}'"),
+                                            format_args!("cannot import '{name}'"),
                                         )
                                     })?,
                             )),

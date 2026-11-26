@@ -1,18 +1,28 @@
 //! ホスト提供モジュールの読み込みとモジュール内の呼び出し。
+use std::fmt::Write;
+
 use super::*;
 
 impl EnvState<'_> {
-    /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
+    /// ホスト提供のソースから名前付きモジュールを読み込んで評価する（所有エラー返却）。
     pub(super) fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
-        let with_mod = |mut err: Error| {
-            err.resolve_module(Some(name.to_string()));
-            err
+        self.load_module_inner(name, source)
+            .map_err(|_| self.pool.core.error.to_owned_error())
+    }
+
+    /// ホスト提供のソースから名前付きモジュールを読み込んで評価する（システムヒープ不使用）。
+    pub(super) fn load_module_inner(&mut self, name: &str, source: &str) -> Result<(), ErrRecorded> {
+        let mod_id = match self.modules.ensure_module(&mut self.pool, name) {
+            Ok(id) => id,
+            Err(e) => {
+                self.pool.core.error.resolve_module(Some(name));
+                return Err(e);
+            }
         };
-        let mod_id = self.modules.ensure_module(&mut self.pool, name).map_err(with_mod)?;
         let mark = self.pool.work.mark(&self.pool.core);
         let chunk = match (|| {
-            let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)
-                .map_err(with_mod)?;
+            let exprs =
+                parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
             compile_program(
                 exprs.as_slice(),
                 Some(mod_id),
@@ -21,11 +31,11 @@ impl EnvState<'_> {
                 &self.globals,
                 false,
             )
-            .map_err(with_mod)
         })() {
             Ok(chunk) => chunk,
             Err(e) => {
                 self.pool.work.rewind(&mut self.pool.core, mark);
+                self.pool.core.error.resolve_module(Some(name));
                 return Err(e);
             }
         };
@@ -43,18 +53,11 @@ impl EnvState<'_> {
         if let Err(e) = v {
             self.pool.work.rewind(&mut self.pool.core, mark);
             self.modules.clear_env(mod_id, &mut self.pool);
-            return Err(with_mod(e));
+            self.pool.core.error.resolve_module(Some(name));
+            return Err(e);
         }
         // `export_filter` は `WorkArena` 上にあるため、exports 構築が終わってから巻き戻す。
         let mut exports: RawVec<(RawStr, RVal)> = RawVec::new();
-        let oom_mod = || {
-            with_mod(Error::new(
-                "eval.limits",
-                ErrorKind::TooMuchMemory,
-                Span::default(),
-                "memory limit exceeded",
-            ))
-        };
         match export_filter {
             Some(names) => {
                 for &sym_raw in names.as_slice() {
@@ -64,15 +67,21 @@ impl EnvState<'_> {
                         .get(sym)
                         .and_then(|id| self.modules.env(mod_id).get(id))
                     else {
+                        let mut sym_buf = crate::error::InlineBuf::<256>::new();
+                        sym_buf.push_str(sym);
                         for &(_, v) in exports.as_slice() {
                             self.pool.release_val(v);
                         }
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.modules.clear_env(mod_id, &mut self.pool);
-                        return Err(Error::runtime(
+                        return Err(self.pool.core.err_fmt(
                             "expr.module",
+                            ErrorKind::Runtime,
                             Span::default(),
-                            format!("module '{name}' cannot export unknown symbol '{sym}'"),
+                            format_args!(
+                                "module '{name}' cannot export unknown symbol '{}'",
+                                sym_buf.as_str()
+                            ),
                         ));
                     };
                     self.pool.retain_val(val);
@@ -90,7 +99,14 @@ impl EnvState<'_> {
                         }
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.modules.clear_env(mod_id, &mut self.pool);
-                        return Err(oom_mod());
+                        let e = self.pool.core.err_str(
+                            "eval.limits",
+                            ErrorKind::TooMuchMemory,
+                            Span::default(),
+                            "memory limit exceeded",
+                        );
+                        self.pool.core.error.resolve_module(Some(name));
+                        return Err(e);
                     }
                 }
             }
@@ -109,7 +125,14 @@ impl EnvState<'_> {
                 if !ok {
                     self.pool.work.rewind(&mut self.pool.core, mark);
                     self.modules.clear_env(mod_id, &mut self.pool);
-                    return Err(oom_mod());
+                    let e = self.pool.core.err_str(
+                        "eval.limits",
+                        ErrorKind::TooMuchMemory,
+                        Span::default(),
+                        "memory limit exceeded",
+                    );
+                    self.pool.core.error.resolve_module(Some(name));
+                    return Err(e);
                 }
                 for &(id, val) in defined.as_slice() {
                     let is_module = matches!(val, RVal::Obj(oid) if matches!(self.pool.get(oid), Obj::Module { .. }));
@@ -125,7 +148,14 @@ impl EnvState<'_> {
                             }
                             self.pool.work.rewind(&mut self.pool.core, mark);
                             self.modules.clear_env(mod_id, &mut self.pool);
-                            return Err(oom_mod());
+                            let e = self.pool.core.err_str(
+                                "eval.limits",
+                                ErrorKind::TooMuchMemory,
+                                Span::default(),
+                                "memory limit exceeded",
+                            );
+                            self.pool.core.error.resolve_module(Some(name));
+                            return Err(e);
                         };
                         self.pool.retain_val(val);
                         if exports
@@ -138,13 +168,22 @@ impl EnvState<'_> {
                             }
                             self.pool.work.rewind(&mut self.pool.core, mark);
                             self.modules.clear_env(mod_id, &mut self.pool);
-                            return Err(oom_mod());
+                            let e = self.pool.core.err_str(
+                                "eval.limits",
+                                ErrorKind::TooMuchMemory,
+                                Span::default(),
+                                "memory limit exceeded",
+                            );
+                            self.pool.core.error.resolve_module(Some(name));
+                            return Err(e);
                         }
                     }
                 }
             }
         }
-        exports.as_mut_slice().sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        exports
+            .as_mut_slice()
+            .sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
         let mut export_pairs: RawVec<(&str, RVal)> = RawVec::new();
         for (k, v) in exports.as_slice() {
             if export_pairs
@@ -156,7 +195,14 @@ impl EnvState<'_> {
                 }
                 self.pool.work.rewind(&mut self.pool.core, mark);
                 self.modules.clear_env(mod_id, &mut self.pool);
-                return Err(oom_mod());
+                let e = self.pool.core.err_str(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    Span::default(),
+                    "memory limit exceeded",
+                );
+                self.pool.core.error.resolve_module(Some(name));
+                return Err(e);
             }
         }
         let mod_obj_res =
@@ -167,7 +213,8 @@ impl EnvState<'_> {
             Ok(id) => id,
             Err(e) => {
                 self.modules.clear_env(mod_id, &mut self.pool);
-                return Err(with_mod(e));
+                self.pool.core.error.resolve_module(Some(name));
+                return Err(e);
             }
         };
         if let Some(prev) = self.modules.set_val(mod_id, RVal::Obj(mod_obj_id)) {
@@ -185,29 +232,27 @@ impl EnvState<'_> {
         frozen: bool,
     ) -> Result<Value, Error> {
         let Some(RVal::Obj(mod_id)) = self.modules.get_val(mod_name) else {
-            return Err(Error::runtime(
-                "expr.module",
-                Span::default(),
-                suggest(
-                    format!("unknown module '{mod_name}'"),
-                    mod_name,
-                    self.modules.loaded_names(),
-                ),
-            ));
+            let out =
+                self.pool
+                    .core
+                    .error
+                    .begin_msg("expr.module", ErrorKind::Runtime, Span::default());
+            let _ = write!(out, "unknown module '{mod_name}'");
+            write_suggest(out, mod_name, self.modules.loaded_names());
+            return Err(self.pool.core.error.to_owned_error());
         };
-        let Obj::Module { exports, .. } = self.pool.get(mod_id) else {
+        let Obj::Module { exports, .. } = *self.pool.get(mod_id) else {
             unreachable!();
         };
-        let Some(callee) = Pool::find_module_export(*exports, fn_name) else {
-            return Err(Error::runtime(
-                "expr.module",
-                Span::default(),
-                available(
-                    format!("module '{mod_name}' has no export '{fn_name}'"),
-                    "exports",
-                    exports.iter().map(|e| e.name.as_str()),
-                ),
-            ));
+        let Some(callee) = Pool::find_module_export(exports, fn_name) else {
+            let out =
+                self.pool
+                    .core
+                    .error
+                    .begin_msg("expr.module", ErrorKind::Runtime, Span::default());
+            let _ = write!(out, "module '{mod_name}' has no export '{fn_name}'");
+            write_available(out, "exports", exports.iter().map(|e| e.name.as_str()));
+            return Err(self.pool.core.error.to_owned_error());
         };
         self.call_rval(callee, args, frozen)
     }

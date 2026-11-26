@@ -1,7 +1,7 @@
 //! リスト補助、同値・順序比較、算術・数学演算を実装する。
 
 use crate::bytecode::BuiltinId;
-use crate::error::{Error, Span};
+use crate::error::{ErrRecorded, Span};
 use crate::pool::{Obj, RVal};
 
 use super::Runner;
@@ -41,7 +41,7 @@ impl Runner<'_, '_> {
         mut v: RVal,
         mut idx: usize,
         span: Span,
-    ) -> Result<Option<RVal>, Error> {
+    ) -> Result<Option<RVal>, ErrRecorded> {
         if !self.try_charge(idx.saturating_add(1).min(self.pool.list_len(v))) {
             return self.step_limit_result(span);
         }
@@ -62,7 +62,7 @@ impl Runner<'_, '_> {
         &mut self,
         mut v: RVal,
         span: Span,
-    ) -> Result<crate::mem::RawVec<RVal>, Error> {
+    ) -> Result<crate::mem::RawVec<RVal>, ErrRecorded> {
         let len = self.pool.list_len(v);
         if !self.try_charge(len) {
             return self.step_limit_result(span);
@@ -88,7 +88,7 @@ impl Runner<'_, '_> {
         &mut self,
         items: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if !self.try_charge(items.len()) {
             self.release_slice(items);
             return self.step_limit_result(span);
@@ -117,7 +117,7 @@ impl Runner<'_, '_> {
         &mut self,
         start: usize,
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         let mut acc = RVal::EmptyList;
         let end = self.stack.len();
         if !self.try_charge(end - start) {
@@ -147,7 +147,7 @@ impl Runner<'_, '_> {
         &mut self,
         items: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if !self.try_charge(items.len()) {
             return self.step_limit_result(span);
         }
@@ -167,43 +167,47 @@ impl Runner<'_, '_> {
         Ok(acc)
     }
 
-    pub(super) fn expect_list(&self, op: &str, v: RVal, span: Span) -> Result<(), Error> {
+    pub(super) fn expect_list(&mut self, op: &str, v: RVal, span: Span) -> Result<(), ErrRecorded> {
         if self.is_list(v) {
             Ok(())
         } else {
-            Err(Error::runtime(
+            let tname = v.type_name(self.pool);
+            Err(self.err_runtime_fmt(
                 "fn.list",
                 span,
-                format!("'{op}' expects list, got {}", v.type_name(self.pool)),
+                format_args!("'{op}' expects list, got {tname}"),
             ))
         }
     }
 
     pub(super) fn expect_one_list(
-        &self,
+        &mut self,
         op: &str,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         let [v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime_fmt(
                 "fn.list",
                 span,
-                format!("'{op}' takes 1 argument"),
+                format_args!("'{op}' takes 1 argument"),
             ));
         };
         self.expect_list(op, *v, span)?;
         Ok(*v)
     }
 
-    pub(super) fn expect_int(&self, op: &str, v: RVal, span: Span) -> Result<i64, Error> {
+    pub(super) fn expect_int(&mut self, op: &str, v: RVal, span: Span) -> Result<i64, ErrRecorded> {
         match v {
             RVal::Int(n) => Ok(n),
-            other => Err(Error::runtime(
-                "fn.list",
-                span,
-                format!("'{op}' expects i64, got {}", other.type_name(self.pool)),
-            )),
+            other => {
+                let tname = other.type_name(self.pool);
+                Err(self.err_runtime_fmt(
+                    "fn.list",
+                    span,
+                    format_args!("'{op}' expects i64, got {tname}"),
+                ))
+            }
         }
     }
 
@@ -233,38 +237,39 @@ impl Runner<'_, '_> {
     }
 
     pub(super) fn compare_vals(
-        &self,
+        &mut self,
         a: RVal,
         b: RVal,
         span: Span,
-    ) -> Result<std::cmp::Ordering, Error> {
+    ) -> Result<std::cmp::Ordering, ErrRecorded> {
         match (a, b) {
             (RVal::Int(x), RVal::Int(y)) => Ok(x.cmp(&y)),
-            (RVal::Float(x), RVal::Float(y)) => x
-                .partial_cmp(&y)
-                .ok_or_else(|| Error::runtime("fn.list", span, "cannot order NaN values")),
+            (RVal::Float(x), RVal::Float(y)) => match x.partial_cmp(&y) {
+                Some(ord) => Ok(ord),
+                None => Err(self.err_runtime("fn.list", span, "cannot order NaN values")),
+            },
             (RVal::Char(x), RVal::Char(y)) => Ok(x.cmp(&y)),
             (RVal::Obj(id1), RVal::Obj(id2)) => match (self.pool.get(id1), self.pool.get(id2)) {
                 (Obj::Str(s1), Obj::Str(s2)) => Ok(s1.as_str().cmp(s2.as_str())),
-                _ => Err(Error::runtime(
+                _ => {
+                    let ta = a.type_name(self.pool);
+                    let tb = b.type_name(self.pool);
+                    Err(self.err_runtime_fmt(
+                        "fn.list",
+                        span,
+                        format_args!("cannot order {ta} and {tb}"),
+                    ))
+                }
+            },
+            _ => {
+                let ta = a.type_name(self.pool);
+                let tb = b.type_name(self.pool);
+                Err(self.err_runtime_fmt(
                     "fn.list",
                     span,
-                    format!(
-                        "cannot order {} and {}",
-                        a.type_name(self.pool),
-                        b.type_name(self.pool)
-                    ),
-                )),
-            },
-            _ => Err(Error::runtime(
-                "fn.list",
-                span,
-                format!(
-                    "cannot order {} and {}",
-                    a.type_name(self.pool),
-                    b.type_name(self.pool)
-                ),
-            )),
+                    format_args!("cannot order {ta} and {tb}"),
+                ))
+            }
         }
     }
 
@@ -273,19 +278,22 @@ impl Runner<'_, '_> {
         op: BuiltinId,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if op == BuiltinId::Sub && args.len() == 1 {
             return match args[0] {
-                RVal::Int(a) => a
-                    .checked_neg()
-                    .map(RVal::Int)
-                    .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow")),
+                RVal::Int(a) => match a.checked_neg() {
+                    Some(v) => Ok(RVal::Int(v)),
+                    None => Err(self.err_runtime("op.arith", span, "i64 overflow")),
+                },
                 RVal::Float(a) => Ok(RVal::Float(-a)),
-                other => Err(Error::runtime(
-                    "op.arith",
-                    span,
-                    format!("cannot negate {}", other.type_name(self.pool)),
-                )),
+                other => {
+                    let tname = other.type_name(self.pool);
+                    Err(self.err_runtime_fmt(
+                        "op.arith",
+                        span,
+                        format_args!("cannot negate {tname}"),
+                    ))
+                }
             };
         }
         if (op == BuiltinId::Add || op == BuiltinId::Mul) && args.len() >= 2 {
@@ -299,22 +307,22 @@ impl Runner<'_, '_> {
             return Ok(acc);
         }
         let [a, b] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime_fmt(
                 "op.arith",
                 span,
-                format!("'{}' takes 2 arguments", op.name()),
+                format_args!("'{}' takes 2 arguments", op.name()),
             ));
         };
         self.arith_bin(op, *a, *b, span)
     }
 
     pub(super) fn arith_bin(
-        &self,
+        &mut self,
         op: BuiltinId,
         a: RVal,
         b: RVal,
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         match (a, b) {
             (RVal::Int(x), RVal::Int(y)) => {
                 let res = match op {
@@ -323,20 +331,22 @@ impl Runner<'_, '_> {
                     BuiltinId::Mul => x.checked_mul(y),
                     BuiltinId::Div => {
                         if y == 0 {
-                            return Err(Error::runtime("op.arith", span, "division by zero"));
+                            return Err(self.err_runtime("op.arith", span, "division by zero"));
                         }
                         x.checked_div(y)
                     }
                     BuiltinId::Rem => {
                         if y == 0 {
-                            return Err(Error::runtime("op.arith", span, "division by zero"));
+                            return Err(self.err_runtime("op.arith", span, "division by zero"));
                         }
                         x.checked_rem(y)
                     }
                     _ => unreachable!(),
                 };
-                res.map(RVal::Int)
-                    .ok_or_else(|| Error::runtime("op.arith", span, "i64 overflow"))
+                match res {
+                    Some(v) => Ok(RVal::Int(v)),
+                    None => Err(self.err_runtime("op.arith", span, "i64 overflow")),
+                }
             }
             (RVal::Float(x), RVal::Float(y)) => match op {
                 BuiltinId::Add => Ok(RVal::Float(x + y)),
@@ -346,16 +356,18 @@ impl Runner<'_, '_> {
                 BuiltinId::Rem => Ok(RVal::Float(x % y)),
                 _ => unreachable!(),
             },
-            _ => Err(Error::runtime(
-                "op.arith",
-                span,
-                format!(
-                    "cannot apply '{}' to {} and {} (no implicit conversion)",
-                    op.name(),
-                    a.type_name(self.pool),
-                    b.type_name(self.pool)
-                ),
-            )),
+            _ => {
+                let ta = a.type_name(self.pool);
+                let tb = b.type_name(self.pool);
+                Err(self.err_runtime_fmt(
+                    "op.arith",
+                    span,
+                    format_args!(
+                        "cannot apply '{}' to {ta} and {tb} (no implicit conversion)",
+                        op.name()
+                    ),
+                ))
+            }
         }
     }
 
@@ -364,23 +376,17 @@ impl Runner<'_, '_> {
         want_eq: bool,
         args: &[RVal],
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         let [a, b] = args else {
-            return Err(Error::runtime(
-                "op.cmp",
-                span,
-                "comparison takes 2 arguments",
-            ));
+            return Err(self.err_runtime("op.cmp", span, "comparison takes 2 arguments"));
         };
-        if a.type_name(self.pool) != b.type_name(self.pool) {
-            return Err(Error::runtime(
+        let ta = a.type_name(self.pool);
+        let tb = b.type_name(self.pool);
+        if ta != tb {
+            return Err(self.err_runtime_fmt(
                 "op.cmp",
                 span,
-                format!(
-                    "cannot compare {} and {}",
-                    a.type_name(self.pool),
-                    b.type_name(self.pool)
-                ),
+                format_args!("cannot compare {ta} and {tb}"),
             ));
         }
         let Some(eq) = self.values_equal(*a, *b) else {
@@ -389,12 +395,17 @@ impl Runner<'_, '_> {
         Ok(RVal::Bool(if want_eq { eq } else { !eq }))
     }
 
-    pub(super) fn ord_cmp(&self, op: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn ord_cmp(
+        &mut self,
+        op: BuiltinId,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let [a, b] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime_fmt(
                 "op.cmp",
                 span,
-                format!("'{}' takes 2 arguments", op.name()),
+                format_args!("'{}' takes 2 arguments", op.name()),
             ));
         };
         let res = match (*a, *b) {
@@ -413,47 +424,54 @@ impl Runner<'_, '_> {
                 _ => unreachable!(),
             },
             _ => {
-                return Err(Error::runtime(
+                let ta = a.type_name(self.pool);
+                let tb = b.type_name(self.pool);
+                return Err(self.err_runtime_fmt(
                     "op.cmp",
                     span,
-                    format!(
-                        "cannot compare {} and {}",
-                        a.type_name(self.pool),
-                        b.type_name(self.pool)
-                    ),
+                    format_args!("cannot compare {ta} and {tb}"),
                 ));
             }
         };
         Ok(RVal::Bool(res))
     }
 
-    pub(super) fn math(&self, b: BuiltinId, args: &[RVal], span: Span) -> Result<RVal, Error> {
+    pub(super) fn math(
+        &mut self,
+        b: BuiltinId,
+        args: &[RVal],
+        span: Span,
+    ) -> Result<RVal, ErrRecorded> {
         let [v] = args else {
-            return Err(Error::runtime(
+            return Err(self.err_runtime_fmt(
                 "fn.math",
                 span,
-                format!("'{}' takes 1 argument", b.name()),
+                format_args!("'{}' takes 1 argument", b.name()),
             ));
         };
         if b == BuiltinId::Abs {
             return match v {
-                RVal::Int(n) => n
-                    .checked_abs()
-                    .map(RVal::Int)
-                    .ok_or_else(|| Error::runtime("fn.math", span, "i64 overflow")),
+                RVal::Int(n) => match n.checked_abs() {
+                    Some(x) => Ok(RVal::Int(x)),
+                    None => Err(self.err_runtime("fn.math", span, "i64 overflow")),
+                },
                 RVal::Float(x) => Ok(RVal::Float(x.abs())),
-                other => Err(Error::runtime(
-                    "fn.math",
-                    span,
-                    format!("'abs' expects number, got {}", other.type_name(self.pool)),
-                )),
+                other => {
+                    let tname = other.type_name(self.pool);
+                    Err(self.err_runtime_fmt(
+                        "fn.math",
+                        span,
+                        format_args!("'abs' expects number, got {tname}"),
+                    ))
+                }
             };
         }
         let RVal::Float(x) = v else {
-            return Err(Error::runtime(
+            let tname = v.type_name(self.pool);
+            return Err(self.err_runtime_fmt(
                 "fn.math",
                 span,
-                format!("'{}' expects f64, got {}", b.name(), v.type_name(self.pool)),
+                format_args!("'{}' expects f64, got {tname}", b.name()),
             ));
         };
         let res = match b {

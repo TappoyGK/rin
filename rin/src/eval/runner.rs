@@ -1,11 +1,30 @@
 //! 評価ごとの状態操作、資源制限、束縛解決と呼び出し。
+use std::fmt::Write;
+
 use super::*;
 use crate::mem::RawVec;
 use crate::pool::ObjSlice;
 
 impl<'a, 'p> Runner<'a, 'p> {
+    #[cold]
+    #[inline(never)]
+    pub(super) fn err_runtime(&mut self, rule: &'static str, span: Span, msg: &str) -> ErrRecorded {
+        self.pool.core.err_str(rule, ErrorKind::Runtime, span, msg)
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn err_runtime_fmt(
+        &mut self,
+        rule: &'static str,
+        span: Span,
+        args: std::fmt::Arguments<'_>,
+    ) -> ErrRecorded {
+        self.pool.core.err_fmt(rule, ErrorKind::Runtime, span, args)
+    }
+
     #[inline(always)]
-    pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
+    pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), ErrRecorded> {
         let remaining = self.steps_left;
         if count as usize > remaining {
             let span = chunk.tick_spans[start as usize + remaining];
@@ -22,30 +41,37 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[cold]
-    pub(super) fn step_limit_err(&self, span: Span) -> Error {
-        step_limit_error(self.limits.steps, span)
+    #[inline(never)]
+    pub(super) fn step_limit_err(&mut self, span: Span) -> ErrRecorded {
+        let limit = self.limits.steps;
+        self.pool.core.err_fmt(
+            "eval.limits",
+            ErrorKind::TooManySteps,
+            span,
+            format_args!("step limit exceeded ({limit})"),
+        )
     }
 
-    // 大きな Error の一時値を呼び出し側の通常フレームへ置かない。
     #[cold]
     #[inline(never)]
-    pub(super) fn step_limit_result<T>(&self, span: Span) -> Result<T, Error> {
-        Err(step_limit_error(self.limits.steps, span))
+    pub(super) fn step_limit_result<T>(&mut self, span: Span) -> Result<T, ErrRecorded> {
+        Err(self.step_limit_err(span))
     }
 
     #[cold]
     #[inline(never)]
-    pub(super) fn work_oom(&self, span: Span) -> Error {
-        Error::new(
+    pub(super) fn work_oom(&mut self, span: Span) -> ErrRecorded {
+        let max = self.pool.core.max_bytes();
+        self.pool.core.err_fmt(
             "eval.limits",
             ErrorKind::TooMuchMemory,
             span,
-            format!("memory limit exceeded ({} bytes)", self.pool.core.max_bytes()),
+            format_args!("memory limit exceeded ({max} bytes)"),
         )
     }
 
     #[inline(always)]
-    pub(super) fn stack_push(&mut self, val: RVal, span: Span) -> Result<(), Error> {
+    pub(super) fn stack_push(&mut self, val: RVal, span: Span) -> Result<(), ErrRecorded> {
         if self
             .stack
             .push_work(&mut self.pool.work, &mut self.pool.core, val)
@@ -58,7 +84,11 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
-    pub(super) fn stack_resize_void(&mut self, new_len: usize, span: Span) -> Result<(), Error> {
+    pub(super) fn stack_resize_void(
+        &mut self,
+        new_len: usize,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
         if self
             .stack
             .resize_work(&mut self.pool.work, &mut self.pool.core, new_len, RVal::Void)
@@ -70,7 +100,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[inline(always)]
-    pub(super) fn stack_reserve(&mut self, additional: usize, span: Span) -> Result<(), Error> {
+    pub(super) fn stack_reserve(&mut self, additional: usize, span: Span) -> Result<(), ErrRecorded> {
         if self
             .stack
             .reserve_work(&mut self.pool.work, &mut self.pool.core, additional)
@@ -81,7 +111,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         Ok(())
     }
 
-    pub(super) fn enter_depth(&mut self, span: Span) -> Result<(), Error> {
+    pub(super) fn enter_depth(&mut self, span: Span) -> Result<(), ErrRecorded> {
         self.depth += 1;
         if self.depth > self.limits.depth {
             return Err(self.depth_limit_err(span));
@@ -90,12 +120,14 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[cold]
-    pub(super) fn depth_limit_err(&self, span: Span) -> Error {
-        Error::new(
+    #[inline(never)]
+    pub(super) fn depth_limit_err(&mut self, span: Span) -> ErrRecorded {
+        let limit = self.limits.depth;
+        self.pool.core.err_fmt(
             "eval.limits",
             ErrorKind::TooDeep,
             span,
-            format!("call depth limit exceeded ({})", self.limits.depth),
+            format_args!("call depth limit exceeded ({limit})"),
         )
     }
 
@@ -109,7 +141,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         span: Span,
         chunk: &Chunk,
         ip: usize,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if let Some(mod_id) = self.active_module {
             if let Some(v) = self.modules.env(mod_id).get(id) {
                 self.pool.retain_val(v);
@@ -137,7 +169,8 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     #[cold]
-    fn unknown_name(&self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> Error {
+    #[inline(never)]
+    fn unknown_name(&mut self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> ErrRecorded {
         let name = self.syms.name(id).unwrap_or("?");
         let eval_names = self
             .active_module
@@ -145,32 +178,50 @@ impl<'a, 'p> Runner<'a, 'p> {
             .then_some(self.eval_bindings)
             .flatten()
             .into_iter()
-            .flat_map(|b| b.raw.iter().map(|(k, _)| *k));
+            .flat_map(|b| {
+                let len = match b.names {
+                    EvalBindingNames::Values(raw) => raw.len(),
+                    EvalBindingNames::Vals(raw) => raw.len(),
+                };
+                (0..len).map(move |i| match b.names {
+                    EvalBindingNames::Values(raw) => raw[i].0,
+                    EvalBindingNames::Vals(raw) => raw[i].0,
+                })
+            });
         let frozen_mod_names = (self.frozen && self.active_module.is_none())
             .then(|| self.modules.loaded_names())
             .into_iter()
             .flatten();
-        Error::runtime(
-            "expr.name",
-            span,
-            suggest(
-                format!("unknown name '{name}'"),
-                name,
-                chunk
-                    .visible_names(ip)
-                    .chain(eval_names)
-                    .chain(global_bound_names(self.syms, self.globals))
-                    .chain(frozen_mod_names)
-                    .chain(
-                        self.active_module
-                            .into_iter()
-                            .flat_map(|id| env_bound_names(self.syms, self.modules.env(id))),
-                    ),
-            ),
-        )
+        let active_mod = self.active_module;
+        let out = self
+            .pool
+            .core
+            .error
+            .begin_msg("expr.name", ErrorKind::Runtime, span);
+        let _ = write!(out, "unknown name '{name}'");
+        write_suggest(
+            out,
+            name,
+            chunk
+                .visible_names(ip)
+                .chain(eval_names)
+                .chain(global_bound_names(self.syms, self.globals))
+                .chain(frozen_mod_names)
+                .chain(
+                    active_mod
+                        .into_iter()
+                        .flat_map(|mid| env_bound_names(self.syms, self.modules.env(mid))),
+                ),
+        );
+        ErrRecorded
     }
 
-    pub(super) fn define_top(&mut self, id: u32, val: RVal, span: Span) -> Result<(), Error> {
+    pub(super) fn define_top(
+        &mut self,
+        id: u32,
+        val: RVal,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
         let res = if let Some(mod_id) = self.active_module {
             self.modules
                 .set_env_slot(self.pool, mod_id, id, val, span)
@@ -209,7 +260,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         captures: &[RVal],
         base: usize,
         span: Span,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if proto.captures.is_empty() {
             let id = self.pool.alloc_closure_owned(proto, &[], span)?;
             return Ok(RVal::Obj(id));
@@ -238,7 +289,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         Ok(RVal::Obj(res?))
     }
 
-    pub(super) fn run_top_chunk(&mut self, chunk: &Chunk) -> Result<RVal, Error> {
+    pub(super) fn run_top_chunk(&mut self, chunk: &Chunk) -> Result<RVal, ErrRecorded> {
         let base = self.stack.len();
         self.stack_resize_void(base + chunk.local_count as usize, Span::default())?;
         let frame = super::vm::RinFrame {
@@ -260,21 +311,27 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     #[cold]
     #[inline(never)]
-    pub(super) fn call_type_error(&self, callee: RVal, span: Span) -> Error {
-        Error::runtime(
+    pub(super) fn call_type_error(&mut self, callee: RVal, span: Span) -> ErrRecorded {
+        let tname = callee.type_name(self.pool);
+        self.err_runtime_fmt(
             "expr.call",
             span,
-            format!("cannot call value of type {}", callee.type_name(self.pool)),
+            format_args!("cannot call value of type {tname}"),
         )
     }
 
     #[cold]
     #[inline(never)]
-    pub(super) fn call_arity_error(&self, expected: u32, actual: usize, span: Span) -> Error {
-        Error::runtime(
+    pub(super) fn call_arity_error(
+        &mut self,
+        expected: u32,
+        actual: usize,
+        span: Span,
+    ) -> ErrRecorded {
+        self.err_runtime_fmt(
             "expr.call",
             span,
-            format!("expected {expected} arguments, got {actual}"),
+            format_args!("expected {expected} arguments, got {actual}"),
         )
     }
 
@@ -283,8 +340,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         callee: RVal,
         args: &[RVal],
         span: Span,
-        origin: CallOrigin<'_>,
-    ) -> Result<RVal, Error> {
+        origin: CallOrigin,
+    ) -> Result<RVal, ErrRecorded> {
         match callee {
             RVal::Obj(id) => {
                 let (proto, captures) = match self.pool.get(id) {
@@ -307,9 +364,12 @@ impl<'a, 'p> Runner<'a, 'p> {
                     self.pool.retain_val(val);
                     let _ = self.stack.push_work(&mut self.pool.work, &mut self.pool.core, val);
                 }
-                let _ = self
-                    .stack
-                    .resize_work(&mut self.pool.work, &mut self.pool.core, base + local_count, RVal::Void);
+                let _ = self.stack.resize_work(
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    base + local_count,
+                    RVal::Void,
+                );
                 let frame = super::vm::RinFrame {
                     entry: FrameSource::Proto(proto),
                     tail_source: None,
@@ -349,15 +409,4 @@ pub(super) fn try_charge_steps(remaining: &mut usize, amount: usize) -> bool {
     }
     *remaining -= amount;
     true
-}
-
-#[cold]
-#[inline(never)]
-fn step_limit_error(limit: usize, span: Span) -> Error {
-    Error::new(
-        "eval.limits",
-        ErrorKind::TooManySteps,
-        span,
-        format!("step limit exceeded ({limit})"),
-    )
 }

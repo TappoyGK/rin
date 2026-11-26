@@ -43,37 +43,33 @@ impl Scope {
         pool: &mut Pool<'_>,
         name: RawStr,
         span: Span,
-    ) -> Result<u32, Error> {
+    ) -> Result<u32, ErrRecorded> {
         let slot = self.next_slot;
-        self.next_slot = self
-            .next_slot
-            .checked_add(1)
-            .ok_or_else(|| Error::parse("compile.capacity", span, "too many local variables"))?;
+        let Some(next_slot) = self.next_slot.checked_add(1) else {
+            return Err(pool.core.err_str(
+                "compile.capacity",
+                ErrorKind::Parse,
+                span,
+                "too many local variables",
+            ));
+        };
+        self.next_slot = next_slot;
         if self.next_slot > self.max_slots {
             self.max_slots = self.next_slot;
         }
-        let oom = || {
-            Error::new(
-                "eval.limits",
-                ErrorKind::TooMuchMemory,
-                span,
-                "memory limit exceeded",
-            )
-        };
         let index = self.locals.len() as u32;
         let previous = if !self.local_names.is_empty() {
             let hash = fnv1a_bytes(name.as_str().as_bytes());
-            let prev = self
-                .local_names
-                .insert_work(
-                    &mut pool.work,
-                    &mut pool.core,
-                    hash,
-                    name,
-                    index,
-                    |a, b| a.as_str() == b.as_str(),
-                )
-                .ok_or_else(oom)?;
+            let Some(prev) = self.local_names.insert_work(
+                &mut pool.work,
+                &mut pool.core,
+                hash,
+                name,
+                index,
+                |a, b| a.as_str() == b.as_str(),
+            ) else {
+                return Err(pool.core.err_oom(span));
+            };
             prev.filter(|&p| p != REMOVED_LOCAL)
         } else {
             self.locals
@@ -83,13 +79,18 @@ impl Scope {
                 .map(|i| i as u32)
         };
         let previous = previous.and_then(|i| NonZeroU32::new(i + 1));
-        self.locals
+        if self
+            .locals
             .push_work(&mut pool.work, &mut pool.core, (name, slot, None, previous))
-            .ok_or_else(oom)?;
+            .is_none()
+        {
+            return Err(pool.core.err_oom(span));
+        }
         if self.local_names.is_empty() && self.locals.len() > INLINE_NAMES {
             for (i, &(n, _, _, _)) in self.locals.as_slice().iter().enumerate() {
                 let hash = fnv1a_bytes(n.as_str().as_bytes());
-                self.local_names
+                if self
+                    .local_names
                     .insert_work(
                         &mut pool.work,
                         &mut pool.core,
@@ -98,7 +99,10 @@ impl Scope {
                         i as u32,
                         |a, b| a.as_str() == b.as_str(),
                     )
-                    .ok_or_else(oom)?;
+                    .is_none()
+                {
+                    return Err(pool.core.err_oom(span));
+                }
             }
         }
         Ok(slot)
@@ -148,7 +152,7 @@ impl Scope {
         name: RawStr,
         cap: Capture,
         span: Span,
-    ) -> Result<u32, Error> {
+    ) -> Result<u32, ErrRecorded> {
         let name_str = name.as_str();
         let found = if !self.capture_names.is_empty() {
             let hash = fnv1a_bytes(name_str.as_bytes());
@@ -163,22 +167,25 @@ impl Scope {
         if let Some(index) = found {
             return Ok(index);
         }
-        let idx = u32::try_from(self.captures.len())
-            .map_err(|_| Error::parse("compile.capacity", span, "too many captured variables"))?;
-        let oom = || {
-            Error::new(
-                "eval.limits",
-                ErrorKind::TooMuchMemory,
+        let Ok(idx) = u32::try_from(self.captures.len()) else {
+            return Err(pool.core.err_str(
+                "compile.capacity",
+                ErrorKind::Parse,
                 span,
-                "memory limit exceeded",
-            )
+                "too many captured variables",
+            ));
         };
-        self.captures
+        if self
+            .captures
             .push_work(&mut pool.work, &mut pool.core, (name, cap))
-            .ok_or_else(oom)?;
+            .is_none()
+        {
+            return Err(pool.core.err_oom(span));
+        }
         if !self.capture_names.is_empty() {
             let hash = fnv1a_bytes(name_str.as_bytes());
-            self.capture_names
+            if self
+                .capture_names
                 .insert_work(
                     &mut pool.work,
                     &mut pool.core,
@@ -187,11 +194,15 @@ impl Scope {
                     idx,
                     |a, b| a.as_str() == b.as_str(),
                 )
-                .ok_or_else(oom)?;
+                .is_none()
+            {
+                return Err(pool.core.err_oom(span));
+            }
         } else if self.captures.len() > INLINE_NAMES {
             for (i, &(n, _)) in self.captures.as_slice().iter().enumerate() {
                 let hash = fnv1a_bytes(n.as_str().as_bytes());
-                self.capture_names
+                if self
+                    .capture_names
                     .insert_work(
                         &mut pool.work,
                         &mut pool.core,
@@ -200,7 +211,10 @@ impl Scope {
                         i as u32,
                         |a, b| a.as_str() == b.as_str(),
                     )
-                    .ok_or_else(oom)?;
+                    .is_none()
+                {
+                    return Err(pool.core.err_oom(span));
+                }
             }
         }
         Ok(idx)
@@ -360,25 +374,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let Some((first_capture_scope, slot)) = owner else {
             return Ok(None);
         };
-        let mut cap_idx = match self.scopes[first_capture_scope].find_or_add_capture(
+        let mut cap_idx = self.scopes[first_capture_scope].find_or_add_capture(
             self.pool,
             name,
             Capture::Local(slot),
             span,
-        ) {
-            Ok(i) => i,
-            Err(e) => return Err(self.fail(e)),
-        };
+        )?;
         for s in (first_capture_scope + 1)..=scope_idx {
-            cap_idx = match self.scopes[s].find_or_add_capture(
+            cap_idx = self.scopes[s].find_or_add_capture(
                 self.pool,
                 name,
                 Capture::Upvalue(cap_idx),
                 span,
-            ) {
-                Ok(i) => i,
-                Err(e) => return Err(self.fail(e)),
-            };
+            )?;
         }
         Ok(Some(cap_idx))
     }

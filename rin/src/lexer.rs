@@ -455,7 +455,7 @@ impl<'a> WorkLexer<'a> {
         &mut self,
         work: &mut crate::mem::WorkArena,
         core: &mut crate::mem::AllocCore<'_>,
-    ) -> Result<WorkToken, Error> {
+    ) -> Result<WorkToken, crate::error::ErrRecorded> {
         self.inner.next_work_token(work, core)
     }
 }
@@ -465,7 +465,7 @@ impl Lexer<'_> {
         &mut self,
         work: &mut crate::mem::WorkArena,
         core: &mut crate::mem::AllocCore<'_>,
-    ) -> Result<WorkToken, Error> {
+    ) -> Result<WorkToken, crate::error::ErrRecorded> {
         let skipped = self.skip_ws_and_comments();
         let attached = !skipped && self.pos > 0;
         let span = self.span();
@@ -516,7 +516,7 @@ impl Lexer<'_> {
                 WorkTokenKind::Colon
             }
             b'"' => WorkTokenKind::Str(self.lex_work_string(span, work, core)?),
-            b'\'' => WorkTokenKind::Char(self.lex_char(span)?),
+            b'\'' => WorkTokenKind::Char(self.lex_work_char(span, core)?),
             b'0'..=b'9' => self.lex_work_number(span, false, work, core)?,
             b'-' if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
                 self.bump();
@@ -524,10 +524,11 @@ impl Lexer<'_> {
             }
             _ if is_ident_start(b) => WorkTokenKind::Ident(self.lex_work_ident(span, work, core)?),
             _ => {
-                return Err(Error::lex(
+                return Err(core.err_fmt(
                     "src.token",
+                    crate::error::ErrorKind::Lex,
                     span,
-                    format!("unexpected character {:?}", b as char),
+                    format_args!("unexpected character {:?}", b as char),
                 ));
             }
         };
@@ -539,12 +540,97 @@ impl Lexer<'_> {
         })
     }
 
+    fn lex_work_escape(
+        &mut self,
+        span: Span,
+        core: &mut crate::mem::AllocCore<'_>,
+    ) -> Result<char, crate::error::ErrRecorded> {
+        let Some(esc) = self.bump() else {
+            return Err(core.err_str(
+                "src.escape",
+                crate::error::ErrorKind::Lex,
+                span,
+                "unterminated escape sequence",
+            ));
+        };
+        match esc {
+            b'n' => Ok('\n'),
+            b'r' => Ok('\r'),
+            b't' => Ok('\t'),
+            b'\\' => Ok('\\'),
+            b'"' => Ok('"'),
+            b'\'' => Ok('\''),
+            b'0' => Ok('\0'),
+            other => Err(core.err_fmt(
+                "src.escape",
+                crate::error::ErrorKind::Lex,
+                span,
+                format_args!("unknown escape sequence '\\{}'", other as char),
+            )),
+        }
+    }
+
+    fn lex_work_char(
+        &mut self,
+        span: Span,
+        core: &mut crate::mem::AllocCore<'_>,
+    ) -> Result<char, crate::error::ErrRecorded> {
+        self.bump(); // 開始の '\''
+        let Some(b) = self.bump() else {
+            return Err(core.err_str(
+                "src.char",
+                crate::error::ErrorKind::Lex,
+                span,
+                "unterminated char literal",
+            ));
+        };
+        let ch = if b == b'\\' {
+            self.lex_work_escape(span, core)?
+        } else if b < 0x80 {
+            b as char
+        } else {
+            let start = self.pos - 1;
+            while let Some(next) = self.peek() {
+                if (next & 0xC0) != 0x80 {
+                    break;
+                }
+                self.bump();
+            }
+            let Ok(s) = std::str::from_utf8(&self.src[start..self.pos]) else {
+                return Err(core.err_str(
+                    "src.encoding",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "invalid UTF-8 in char literal",
+                ));
+            };
+            let Some(c) = s.chars().next() else {
+                return Err(core.err_str(
+                    "src.char",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "empty char literal",
+                ));
+            };
+            c
+        };
+        if self.bump() != Some(b'\'') {
+            return Err(core.err_str(
+                "src.char",
+                crate::error::ErrorKind::Lex,
+                span,
+                "unterminated char literal",
+            ));
+        }
+        Ok(ch)
+    }
+
     fn lex_work_ident(
         &mut self,
         span: Span,
         work: &mut crate::mem::WorkArena,
         core: &mut crate::mem::AllocCore<'_>,
-    ) -> Result<crate::mem::RawStr, Error> {
+    ) -> Result<crate::mem::RawStr, crate::error::ErrRecorded> {
         let start = self.pos;
         while let Some(b) = self.peek() {
             if is_ident_continue(b) {
@@ -555,14 +641,10 @@ impl Lexer<'_> {
         }
         // SAFETY: `is_ident_continue` は ASCII のみなので有効な UTF-8。
         let s = unsafe { std::str::from_utf8_unchecked(&self.src[start..self.pos]) };
-        crate::mem::RawStr::from_work(work, core, s).ok_or_else(|| {
-            Error::new(
-                "eval.limits",
-                crate::error::ErrorKind::TooMuchMemory,
-                span,
-                "memory limit exceeded while lexing identifier",
-            )
-        })
+        match crate::mem::RawStr::from_work(work, core, s) {
+            Some(r) => Ok(r),
+            None => Err(core.err_oom(span)),
+        }
     }
 
     fn lex_work_string(
@@ -570,21 +652,14 @@ impl Lexer<'_> {
         span: Span,
         work: &mut crate::mem::WorkArena,
         core: &mut crate::mem::AllocCore<'_>,
-    ) -> Result<crate::mem::RawStr, Error> {
+    ) -> Result<crate::mem::RawStr, crate::error::ErrRecorded> {
         self.bump(); // 開始の '"'
         let mut buf = crate::mem::RawVec::<u8>::new();
-        let oom = || {
-            Error::new(
-                "eval.limits",
-                crate::error::ErrorKind::TooMuchMemory,
-                span,
-                "memory limit exceeded while lexing string",
-            )
-        };
         loop {
             let Some(b) = self.bump() else {
-                return Err(Error::lex(
+                return Err(core.err_str(
                     "src.string",
+                    crate::error::ErrorKind::Lex,
                     span,
                     "unterminated string literal",
                 ));
@@ -600,14 +675,17 @@ impl Lexer<'_> {
                     return Ok(unsafe { crate::mem::RawStr::from_raw_utf8(ptr, slice.len()) });
                 }
                 b'\\' => {
-                    let ch = self.lex_escape(span)?;
+                    let ch = self.lex_work_escape(span, core)?;
                     let mut enc = [0u8; 4];
                     let bytes = ch.encode_utf8(&mut enc).as_bytes();
-                    buf.extend_from_slice_work(work, core, bytes)
-                        .ok_or_else(oom)?;
+                    if buf.extend_from_slice_work(work, core, bytes).is_none() {
+                        return Err(core.err_oom(span));
+                    }
                 }
                 _ if b < 0x80 => {
-                    buf.push_work(work, core, b).ok_or_else(oom)?;
+                    if buf.push_work(work, core, b).is_none() {
+                        return Err(core.err_oom(span));
+                    }
                 }
                 _ => {
                     let start = self.pos - 1;
@@ -617,11 +695,17 @@ impl Lexer<'_> {
                         }
                         self.bump();
                     }
-                    let s = std::str::from_utf8(&self.src[start..self.pos]).map_err(|_| {
-                        Error::lex("src.encoding", span, "invalid UTF-8 in string literal")
-                    })?;
-                    buf.extend_from_slice_work(work, core, s.as_bytes())
-                        .ok_or_else(oom)?;
+                    let Ok(s) = std::str::from_utf8(&self.src[start..self.pos]) else {
+                        return Err(core.err_str(
+                            "src.encoding",
+                            crate::error::ErrorKind::Lex,
+                            span,
+                            "invalid UTF-8 in string literal",
+                        ));
+                    };
+                    if buf.extend_from_slice_work(work, core, s.as_bytes()).is_none() {
+                        return Err(core.err_oom(span));
+                    }
                 }
             }
         }
@@ -633,7 +717,7 @@ impl Lexer<'_> {
         neg: bool,
         work: &mut crate::mem::WorkArena,
         core: &mut crate::mem::AllocCore<'_>,
-    ) -> Result<WorkTokenKind, Error> {
+    ) -> Result<WorkTokenKind, crate::error::ErrRecorded> {
         let mut stack_buf = [0u8; 128];
         let mut stack_len = 0usize;
         let mut heap_buf = crate::mem::RawVec::<u8>::new();
@@ -646,33 +730,25 @@ impl Lexer<'_> {
                          spilled: &mut bool,
                          work: &mut crate::mem::WorkArena,
                          core: &mut crate::mem::AllocCore<'_>|
-         -> Result<(), Error> {
+         -> Result<(), crate::error::ErrRecorded> {
             if !*spilled {
                 if *stack_len < stack_buf.len() {
                     stack_buf[*stack_len] = b;
                     *stack_len += 1;
                     return Ok(());
                 }
-                heap_buf
+                if heap_buf
                     .extend_from_slice_work(work, core, &stack_buf[..*stack_len])
-                    .ok_or_else(|| {
-                        Error::new(
-                            "eval.limits",
-                            crate::error::ErrorKind::TooMuchMemory,
-                            span,
-                            "memory limit exceeded while lexing number",
-                        )
-                    })?;
+                    .is_none()
+                {
+                    return Err(core.err_oom(span));
+                }
                 *spilled = true;
             }
-            heap_buf.push_work(work, core, b).ok_or_else(|| {
-                Error::new(
-                    "eval.limits",
-                    crate::error::ErrorKind::TooMuchMemory,
-                    span,
-                    "memory limit exceeded while lexing number",
-                )
-            })
+            if heap_buf.push_work(work, core, b).is_none() {
+                return Err(core.err_oom(span));
+            }
+            Ok(())
         };
 
         if !neg && self.peek() == Some(b'0') && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
@@ -702,12 +778,23 @@ impl Lexer<'_> {
                 &stack_buf[..stack_len]
             };
             if bytes.is_empty() {
-                return Err(Error::lex("src.int", span, "invalid hexadecimal literal"));
+                return Err(core.err_str(
+                    "src.int",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "invalid hexadecimal literal",
+                ));
             }
             // SAFETY: ASCII hex digits only.
             let hex = unsafe { std::str::from_utf8_unchecked(bytes) };
-            let n = i64::from_str_radix(hex, 16)
-                .map_err(|_| Error::lex("src.int", span, "integer literal out of i64 range"))?;
+            let Ok(n) = i64::from_str_radix(hex, 16) else {
+                return Err(core.err_str(
+                    "src.int",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "integer literal out of i64 range",
+                ));
+            };
             return Ok(WorkTokenKind::Int(n));
         }
 
@@ -820,7 +907,12 @@ impl Lexer<'_> {
             }
             let after = if spilled { heap_buf.len() } else { stack_len };
             if after == before {
-                return Err(Error::lex("src.float", span, "invalid float exponent"));
+                return Err(core.err_str(
+                    "src.float",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "invalid float exponent",
+                ));
             }
         }
 
@@ -832,14 +924,24 @@ impl Lexer<'_> {
         // SAFETY: ASCII number chars only.
         let s = unsafe { std::str::from_utf8_unchecked(bytes) };
         if is_float {
-            let x: f64 = s
-                .parse()
-                .map_err(|_| Error::lex("src.float", span, "invalid float literal"))?;
+            let Ok(x) = s.parse::<f64>() else {
+                return Err(core.err_str(
+                    "src.float",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "invalid float literal",
+                ));
+            };
             Ok(WorkTokenKind::Float(x))
         } else {
-            let n: i64 = s
-                .parse()
-                .map_err(|_| Error::lex("src.int", span, "integer literal out of i64 range"))?;
+            let Ok(n) = s.parse::<i64>() else {
+                return Err(core.err_str(
+                    "src.int",
+                    crate::error::ErrorKind::Lex,
+                    span,
+                    "integer literal out of i64 range",
+                ));
+            };
             Ok(WorkTokenKind::Int(n))
         }
     }

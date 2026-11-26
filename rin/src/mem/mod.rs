@@ -13,9 +13,11 @@ mod obj_heap;
 mod tests;
 
 use std::alloc::Layout;
+use std::fmt;
 use std::ptr::NonNull;
 
 use crate::alloc::Allocator;
+use crate::error::{ErrRecorded, ErrorKind, ErrorStore, Span};
 
 #[allow(unused_imports)]
 pub(crate) use arena::{PermArena, WorkArena, WorkMark};
@@ -69,7 +71,7 @@ impl Default for MemoryConfig {
     }
 }
 
-/// 3 領域が共有する外部 `Allocator` とバイト数会計。
+/// 3 領域が共有する外部 `Allocator` とバイト数会計、およびゼロヒープエラーストア。
 pub(crate) struct AllocCore<'a> {
     alloc: &'a mut dyn Allocator,
     max_bytes: usize,
@@ -77,6 +79,7 @@ pub(crate) struct AllocCore<'a> {
     obj_bytes: usize,
     work_bytes: usize,
     raw_allocated_bytes: usize,
+    pub(crate) error: ErrorStore,
 }
 
 impl<'a> AllocCore<'a> {
@@ -88,7 +91,41 @@ impl<'a> AllocCore<'a> {
             obj_bytes: 0,
             work_bytes: 0,
             raw_allocated_bytes: 0,
+            error: ErrorStore::new(),
         }
+    }
+
+    #[cold]
+    pub(crate) fn err_str(
+        &mut self,
+        rule: &'static str,
+        kind: ErrorKind,
+        at: Span,
+        msg: &str,
+    ) -> ErrRecorded {
+        self.error.set_str(rule, kind, at, msg)
+    }
+
+    #[cold]
+    pub(crate) fn err_fmt(
+        &mut self,
+        rule: &'static str,
+        kind: ErrorKind,
+        at: Span,
+        args: fmt::Arguments<'_>,
+    ) -> ErrRecorded {
+        self.error.set_fmt(rule, kind, at, args)
+    }
+
+    #[cold]
+    pub(crate) fn err_oom(&mut self, at: Span) -> ErrRecorded {
+        let max = self.max_bytes;
+        self.error.set_fmt(
+            "eval.limits",
+            ErrorKind::TooMuchMemory,
+            at,
+            format_args!("memory limit exceeded ({max} bytes)"),
+        )
     }
 
     #[inline]

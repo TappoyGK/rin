@@ -1,7 +1,7 @@
 use super::*;
 
 impl Parser<'_, '_, '_> {
-    pub(super) fn start_primary(&mut self) -> Result<NextStep, Error> {
+    pub(super) fn start_primary(&mut self) -> Result<NextStep, ErrRecorded> {
         let tok = self.peek();
         let span = tok.span;
         match tok.kind {
@@ -42,15 +42,15 @@ impl Parser<'_, '_, '_> {
             }
             WorkTokenKind::LParen => self.start_paren(),
             WorkTokenKind::Ident(name) => self.start_ident(name, span),
-            other => Err(Error::parse(
+            other => Err(self.parse_err_fmt(
                 "src.syntax",
                 span,
-                format!("unexpected token {other:?}"),
+                format_args!("unexpected token {other:?}"),
             )),
         }
     }
 
-    fn start_ident(&mut self, name: RawStr, span: Span) -> Result<NextStep, Error> {
+    fn start_ident(&mut self, name: RawStr, span: Span) -> Result<NextStep, ErrRecorded> {
         self.advance()?;
         match name.as_str() {
             "true" => return Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Bool(true)), 1)),
@@ -177,10 +177,10 @@ impl Parser<'_, '_, '_> {
         ))
     }
 
-    fn start_paren(&mut self) -> Result<NextStep, Error> {
+    fn start_paren(&mut self) -> Result<NextStep, ErrRecorded> {
         let start = self.expect(WorkTokenKind::LParen, "'('")?;
         if self.peek().kind == WorkTokenKind::RParen {
-            return Err(Error::parse(
+            return Err(self.parse_err(
                 "src.syntax",
                 start,
                 "empty '()' is not a valid expression",
@@ -209,13 +209,13 @@ impl Parser<'_, '_, '_> {
         if let Some(head) = special {
             if !self.test_mode && matches!(head.as_str(), "deftest" | "check" | "check_eq") {
                 return Err(if head.as_str() == "deftest" {
-                    Error::parse(
+                    self.parse_err(
                         "test.deftest",
                         start,
                         "deftest is only allowed in test files",
                     )
                 } else {
-                    Error::parse(
+                    self.parse_err(
                         "test.check",
                         start,
                         "checks are only allowed inside deftest",
@@ -243,7 +243,7 @@ impl Parser<'_, '_, '_> {
                     let mut names = RawVec::new();
                     while self.peek().kind != WorkTokenKind::RParen {
                         if self.at_eof() {
-                            return Err(Error::parse(
+                            return Err(self.parse_err(
                                 "src.syntax",
                                 start,
                                 "unterminated export '('",
@@ -331,9 +331,9 @@ impl Parser<'_, '_, '_> {
         start: Span,
         max_child: usize,
         target: BodyTarget,
-    ) -> Result<NextStep, Error> {
+    ) -> Result<NextStep, ErrRecorded> {
         if self.peek().kind == WorkTokenKind::RParen {
-            return Err(Error::parse("expr.body", start, "body cannot be empty"));
+            return Err(self.parse_err("expr.body", start, "body cannot be empty"));
         }
         let bf = self.alloc_box(
             BodyFrame {
@@ -353,7 +353,7 @@ impl Parser<'_, '_, '_> {
         start: Span,
         body: RawVec<Expr>,
         target: BodyTarget,
-    ) -> Result<Expr, Error> {
+    ) -> Result<Expr, ErrRecorded> {
         let kind = match target {
             BodyTarget::Defn { name, params } => {
                 ExprKind::Defn(self.alloc_box(DefnExpr { name, params, body }, start)?)
@@ -375,7 +375,7 @@ impl Parser<'_, '_, '_> {
         scrutinee: WorkBox<Expr>,
         arms: RawVec<MatchArm>,
         max_child: usize,
-    ) -> Result<NextStep, Error> {
+    ) -> Result<NextStep, ErrRecorded> {
         if self.peek().kind == WorkTokenKind::RParen {
             self.advance()?;
             return Ok(NextStep::HaveExpr(
@@ -384,12 +384,12 @@ impl Parser<'_, '_, '_> {
             ));
         }
         if self.at_eof() {
-            return Err(Error::parse("src.syntax", start, "unterminated match"));
+            return Err(self.parse_err("src.syntax", start, "unterminated match"));
         }
         let arm_start = self.expect(WorkTokenKind::LParen, "match arm '('")?;
         let pattern = self.parse_pattern()?;
         if self.peek().kind == WorkTokenKind::RParen {
-            return Err(Error::parse("expr.body", arm_start, "body cannot be empty"));
+            return Err(self.parse_err("expr.body", arm_start, "body cannot be empty"));
         }
         let mf = self.alloc_box(
             MatchArmFrame {

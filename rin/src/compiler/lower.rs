@@ -46,11 +46,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ExprKind::List(items) => {
                 let items = items.as_slice();
                 let Ok(count) = u32::try_from(items.len()) else {
-                    return Err(self.fail(Error::parse(
+                    return Err(self.fail_parse(
                         "compile.capacity",
                         span,
                         "list literal too large",
-                    )));
+                    ));
                 };
                 if count == 0 {
                     self.emit(Op::EmptyList, span)?;
@@ -78,11 +78,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ExprKind::Tuple(items) => {
                 let items = items.as_slice();
                 let Ok(count) = u32::try_from(items.len()) else {
-                    return Err(self.fail(Error::parse(
+                    return Err(self.fail_parse(
                         "compile.capacity",
                         span,
                         "tuple literal too large",
-                    )));
+                    ));
                 };
                 self.push_step(
                     steps,
@@ -299,17 +299,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let f = f.as_ref();
                 let params = f.params.as_slice();
                 let Ok(arity) = u32::try_from(params.len()) else {
-                    return Err(self.fail(Error::parse(
+                    return Err(self.fail_parse(
                         "compile.capacity",
                         span,
                         "too many parameters",
-                    )));
+                    ));
                 };
                 let mut inner = self.new_scope();
                 for &p in params {
-                    if let Err(e) = inner.alloc_slot(self.pool, p, span) {
-                        return Err(self.fail(e));
-                    }
+                    inner.alloc_slot(self.pool, p, span)?;
                 }
                 self.push_scope(inner, span)?;
                 let step_box = self.alloc_step_box(FinishFnStep { arity, span }, span)?;
@@ -469,11 +467,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return Ok(());
                 }
                 let Ok(argc) = u32::try_from(args.len()) else {
-                    return Err(self.fail(Error::parse(
+                    return Err(self.fail_parse(
                         "compile.capacity",
                         span,
                         "too many arguments",
-                    )));
+                    ));
                 };
                 let call_op = if is_tail {
                     Op::TailCall(argc)

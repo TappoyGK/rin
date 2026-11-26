@@ -22,7 +22,7 @@ use crate::bytecode::{
     SymTable,
 };
 use crate::diagnostic::needs_name_candidates;
-use crate::error::{Error, ErrorKind, Span};
+use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::eval::{EnvSlots, global_slot};
 use crate::mem::{RawMap, RawStr, RawVec, WorkBox, fnv1a_bytes};
 use crate::pool::{CodeRegion, Pool};
@@ -37,7 +37,7 @@ pub(crate) fn compile_program(
     pool: &mut Pool<'_>,
     globals: &EnvSlots,
     frozen: bool,
-) -> Result<Chunk, Error> {
+) -> Result<Chunk, ErrRecorded> {
     compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)
 }
 
@@ -49,7 +49,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     pool: &'a mut Pool<'p>,
     globals: &'a EnvSlots,
     frozen: bool,
-) -> Result<Chunk, Error> {
+) -> Result<Chunk, ErrRecorded> {
     let region = if frozen {
         CodeRegion::Work
     } else {
@@ -60,12 +60,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
         .push_work(&mut pool.work, &mut pool.core, Scope::new(module))
         .is_none()
     {
-        return Err(Error::new(
-            "eval.limits",
-            ErrorKind::TooMuchMemory,
-            Span::default(),
-            "memory limit exceeded",
-        ));
+        return Err(pool.core.err_oom(Span::default()));
     }
     let mut compiler = Compiler {
         scopes,
@@ -76,30 +71,20 @@ pub(crate) fn compile_program_parts<'a, 'p>(
         globals,
         frozen,
         name_table: None,
-        err: None,
     };
-    let res: Result<(), Failed> = (|| {
-        if exprs.is_empty() && body.is_empty() {
-            compiler.emit_raw(Op::Void, Span::default())?;
-        } else {
-            if !exprs.is_empty() {
-                compiler.compile_top_level(exprs)?;
-                if !body.is_empty() {
-                    compiler.emit(Op::Pop, Span::default())?;
-                }
-            }
+    if exprs.is_empty() && body.is_empty() {
+        compiler.emit_raw(Op::Void, Span::default())?;
+    } else {
+        if !exprs.is_empty() {
+            compiler.compile_top_level(exprs)?;
             if !body.is_empty() {
-                compiler.compile_top_level(body)?;
+                compiler.emit(Op::Pop, Span::default())?;
             }
-            compiler.flush_ticks(Span::default())?;
         }
-        Ok(())
-    })();
-    if res.is_err() {
-        return Err(compiler
-            .err
-            .take()
-            .expect("compiler error recorded on Err(())"));
+        if !body.is_empty() {
+            compiler.compile_top_level(body)?;
+        }
+        compiler.flush_ticks(Span::default())?;
     }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
@@ -111,8 +96,7 @@ pub(crate) fn step_size() -> usize {
     std::mem::size_of::<Step<'_>>()
 }
 
-/// コンパイラ内部の失敗マーカー（0 バイト）。エラー本体は `Compiler::err` に保持する。
-struct Failed;
+type Failed = ErrRecorded;
 
 struct Compiler<'a, 'p> {
     scopes: RawVec<Scope>,
@@ -123,26 +107,17 @@ struct Compiler<'a, 'p> {
     globals: &'a EnvSlots,
     frozen: bool,
     name_table: Option<NonNull<NameTable>>,
-    err: Option<Error>,
 }
 
 impl<'a, 'p> Compiler<'a, 'p> {
     #[cold]
-    fn fail(&mut self, err: Error) -> Failed {
-        self.err = Some(err);
-        Failed
+    fn fail_parse(&mut self, rule: &'static str, span: Span, msg: &str) -> Failed {
+        self.pool.core.err_str(rule, ErrorKind::Parse, span, msg)
     }
 
     #[cold]
     fn fail_oom(&mut self, span: Span) -> Failed {
-        let max_bytes = self.pool.core.max_bytes();
-        self.err = Some(Error::new(
-            "eval.limits",
-            ErrorKind::TooMuchMemory,
-            span,
-            format!("memory limit exceeded ({max_bytes} bytes)"),
-        ));
-        Failed
+        self.pool.core.err_oom(span)
     }
 
     fn intern_sym(&mut self, name: &str, span: Span) -> Result<u32, Failed> {
@@ -182,21 +157,26 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     #[cold]
     fn fail_decl(&mut self, form: &str, span: Span) -> Failed {
-        let err = if self.frozen {
-            Error::parse(
+        if self.frozen {
+            self.pool.core.err_fmt(
                 "env.frozen",
+                ErrorKind::Parse,
                 span,
-                format!("'{form}' is not allowed in a frozen environment"),
+                format_args!("'{form}' is not allowed in a frozen environment"),
             )
         } else {
-            let msg = format!("'{form}' is only allowed at top level");
-            match form {
-                "def" => Error::parse("expr.def", span, msg),
-                "defn" => Error::parse("expr.defn", span, msg),
-                _ => Error::parse("expr.module", span, msg),
-            }
-        };
-        self.fail(err)
+            let rule = match form {
+                "def" => "expr.def",
+                "defn" => "expr.defn",
+                _ => "expr.module",
+            };
+            self.pool.core.err_fmt(
+                rule,
+                ErrorKind::Parse,
+                span,
+                format_args!("'{form}' is only allowed at top level"),
+            )
+        }
     }
 
     fn chunk(&mut self) -> &mut Chunk {

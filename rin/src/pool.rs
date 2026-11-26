@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use crate::alloc::{AllocBuf, Allocator};
 use crate::bytecode::{BuiltinId, FnProtoPtr};
-use crate::error::{Error, ErrorKind, Span};
+use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{AllocCore, MemoryConfig, ObjBlock, ObjHeap, PermArena, RawMap, RawStr, RawVec, WorkArena};
 use crate::value::Value;
 
@@ -536,8 +536,19 @@ impl<'a> Pool<'a> {
     }
 
     #[cold]
-    fn oom_error(&self, span: Span, msg: &str) -> Error {
-        Error::new("eval.limits", ErrorKind::TooMuchMemory, span, msg)
+    fn oom_error(&mut self, span: Span, msg: &str) -> ErrRecorded {
+        self.core.err_str("eval.limits", ErrorKind::TooMuchMemory, span, msg)
+    }
+
+    #[cold]
+    fn oom_limit_error(&mut self, span: Span) -> ErrRecorded {
+        let max = self.core.max_bytes();
+        self.core.err_fmt(
+            "eval.limits",
+            ErrorKind::TooMuchMemory,
+            span,
+            format_args!("memory limit exceeded ({max} bytes)"),
+        )
     }
 
     fn slot_ref(&self, id: ObjId) -> &Slot {
@@ -743,13 +754,10 @@ impl<'a> Pool<'a> {
         }
     }
 
-    pub fn alloc_obj(&mut self, obj: Obj, span: Span) -> Result<ObjId, Error> {
+    pub fn alloc_obj(&mut self, obj: Obj, span: Span) -> Result<ObjId, ErrRecorded> {
         if !self.core.charge_obj(SLOT_BYTES) {
             self.release_unallocated(obj);
-            return Err(self.oom_error(
-                span,
-                &format!("memory limit exceeded ({} bytes)", self.core.max_bytes()),
-            ));
+            return Err(self.oom_limit_error(span));
         }
 
         if let Some(free_idx) = self.free_head {
@@ -796,15 +804,12 @@ impl<'a> Pool<'a> {
     }
 
     /// オブジェクト領域上に文字列ペイロードを確保する。
-    pub(crate) fn alloc_obj_str(&mut self, s: &str, span: Span) -> Result<ObjStr, Error> {
+    pub(crate) fn alloc_obj_str(&mut self, s: &str, span: Span) -> Result<ObjStr, ErrRecorded> {
         if s.is_empty() {
             return Ok(ObjStr::empty());
         }
         let Some(block) = self.obj_heap.alloc(&mut self.core, s.len(), 1) else {
-            return Err(self.oom_error(
-                span,
-                &format!("memory limit exceeded ({} bytes)", self.core.max_bytes()),
-            ));
+            return Err(self.oom_limit_error(span));
         };
         // SAFETY: `block.actual_size >= s.len()`。
         unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), block.ptr.as_ptr(), s.len()) };
@@ -820,7 +825,7 @@ impl<'a> Pool<'a> {
         &mut self,
         src: &[T],
         span: Span,
-    ) -> Result<ObjSlice<T>, Error> {
+    ) -> Result<ObjSlice<T>, ErrRecorded> {
         if src.is_empty() || std::mem::size_of::<T>() == 0 {
             return Ok(ObjSlice::empty());
         }
@@ -828,10 +833,7 @@ impl<'a> Pool<'a> {
             return Err(self.oom_error(span, "memory limit exceeded"));
         };
         let Some(block) = self.obj_heap.alloc(&mut self.core, layout.size(), layout.align()) else {
-            return Err(self.oom_error(
-                span,
-                &format!("memory limit exceeded ({} bytes)", self.core.max_bytes()),
-            ));
+            return Err(self.oom_limit_error(span));
         };
         let ptr = block.ptr.cast::<T>();
         // SAFETY: `block.actual_size >= layout.size()` かつ非重複。
@@ -844,13 +846,13 @@ impl<'a> Pool<'a> {
     }
 
     /// `Obj::Str` を確保して `ObjId` を返す。
-    pub fn alloc_str(&mut self, s: &str, span: Span) -> Result<ObjId, Error> {
+    pub fn alloc_str(&mut self, s: &str, span: Span) -> Result<ObjId, ErrRecorded> {
         let os = self.alloc_obj_str(s, span)?;
         self.alloc_obj(Obj::Str(os), span)
     }
 
     /// 所有権を引き受けた `RVal` スライスから `Obj::Array` を確保する。失敗時は全要素を解放する。
-    pub fn alloc_array_owned(&mut self, items: &[RVal], span: Span) -> Result<ObjId, Error> {
+    pub fn alloc_array_owned(&mut self, items: &[RVal], span: Span) -> Result<ObjId, ErrRecorded> {
         match self.alloc_obj_slice(items, span) {
             Ok(slice) => self.alloc_obj(Obj::Array(slice), span),
             Err(e) => {
@@ -863,7 +865,7 @@ impl<'a> Pool<'a> {
     }
 
     /// 所有権を引き受けた `RVal` スライスから `Obj::Tuple` を確保する。失敗時は全要素を解放する。
-    pub fn alloc_tuple_owned(&mut self, items: &[RVal], span: Span) -> Result<ObjId, Error> {
+    pub fn alloc_tuple_owned(&mut self, items: &[RVal], span: Span) -> Result<ObjId, ErrRecorded> {
         match self.alloc_obj_slice(items, span) {
             Ok(slice) => self.alloc_obj(Obj::Tuple(slice), span),
             Err(e) => {
@@ -882,7 +884,7 @@ impl<'a> Pool<'a> {
         variant: &str,
         data: Option<RVal>,
         span: Span,
-    ) -> Result<ObjId, Error> {
+    ) -> Result<ObjId, ErrRecorded> {
         let tn = match self.alloc_obj_str(type_name, span) {
             Ok(s) => s,
             Err(e) => {
@@ -919,7 +921,7 @@ impl<'a> Pool<'a> {
         proto: FnProtoPtr,
         captures: &[RVal],
         span: Span,
-    ) -> Result<ObjId, Error> {
+    ) -> Result<ObjId, ErrRecorded> {
         match self.alloc_obj_slice(captures, span) {
             Ok(slice) => self.alloc_obj(
                 Obj::Closure {
@@ -943,7 +945,7 @@ impl<'a> Pool<'a> {
         name: &str,
         sorted_fields: &[&str],
         span: Span,
-    ) -> Result<StructDescRef, Error> {
+    ) -> Result<StructDescRef, ErrRecorded> {
         if let Some(id) = self.struct_descs.find(name, sorted_fields) {
             return Ok(StructDescRef::Perm(id));
         }
@@ -954,10 +956,7 @@ impl<'a> Pool<'a> {
             {
                 return Ok(StructDescRef::Perm(id));
             }
-            return Err(self.oom_error(
-                span,
-                &format!("memory limit exceeded ({} bytes)", self.core.max_bytes()),
-            ));
+            return Err(self.oom_limit_error(span));
         }
         // 凍結後の新規構造体はオブジェクト領域に参照カウント付き記述子として置く。
         let os_name = self.alloc_obj_str(name, span)?;
@@ -1004,7 +1003,7 @@ impl<'a> Pool<'a> {
         &mut self,
         len: usize,
         span: Span,
-    ) -> Result<ObjSlice<T>, Error> {
+    ) -> Result<ObjSlice<T>, ErrRecorded> {
         if len == 0 || std::mem::size_of::<T>() == 0 {
             return Ok(ObjSlice::empty());
         }
@@ -1012,10 +1011,7 @@ impl<'a> Pool<'a> {
             return Err(self.oom_error(span, "memory limit exceeded"));
         };
         let Some(block) = self.obj_heap.alloc(&mut self.core, layout.size(), layout.align()) else {
-            return Err(self.oom_error(
-                span,
-                &format!("memory limit exceeded ({} bytes)", self.core.max_bytes()),
-            ));
+            return Err(self.oom_limit_error(span));
         };
         // SAFETY: `block.actual_size >= layout.size()`。ゼロ初期化しておく。
         unsafe { std::ptr::write_bytes(block.ptr.as_ptr(), 0, layout.size()) };
@@ -1032,7 +1028,7 @@ impl<'a> Pool<'a> {
         desc: StructDescRef,
         values: &[RVal],
         span: Span,
-    ) -> Result<ObjId, Error> {
+    ) -> Result<ObjId, ErrRecorded> {
         match self.alloc_obj_slice(values, span) {
             Ok(slice) => self.alloc_obj(
                 Obj::Struct {
@@ -1059,7 +1055,7 @@ impl<'a> Pool<'a> {
         name: &str,
         sorted_exports: &[(&str, RVal)],
         span: Span,
-    ) -> Result<ObjId, Error> {
+    ) -> Result<ObjId, ErrRecorded> {
         let mod_name = match self.alloc_obj_str(name, span) {
             Ok(s) => s,
             Err(e) => {
@@ -1169,6 +1165,55 @@ impl<'a> Pool<'a> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    pub fn err_struct_missing_field(
+        &mut self,
+        rule: &'static str,
+        span: Span,
+        desc: StructDescRef,
+        field: &str,
+    ) -> ErrRecorded {
+        use std::fmt::Write;
+        let out = self.core.error.begin_msg(rule, ErrorKind::Runtime, span);
+        match desc {
+            StructDescRef::Perm(id) => {
+                let d = &self.struct_descs.descs.as_slice()[id as usize];
+                let _ = write!(out, "{} has no field '{field}'", d.name.as_str());
+                crate::diagnostic::write_available(
+                    out,
+                    "fields",
+                    d.fields.as_slice().iter().map(RawStr::as_str),
+                );
+            }
+            StructDescRef::Obj(id) => {
+                let idx = id.0 as usize;
+                let chunk_idx = idx / CHUNK_SLOTS;
+                let in_chunk = idx % CHUNK_SLOTS;
+                let len = if chunk_idx + 1 == self.chunks.len() {
+                    self.last_chunk_len
+                } else {
+                    CHUNK_SLOTS
+                };
+                let slot = &self.chunks.as_slice()[chunk_idx].as_slice(len)[in_chunk];
+                let Slot::Live {
+                    obj: Obj::StructDesc { name, fields },
+                    ..
+                } = slot
+                else {
+                    unreachable!();
+                };
+                let _ = write!(out, "{} has no field '{field}'", name.as_str());
+                crate::diagnostic::write_available(
+                    out,
+                    "fields",
+                    fields.as_slice().iter().map(ObjStr::as_str),
+                );
+            }
+        }
+        ErrRecorded
+    }
+
     pub fn find_module_export(exports: ObjSlice<ModuleExport>, name: &str) -> Option<RVal> {
         exports
             .as_slice()
@@ -1177,7 +1222,7 @@ impl<'a> Pool<'a> {
             .map(|idx| exports[idx].val)
     }
 
-    pub fn alloc_cons(&mut self, head: RVal, tail: RVal, span: Span) -> Result<RVal, Error> {
+    pub fn alloc_cons(&mut self, head: RVal, tail: RVal, span: Span) -> Result<RVal, ErrRecorded> {
         let tail_len = self.list_len(tail);
         self.retain_val(head);
         self.retain_val(tail);

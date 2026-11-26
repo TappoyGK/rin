@@ -87,12 +87,12 @@ impl Runner<'_, '_> {
         args: &[RVal],
         span: Span,
         cleanup_stack_to: usize,
-    ) -> Result<(Option<BuiltinFrame>, CallbackStep), Error> {
+    ) -> Result<(Option<BuiltinFrame>, CallbackStep), ErrRecorded> {
         let kind = CallbackKind::from_builtin(b);
         let (f, init_val, list_v) = match kind {
             CallbackKind::Fold => {
                 let [f, init, list_v] = args else {
-                    return Err(Self::callback_arity_error(
+                    return Err(self.callback_arity_error(
                         span,
                         "'fold' takes 3 arguments (fn, init, list)",
                     ));
@@ -101,7 +101,7 @@ impl Runner<'_, '_> {
             }
             CallbackKind::SortBy => {
                 let [f, list_v] = args else {
-                    return Err(Self::callback_arity_error(
+                    return Err(self.callback_arity_error(
                         span,
                         "'sort_by' takes 2 arguments (key_fn, list)",
                     ));
@@ -119,7 +119,7 @@ impl Runner<'_, '_> {
                         CallbackKind::FlatMap => "'flat_map' takes 2 arguments (fn, list)",
                         _ => unreachable!(),
                     };
-                    return Err(Self::callback_arity_error(span, msg));
+                    return Err(self.callback_arity_error(span, msg));
                 };
                 (*f, None, *list_v)
             }
@@ -187,7 +187,7 @@ impl Runner<'_, '_> {
         &mut self,
         frame: &mut BuiltinFrame,
         result: RVal,
-    ) -> Result<CallbackStep, Error> {
+    ) -> Result<CallbackStep, ErrRecorded> {
         let span = frame.span;
         let x = frame.items.as_slice()[frame.idx];
         match frame.kind {
@@ -201,10 +201,10 @@ impl Runner<'_, '_> {
                 other => {
                     let tname = other.type_name(self.pool);
                     self.pool.release_val(result);
-                    return Err(Error::runtime(
+                    return Err(self.err_runtime_fmt(
                         "fn.list",
                         span,
-                        format!("'find' predicate must return bool, got {tname}"),
+                        format_args!("'find' predicate must return bool, got {tname}"),
                     ));
                 }
             },
@@ -214,10 +214,10 @@ impl Runner<'_, '_> {
                 other => {
                     let tname = other.type_name(self.pool);
                     self.pool.release_val(result);
-                    return Err(Error::runtime(
+                    return Err(self.err_runtime_fmt(
                         "fn.list",
                         span,
-                        format!("'any' predicate must return bool, got {tname}"),
+                        format_args!("'any' predicate must return bool, got {tname}"),
                     ));
                 }
             },
@@ -227,10 +227,10 @@ impl Runner<'_, '_> {
                 other => {
                     let tname = other.type_name(self.pool);
                     self.pool.release_val(result);
-                    return Err(Error::runtime(
+                    return Err(self.err_runtime_fmt(
                         "fn.list",
                         span,
-                        format!("'all' predicate must return bool, got {tname}"),
+                        format_args!("'all' predicate must return bool, got {tname}"),
                     ));
                 }
             },
@@ -260,10 +260,10 @@ impl Runner<'_, '_> {
                 other => {
                     let tname = other.type_name(self.pool);
                     self.pool.release_val(result);
-                    return Err(Error::runtime(
+                    return Err(self.err_runtime_fmt(
                         "fn.list",
                         span,
-                        format!("'filter' predicate must return bool, got {tname}"),
+                        format_args!("'filter' predicate must return bool, got {tname}"),
                     ));
                 }
             },
@@ -347,14 +347,10 @@ impl Runner<'_, '_> {
                 if !self.charge_sort(frame.keyed.as_slice().iter().map(|(k, _)| *k), n) {
                     return self.step_limit_result(span);
                 }
-                let mut sort_err = None;
                 // 比較中は `self` の借用を分割するため、ソート用スライスへ安全にアクセスする。
                 let keyed_slice = frame.keyed.as_mut_slice();
                 // 挿入・マージソートは安定かつシステムヒープ不要（小さい配列または作業領域ソート）。
-                self.sort_keyed_work(keyed_slice, span, &mut sort_err)?;
-                if let Some(e) = sort_err {
-                    return Err(e);
-                }
+                self.sort_keyed_work(keyed_slice, span)?;
                 let mark = self.pool.work.mark(&self.pool.core);
                 let mut sorted = RawVec::<RVal>::new();
                 if sorted
@@ -380,8 +376,7 @@ impl Runner<'_, '_> {
         &mut self,
         slice: &mut [(RVal, RVal)],
         span: Span,
-        sort_err: &mut Option<Error>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrRecorded> {
         let n = slice.len();
         if n < 2 {
             return Ok(());
@@ -415,10 +410,8 @@ impl Runner<'_, '_> {
                         let ord = match self.compare_vals(slice[i].0, slice[j].0, span) {
                             Ok(o) => o,
                             Err(e) => {
-                                if sort_err.is_none() {
-                                    *sort_err = Some(e);
-                                }
-                                std::cmp::Ordering::Equal
+                                self.pool.work.rewind(&mut self.pool.core, mark);
+                                return Err(e);
                             }
                         };
                         if ord != std::cmp::Ordering::Greater {
@@ -452,7 +445,7 @@ impl Runner<'_, '_> {
 
     #[cold]
     #[inline(never)]
-    fn callback_arity_error(span: Span, message: &'static str) -> Error {
-        Error::runtime("fn.list", span, message)
+    fn callback_arity_error(&mut self, span: Span, message: &'static str) -> ErrRecorded {
+        self.err_runtime("fn.list", span, message)
     }
 }
