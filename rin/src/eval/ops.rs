@@ -236,6 +236,7 @@ impl Runner<'_, '_> {
         self.try_charge(cost)
     }
 
+    #[inline(always)]
     pub(super) fn compare_vals(
         &mut self,
         a: RVal,
@@ -246,31 +247,29 @@ impl Runner<'_, '_> {
             (RVal::Int(x), RVal::Int(y)) => Ok(x.cmp(&y)),
             (RVal::Float(x), RVal::Float(y)) => match x.partial_cmp(&y) {
                 Some(ord) => Ok(ord),
-                None => Err(self.err_runtime("fn.list", span, "cannot order NaN values")),
+                None => Err(self.compare_nan_err(span)),
             },
             (RVal::Char(x), RVal::Char(y)) => Ok(x.cmp(&y)),
             (RVal::Obj(id1), RVal::Obj(id2)) => match (self.pool.get(id1), self.pool.get(id2)) {
                 (Obj::Str(s1), Obj::Str(s2)) => Ok(s1.as_str().cmp(s2.as_str())),
-                _ => {
-                    let ta = a.type_name(self.pool);
-                    let tb = b.type_name(self.pool);
-                    Err(self.err_runtime_fmt(
-                        "fn.list",
-                        span,
-                        format_args!("cannot order {ta} and {tb}"),
-                    ))
-                }
+                _ => Err(self.compare_type_err(a, b, span)),
             },
-            _ => {
-                let ta = a.type_name(self.pool);
-                let tb = b.type_name(self.pool);
-                Err(self.err_runtime_fmt(
-                    "fn.list",
-                    span,
-                    format_args!("cannot order {ta} and {tb}"),
-                ))
-            }
+            _ => Err(self.compare_type_err(a, b, span)),
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn compare_nan_err(&mut self, span: Span) -> ErrRecorded {
+        self.err_runtime("fn.list", span, "cannot order NaN values")
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn compare_type_err(&mut self, a: RVal, b: RVal, span: Span) -> ErrRecorded {
+        let ta = a.type_name(self.pool);
+        let tb = b.type_name(self.pool);
+        self.err_runtime_fmt("fn.list", span, format_args!("cannot order {ta} and {tb}"))
     }
 
     pub(super) fn arith(

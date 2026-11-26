@@ -379,55 +379,76 @@ impl<'a> EnvState<'a> {
         frozen: bool,
     ) -> Result<Value, Error> {
         let mark = self.pool.work.mark(&self.pool.core);
-        let mut r_args = RawVec::new();
-        if !args.is_empty()
-            && r_args
-                .reserve_work(&mut self.pool.work, &mut self.pool.core, args.len())
-                .is_none()
-        {
-            self.pool.work.rewind(&mut self.pool.core, mark);
-            return Err(Error::new(
-                "eval.limits",
-                ErrorKind::TooMuchMemory,
-                Span::default(),
-                "memory limit exceeded",
-            ));
-        }
-        for arg in args {
-            match self.pool.import(arg, Span::default()) {
-                Ok(rv) => {
-                    if r_args
-                        .push_work(&mut self.pool.work, &mut self.pool.core, rv)
-                        .is_none()
-                    {
-                        self.pool.release_val(rv);
-                        for &v in r_args.as_slice() {
+        let mut inline_args = [RVal::Void; 4];
+        let mut overflow_args = RawVec::new();
+        let args_len = args.len();
+        if args_len <= inline_args.len() {
+            for (idx, arg) in args.iter().enumerate() {
+                match self.pool.import(arg, Span::default()) {
+                    Ok(rv) => inline_args[idx] = rv,
+                    Err(_) => {
+                        for &v in &inline_args[..idx] {
                             self.pool.release_val(v);
                         }
                         self.pool.work.rewind(&mut self.pool.core, mark);
-                        return Err(Error::new(
-                            "eval.limits",
-                            ErrorKind::TooMuchMemory,
-                            Span::default(),
-                            "memory limit exceeded",
-                        ));
+                        return Err(self.pool.core.error.to_owned_error());
                     }
                 }
-                Err(_) => {
-                    for &v in r_args.as_slice() {
-                        self.pool.release_val(v);
+            }
+        } else {
+            if overflow_args
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, args_len)
+                .is_none()
+            {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Err(Error::new(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    Span::default(),
+                    "memory limit exceeded",
+                ));
+            }
+            for arg in args {
+                match self.pool.import(arg, Span::default()) {
+                    Ok(rv) => {
+                        if overflow_args
+                            .push_work(&mut self.pool.work, &mut self.pool.core, rv)
+                            .is_none()
+                        {
+                            self.pool.release_val(rv);
+                            for &v in overflow_args.as_slice() {
+                                self.pool.release_val(v);
+                            }
+                            self.pool.work.rewind(&mut self.pool.core, mark);
+                            return Err(Error::new(
+                                "eval.limits",
+                                ErrorKind::TooMuchMemory,
+                                Span::default(),
+                                "memory limit exceeded",
+                            ));
+                        }
                     }
-                    self.pool.work.rewind(&mut self.pool.core, mark);
-                    return Err(self.pool.core.error.to_owned_error());
+                    Err(_) => {
+                        for &v in overflow_args.as_slice() {
+                            self.pool.release_val(v);
+                        }
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        return Err(self.pool.core.error.to_owned_error());
+                    }
                 }
             }
         }
+        let r_args: &[RVal] = if args_len <= inline_args.len() {
+            &inline_args[..args_len]
+        } else {
+            overflow_args.as_slice()
+        };
         self.pool.retain_val(callee);
         let res = {
             let mut runner = self.runner(None, frozen);
-            let res = runner.apply(callee, r_args.as_slice(), Span::default(), CallOrigin::Host);
+            let res = runner.apply(callee, r_args, Span::default(), CallOrigin::Host);
             runner.pool.release_val(callee);
-            for &v in r_args.as_slice() {
+            for &v in r_args {
                 runner.pool.release_val(v);
             }
             res

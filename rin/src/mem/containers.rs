@@ -150,15 +150,15 @@ impl<T> RawVec<T> {
     where
         T: Copy,
     {
-        debug_assert!(index < self.len as usize);
-        // SAFETY: 呼び出し側が `index < self.len` を保証する。
+        assert!(index < self.len as usize);
+        // SAFETY: 直上で `index < self.len` を検査済み。
         unsafe { *self.ptr.as_ptr().add(index) }
     }
 
     #[inline(always)]
     pub fn set_at(&mut self, index: usize, value: T) {
-        debug_assert!(index < self.len as usize);
-        // SAFETY: 呼び出し側が `index < self.len` を保証する。
+        assert!(index < self.len as usize);
+        // SAFETY: 直上で `index < self.len` を検査済み。
         unsafe {
             *self.ptr.as_ptr().add(index) = value;
         }
@@ -166,8 +166,8 @@ impl<T> RawVec<T> {
 
     #[inline(always)]
     pub fn replace_at(&mut self, index: usize, value: T) -> T {
-        debug_assert!(index < self.len as usize);
-        // SAFETY: 呼び出し側が `index < self.len` を保証する。
+        assert!(index < self.len as usize);
+        // SAFETY: 直上で `index < self.len` を検査済み。
         unsafe { std::ptr::replace(self.ptr.as_ptr().add(index), value) }
     }
 

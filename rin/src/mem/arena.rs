@@ -319,13 +319,41 @@ impl WorkArena {
     }
 
     /// 作業領域から `layout` の生領域を確保する。
+    #[inline(always)]
     pub fn alloc_raw(&mut self, core: &mut AllocCore<'_>, layout: Layout) -> Option<NonNull<u8>> {
-        if layout.size() == 0 {
+        let size = layout.size();
+        if size == 0 {
             return Some(NonNull::dangling());
         }
         let align = layout.align();
-        let size = layout.size();
+        if let Some(mut chunk_ptr) = self.cur {
+            // SAFETY: `chunk_ptr` はこのアリーナが所有する有効なチャンク。
+            let chunk = unsafe { chunk_ptr.as_mut() };
+            if let Some(aligned) = align_up(chunk.used, align)
+                && let Some(end) = aligned.checked_add(size)
+                && end <= chunk.data_cap
+            {
+                let delta = end - chunk.used;
+                if !core.charge_work(delta) {
+                    return None;
+                }
+                chunk.used = end;
+                // SAFETY: `aligned < end <= chunk.data_cap`。
+                let ptr = unsafe { chunk_data_ptr(chunk_ptr).add(aligned) };
+                return NonNull::new(ptr);
+            }
+        }
+        self.alloc_raw_slow(core, size, align)
+    }
 
+    #[cold]
+    #[inline(never)]
+    fn alloc_raw_slow(
+        &mut self,
+        core: &mut AllocCore<'_>,
+        size: usize,
+        align: usize,
+    ) -> Option<NonNull<u8>> {
         // 現在のチャンクおよび既存の未使用後続チャンクから探す。
         let mut cursor = self.cur;
         let mut last = self.cur;

@@ -412,7 +412,7 @@ impl Runner<'_, '_> {
         slice: &mut [(RVal, RVal)],
         span: Span,
     ) -> Result<(), ErrRecorded> {
-        const MIN_RUN: usize = 32;
+        const MIN_RUN: usize = 16;
         let n = slice.len();
         if n < 2 {
             return Ok(());
@@ -468,14 +468,16 @@ impl Runner<'_, '_> {
                     }
                 }
             }
-            // 短いランは挿入ソートで MIN_RUN まで伸ばしてマージ段数を削減する
+            // 短いランは二分探索挿入ソートで MIN_RUN まで伸ばして比較回数とマージ段数を抑える
             let target = (start + MIN_RUN).min(n);
             if end < target {
                 for cur in end..target {
                     let item = slice[cur];
-                    let mut j = cur;
-                    while j > start {
-                        let ord = match self.compare_vals(slice[j - 1].0, item.0, span) {
+                    let mut lo = start;
+                    let mut hi = cur;
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        let ord = match self.compare_vals(slice[mid].0, item.0, span) {
                             Ok(o) => o,
                             Err(e) => {
                                 self.pool.work.rewind(&mut self.pool.core, mark);
@@ -483,13 +485,15 @@ impl Runner<'_, '_> {
                             }
                         };
                         if ord == std::cmp::Ordering::Greater {
-                            slice[j] = slice[j - 1];
-                            j -= 1;
+                            hi = mid;
                         } else {
-                            break;
+                            lo = mid + 1;
                         }
                     }
-                    slice[j] = item;
+                    if lo < cur {
+                        slice.copy_within(lo..cur, lo + 1);
+                        slice[lo] = item;
+                    }
                 }
                 end = target;
             }

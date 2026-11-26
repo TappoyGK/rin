@@ -562,8 +562,13 @@ impl<'a> Pool<'a> {
         let idx = id.0 as usize;
         let chunk_idx = idx >> 8;
         let in_chunk = idx & (CHUNK_SLOTS - 1);
-        debug_assert!(chunk_idx < self.chunks.len());
-        // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
+        let chunks_len = self.chunks.len();
+        assert!(
+            chunk_idx < chunks_len
+                && (chunk_idx + 1 < chunks_len || in_chunk < self.last_chunk_len),
+            "invalid ObjId"
+        );
+        // SAFETY: 直上で `chunk_idx < chunks_len` かつ初期化済み範囲内を検査済み。
         unsafe { &*self.chunks.chunk_slot_ptr(chunk_idx).add(in_chunk) }
     }
 
@@ -572,8 +577,13 @@ impl<'a> Pool<'a> {
         let idx = id.0 as usize;
         let chunk_idx = idx >> 8;
         let in_chunk = idx & (CHUNK_SLOTS - 1);
-        debug_assert!(chunk_idx < self.chunks.len());
-        // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
+        let chunks_len = self.chunks.len();
+        assert!(
+            chunk_idx < chunks_len
+                && (chunk_idx + 1 < chunks_len || in_chunk < self.last_chunk_len),
+            "invalid ObjId"
+        );
+        // SAFETY: 直上で `chunk_idx < chunks_len` かつ初期化済み範囲内を検査済み。
         unsafe { &mut *self.chunks.chunk_slot_ptr(chunk_idx).add(in_chunk) }
     }
 
