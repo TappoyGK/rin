@@ -114,7 +114,7 @@ pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Re
 - **`Val` の所有権規約**：
   - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_str` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
   - コンテナ構築（`val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）および `bind_val` / `call_ref` / `call_in_ref` / `eval_with_vals` は渡された `Val` を内部で retain して共有参照する。**所有権は移動しない**ため、呼び出し元は自分が生成した `Val` を使い終わったタイミングで必ず同じマシンの `release_val` へ返却する。
-  - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり、パニックするか別の値を読む（境界検査によりメモリの範囲外には触れない）。
+  - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり、パニックするか別の値を読む。特に、解放済みの `Val` をスロット再利用後にもう一度 `release_val` へ渡すと、ほかのハンドルや束縛が保持している別の値を解放し、それらが再利用後の別値を指すようになることがある（どの場合も境界検査によりメモリの範囲外には触れない）。
 - **`ValueRef<'_>` と補助借用ビュー**：
   - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
   - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
@@ -409,6 +409,10 @@ if (!result.ok) {
 
 - **失敗時の挙動**：`rin == NULL`、必須引数の `NULL`、不正 UTF-8 文字列、メモリ上限（`memory_bytes`）超過、またはアロケータの確保失敗時は `NULL`（`rin_struct_set` は `false`）を返し、`rin != NULL` であれば `rin_last_error(rin)` にエラー（`RIN_ERR_HOST` または `RIN_ERR_TOO_MUCH_MEMORY`）を記録する。
 - **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_call` / `rin_eval_with` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` へ渡してはならない。
+- **ハンドルの取り違えと解放済みハンドル**：
+  - 同じハンドルを 2 回 `rin_drop` した場合は内部の生存フラグ（`alive`）により 2 回目は無視される（ただしスロットが新しいハンドルへ再利用された後に古いポインタを `rin_drop` すると、新しいハンドルを解放してしまう）。
+  - `rin_drop` 済みのハンドルを読み取り・入力に渡した場合は、`Void` またはスロット再利用後の別の値を読むことがある。
+  - 別の `Rin` で生成した `RinValue *` を渡した場合、別の値を読むか、内部の `ObjId` 境界検査でパニックする（Rust の `extern "C"` 境界を跨ぐパニックはプロセスの中断（abort）となる。メモリの範囲外には触れない）。
 
 | 関数 | 説明 |
 |---|---|
@@ -437,12 +441,12 @@ if (!result.ok) {
 | `bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out)` | `i64` なら `*out` に書き込み `true` を返す |
 | `bool rin_as_float(const Rin *rin, const RinValue *val, double *out)` | `f64` なら `*out` に書き込み `true` を返す |
 | `bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out)` | `bool` なら `*out` に書き込み `true` を返す |
-| `const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len)` | `Str` の UTF-8 バイト列を借用して返す（`val` が有効な間のみ有効、非文字列は `NULL`） |
+| `const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len)` | `Str` の UTF-8 バイト列を借用して返す（**NUL 終端ではない**。長さは `*out_len` へ書き込み、空文字列は非 NULL ポインタと長さ 0 を返す。`val` が有効な間のみ有効。非文字列または `out_len == NULL` は `NULL` を返し、失敗時は `*out_len` を書き換えない） |
 | `size_t rin_len(const Rin *rin, const RinValue *val)` | `List`、`Array`、または `Tuple` の要素数を返す |
 | `RinValue *rin_car(Rin *rin, const RinValue *val)` | `List` の先頭要素を所有 `RinValue *` で返す（空・非リストは `NULL`、`rin_drop` で解放） |
 | `RinValue *rin_cdr(Rin *rin, const RinValue *val)` | `List` の残余リストを所有 `RinValue *` で返す（O(1)、非リストは `NULL`、`rin_drop` で解放） |
 | `RinValue *rin_field(Rin *rin, const RinValue *val, const char *field)` | `Struct` のフィールド `field` を所有 `RinValue *` で返す（欠落・非構造体は `NULL`、`rin_drop` で解放） |
-| `const uint8_t *rin_variant_name(const Rin *rin, const RinValue *val, size_t *out_len)` | `Variant` のバリアント名 UTF-8 バイト列を借用して返す（`val` が有効な間のみ有効） |
+| `const uint8_t *rin_variant_name(const Rin *rin, const RinValue *val, size_t *out_len)` | `Variant` のバリアント名 UTF-8 バイト列を借用して返す（**NUL 終端ではない**。長さは `*out_len` へ書き込み、空文字列は非 NULL ポインタと長さ 0 を返す。`val` が有効な間のみ有効。非 `Variant` または `out_len == NULL` は `NULL` を返し、失敗時は `*out_len` を書き換えない） |
 | `RinValue *rin_unwrap(Rin *rin, const RinValue *val)` | `Some` / `Ok` / `Err` / `Variant` ペイロードの中身を所有 `RinValue *` で返す（`rin_drop` で解放） |
 | `RinValue *rin_tuple_get(Rin *rin, const RinValue *val, size_t index)` | `Tuple` / `Array` の `index` 番目要素を所有 `RinValue *` で返す（`rin_drop` で解放） |
 | `size_t rin_copy_i64s(const Rin *rin, const RinValue *val, int64_t *out_ptr, size_t out_cap)` | `i64` の `array` を `out_ptr` へコピーする（失敗時は `SIZE_MAX`） |

@@ -141,7 +141,11 @@ const RinError *rin_last_error(const Rin *rin);
 /* 値ハンドル構築・解放（すべて Rin のアロケータ上で確保される。使い終わったら rin_drop で返却）。
  * 確保失敗・NULL 引数・不正 UTF-8 等のエラー時は NULL（rin_struct_set は false）を返し、
  * rin_last_error を更新する。
- * 注意: RinEvalResult.value で返された借用ポインタを rin_drop に渡してはならない。
+ * 注意:
+ * - RinEvalResult.value で返された借用ポインタを rin_drop に渡してはならない。
+ * - 同じハンドルの連続二重 rin_drop は無視されるが、再利用後の古いポインタを rin_drop すると
+ *   再利用先のハンドルを解放してしまう。解放済みハンドルの使用は Void や別値を読むことがある。
+ * - 別の Rin で生成したハンドルを渡すと、別値を読むか境界検査の panic でプロセスが中断（abort）する。
  */
 RinValue *rin_int(Rin *rin, int64_t n);
 RinValue *rin_float(Rin *rin, double x);
@@ -160,6 +164,8 @@ void rin_drop(Rin *rin, RinValue *val);
 
 /* 値読み取り（rin_car / rin_cdr / rin_field / rin_unwrap / rin_tuple_get の返り値は rin_drop で返却）。
  * 上記 5 関数でハンドル領域の確保に失敗した場合は NULL を返し、rin_last_error を更新する。
+ * rin_as_str / rin_variant_name が返すポインタは NUL 終端ではなく、長さは *out_len で受け取る。
+ * 空文字列は非 NULL ポインタと長さ 0 を返す。out_len == NULL や型不一致時は NULL を返し *out_len を書き換えない。
  */
 RinTag rin_tag(const Rin *rin, const RinValue *val);
 bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out);
