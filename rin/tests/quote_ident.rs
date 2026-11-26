@@ -22,10 +22,31 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(eval("'\\u{20}'").unwrap(), Value::Char(' '));
     assert_eq!(eval("'\\u{3042}'").unwrap(), Value::Char('あ'));
 
-    // 文字リテラルの直後に区切りがない場合は字句エラー
-    let err = eval("'a'b").unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Lex);
-    assert_eq!(err.rule(), "src.char");
+    // `'X'` の直後に区切り以外の文字が続く場合は先頭の `'` を quote として読み直す
+    assert_eq!(
+        eval("'('a 'b)").unwrap(),
+        eval("[['quote 'a] ['quote 'b]]").unwrap()
+    );
+    assert_eq!(
+        eval("(def x 1) ``(a ',',x)").unwrap(),
+        eval("['quasiquote ['a ['quote ['unquote ['quote 1]]]]]").unwrap()
+    );
+    let err = eval("(def x 1) `(a ',',x)").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "src.syntax");
+
+    // 文字リテラルの直後に区切りがない場合、先頭の `'` を quote として読み直した上で識別子直後の `'` が字句エラーになる
+    for bad in [
+        "'a'b",
+        "(list 'a'(list))",
+        "(list 'a'[1])",
+        "(list 'a'\"s\")",
+        "(list 'a''b')",
+    ] {
+        let err = eval(bad).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Lex, "{bad}: {err}");
+        assert_eq!(err.rule(), "src.ident", "{bad}: {err}");
+    }
 
     // 識別子直後の `'` は字句エラー
     for bad_ident in ["(def y' 1)", "foo'bar", "x'"] {
@@ -156,6 +177,11 @@ fn quasiquote_unquote_splicing_and_nesting() {
         eval("['quasiquote ['a ['unquote ['+ 1 2]] ['unquote 3]]]").unwrap()
     );
 
+    // quasiquote の中の quote は深さを変えない
+    assert_eq!(
+        eval("(let (x 1) `(a '(b ,x)))").unwrap(),
+        eval("['a ['quote ['b 1]]]").unwrap()
+    );
     // quote の中の quasiquote 内の unquote / unquote_splicing は評価せずデータとして残す
     assert_eq!(
         eval("'(a `(b ,x))").unwrap(),

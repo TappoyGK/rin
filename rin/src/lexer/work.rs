@@ -299,17 +299,9 @@ impl Lexer<'_> {
         if let Some(after) = self.peek()
             && !is_char_delimiter(after)
         {
-            if b == b'`' {
-                (self.pos, self.line, self.col) = saved;
-                self.bump();
-                return Ok(WorkTokenKind::Quote);
-            }
-            return Err(core.err_str(
-                "src.char",
-                ErrorKind::Lex,
-                span,
-                "unexpected character immediately after char literal",
-            ));
+            (self.pos, self.line, self.col) = saved;
+            self.bump();
+            return Ok(WorkTokenKind::Quote);
         }
         Ok(WorkTokenKind::Char(ch))
     }
