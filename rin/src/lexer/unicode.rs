@@ -34,10 +34,16 @@ pub(crate) fn is_char_forbidden_raw(ch: char) -> bool {
     in_ranges(ch as u32, NON_ASCII_Z_CC_CF)
 }
 
-/// 表示時に `\u{H}` でエスケープする非 ASCII 文字（一般カテゴリ Z・Cc・Cf・M）か返す。
+/// `char` 表示時に `\u{H}` でエスケープする非 ASCII 文字（一般カテゴリ Z・Cc・Cf・M）か返す。
 #[inline]
-pub(crate) fn is_display_escaped_non_ascii(ch: char) -> bool {
+pub(crate) fn is_char_display_escaped_non_ascii(ch: char) -> bool {
     in_ranges(ch as u32, NON_ASCII_Z_CC_CF_M)
+}
+
+/// `string` 表示時に `\u{H}` でエスケープする非 ASCII 文字（Cc・Zl・Zp、および ZWNJ/ZWJ/タグ文字を除く Cf）か返す。
+#[inline]
+pub(crate) fn is_str_display_escaped_non_ascii(ch: char) -> bool {
+    in_ranges(ch as u32, NON_ASCII_STR_DISPLAY_ESC)
 }
 
 const NON_ASCII_L_M_ND: &[(u32, u32)] = &[
@@ -1201,4 +1207,29 @@ const NON_ASCII_Z_CC_CF_M: &[(u32, u32)] = &[
     (0xE0001, 0xE0001),
     (0xE0020, 0xE007F),
     (0xE0100, 0xE01EF),
+];
+
+const NON_ASCII_STR_DISPLAY_ESC: &[(u32, u32)] = &[
+    (0x0080, 0x009F),
+    (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200B),
+    (0x200E, 0x200F),
+    (0x2028, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
 ];

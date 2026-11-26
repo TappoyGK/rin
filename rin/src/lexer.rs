@@ -597,7 +597,7 @@ pub(crate) fn write_rin_char(f: &mut fmt::Formatter<'_>, c: char) -> fmt::Result
         '\r' => f.write_str("\\return"),
         ' ' => f.write_str("\\space"),
         c if c.is_ascii_control()
-            || (!c.is_ascii() && unicode::is_display_escaped_non_ascii(c)) =>
+            || (!c.is_ascii() && unicode::is_char_display_escaped_non_ascii(c)) =>
         {
             write!(f, "\\u{{{:x}}}", c as u32)
         }
@@ -638,7 +638,7 @@ pub(crate) fn write_rin_str(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result 
         } else {
             let ch = s[i..].chars().next().unwrap();
             let len = ch.len_utf8();
-            if unicode::is_display_escaped_non_ascii(ch) {
+            if unicode::is_str_display_escaped_non_ascii(ch) {
                 if start < i {
                     f.write_str(&s[start..i])?;
                 }
