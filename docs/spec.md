@@ -75,7 +75,7 @@ true false none some ok err inf nan
 
 **[src.escape]** 文字列・文字リテラルで、上記以外のエスケープ、または `\` の直後で入力が終わる場合は字句エラーである。共通のエスケープ処理の診断にはこの規則名を付ける。
 
-**[src.char]** 文字リテラルは `'` の直後に 1 Unicode スカラー値または 1 エスケープ（`\n`、`\r`、`\t`、`\\`、`\"`、`\'`、`\0`、`\u{H}`（`H` は 1〜6 桁の 16 進数））が続き、直後に `'` で閉じる形で表す。文字リテラルの直後には空白・改行・`;`・区切り文字（`(` `)` `[` `]` `{` `}` `"` `'` `` ` `` `,`）または入力末尾が必要であり、`'a'b` のように識別子等が直結する場合は字句エラーである。上記に一致しない `'` は `quote` トークンとして扱う。また `` ` `` は `quasiquote`、`,` は `unquote`、`,@` は `unquote_splicing` トークンとして扱う。
+**[src.char]** 文字リテラルは `'` の直後に 1 Unicode スカラー値または 1 エスケープ（`\n`、`\r`、`\t`、`\\`、`\"`、`\'`、`\0`、`\u{H}`（`H` は 1〜6 桁の 16 進数））が続き、直後に `'` で閉じる形で表す。文字リテラルの直後には空白・改行・`;`・閉じ括弧（`)` `]` `}`）または入力末尾が必要であり、`'a'b` のように識別子や開き括弧等が直結する場合は字句エラーである（ただし `` '`' `` の直後にこれら以外が続く場合は前置記号列 `` ' `` `` ` `` `` ' `` … として `quote` から読む）。上記に一致しない `'` は `quote` トークンとして扱う。また `` ` `` は `quasiquote`、`,` は `unquote`、`,@` は `unquote_splicing` トークンとして扱う。
 
 **[src.nesting-limit]** 構文木の深さ（リテラル・識別子・空リストなどの葉を 1 段と数えたノードの深さ。括弧・特殊形式・`{}`・`some(...)`・後置アクセス `.` / `[...]` ごとに 1 段増える。`let` の束縛リストや `match` の枝の括弧自体は段数に数えない）は最大 `256` 段までとし、上限を超える場合は構文解析中に検査して構文エラーを返す。上限を超えた時点でそれより内側や後ろの解析を止め、エラーには次の位置を示す。
 
@@ -108,7 +108,7 @@ true false none some ok err inf nan
 
 - `void`：`void`
 - `i64`：10 進表記（例：`42`、`-5`）
-- `f64`：浮動小数点表記（現在の表示では整数値に小数点を付けず、`NaN`・`inf`・`-inf`・`-0` のように出力するため再入力対象外）
+- `f64`：浮動小数点表記（整数値に小数点を付けず、`NaN`・`-0` 等を含むため再入力で元の `f64` 値に戻らない場合がある）
 - `bool`：`true` または `false`
 - `char`：`'a'`・`'\n'` 等の文字リテラル表記
 - `string`：`"hello"` 等の文字列リテラル表記
@@ -192,7 +192,7 @@ true false none some ok err inf nan
 
 **[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードは `ident` 値、数値（`inf` / `nan` を含む）・`true` / `false` / `none`・文字・文字列はその値、`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。
 
-**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、入れ子の深さを数えて対応する `unquote` / `unquote_splicing` を評価する。深さは `quasiquote` に入るたびに 1 増え、`unquote` / `unquote_splicing` に入るたびに 1 減る。評価対象の `quasiquote` の中で深さが 0 になった `,expr`（`unquote`）を通常の式として評価して埋め込み、リスト要素位置で深さが 0 になった `,@expr`（`unquote_splicing`）をリストとして評価して展開する。深さが 1 以上のまま残るものは評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。`quote` の中に書かれた `quasiquote` でも同様に深さを数え、その内部の `unquote` / `unquote_splicing` は評価せずデータとして構築する。いずれの `quasiquote` の中にもない（深さ 0 の）位置での `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外で評価される `,@` は構文エラーである。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
+**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、深さに応じて `unquote` / `unquote_splicing` を評価する。深さは、その位置を囲む `quasiquote` の数から、囲む `unquote` / `unquote_splicing` の数を引いた値とする（どの `quasiquote` にも囲まれていない位置は深さ 0）。評価対象の `quasiquote` の中で、深さ 1 の位置に書いた `,expr` / `(unquote expr)` は `expr` を通常の式として評価して埋め込み、リスト要素位置の深さ 1 に書いた `,@expr` / `(unquote_splicing expr)` は `expr` をリストとして評価して展開する（評価される `expr` の中は深さ 0 になる）。深さ 2 以上の位置、または `quote` の中に書かれた `quasiquote` 内の深さ 1 以上の位置に書いた `unquote` / `unquote_splicing` は評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。深さ 0 の位置（どの `quasiquote` にも囲まれていない位置、`quote` 直下、および評価される `,expr` / `,@expr` の中を含む）に書いた `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外の深さ 1 で評価される `,@` / `(unquote_splicing ...)` は構文エラーである。リスト要素位置とは `(...)` または `[...]` の直接の要素位置を指し、`'`・`` ` ``・`,`・`,@`・`(unquote ...)`・`some(...)`・構造体フィールド値・添字などの単一オペランド位置は含めない（たとえば深さ 2 の `,,@xs` も構文エラーである）。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
 
 ### 5.4 関数呼び出し
 

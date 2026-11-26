@@ -169,8 +169,32 @@ fn quasiquote_unquote_splicing_and_nesting() {
         eval("'(a `(b ,@xs))").unwrap(),
         eval("['a ['quasiquote ['b ['unquote_splicing 'xs]]]]").unwrap()
     );
+    // 前置記号の `'` と `` ` `` を括弧なしで続けても quote 内は評価されない
+    assert_eq!(
+        eval("(def x 1) '`'`,x").unwrap(),
+        eval("['quasiquote ['quote ['quasiquote ['unquote 'x]]]]").unwrap()
+    );
+    assert_eq!(
+        eval("(defn boom () (/ 1 0)) '`'`,(boom)").unwrap(),
+        eval("['quasiquote ['quote ['quasiquote ['unquote ['boom]]]]]").unwrap()
+    );
+    assert_eq!(
+        eval("(def x 1) '`'(a `(b ,x))").unwrap(),
+        eval("['quasiquote ['quote ['a ['quasiquote ['b ['unquote 'x]]]]]]").unwrap()
+    );
+    // 単独の `` '`' `` は引き続きバッククォート文字リテラル
+    assert_eq!(eval("'`'").unwrap(), Value::Char('`'));
+    assert_eq!(eval("(== '`' '\\u{60}')").unwrap(), Value::Bool(true));
     // quote の中の quasiquote でも深さ 0 を超えて unquote を重ねると構文エラー
     let err = eval("'(a `(b ,,x))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "src.syntax");
+    // 評価される `,expr` の中（深さ 0）に `,` を書くと構文エラー
+    let err = eval("(let (y 1) `(a ,(list ,y)))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "src.syntax");
+    // 単一オペランド位置での `,@`（深さ 2 の `,,@xs` を含む）は構文エラー
+    let err = eval("(let (xs [1 2]) `(a `(b ,,@xs)))").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Parse);
     assert_eq!(err.rule(), "src.syntax");
 

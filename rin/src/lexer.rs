@@ -395,6 +395,11 @@ impl<'a> Lexer<'a> {
         if let Some(after) = self.peek()
             && !is_char_delimiter(after)
         {
+            if b == b'`' {
+                (self.pos, self.line, self.col) = saved;
+                self.bump();
+                return Ok(TokenKind::Quote);
+            }
             return Err(Error::lex(
                 "src.char",
                 span,
@@ -538,20 +543,5 @@ pub(crate) fn is_valid_ident(s: &str) -> bool {
 }
 
 pub(crate) fn is_char_delimiter(b: u8) -> bool {
-    b.is_ascii_whitespace()
-        || matches!(
-            b,
-            b';' | b'('
-                | b')'
-                | b'['
-                | b']'
-                | b'{'
-                | b'}'
-                | b'"'
-                | b'\''
-                | b'`'
-                | b','
-                | b':'
-                | b'.'
-        )
+    b.is_ascii_whitespace() || matches!(b, b';' | b')' | b']' | b'}')
 }
