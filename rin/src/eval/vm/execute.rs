@@ -35,6 +35,7 @@ impl Runner<'_, '_> {
                         } else {
                             Ok(RVal::Bool(matches!(actual, RVal::Bool(true))))
                         };
+                        #[cfg(feature = "std-value")]
                         if matches!(result, Ok(RVal::Bool(false))) {
                             self.check_failures.push(crate::test::CheckFailure {
                                 at: span,
@@ -833,10 +834,10 @@ impl Runner<'_, '_> {
                         // 同じクロージャへの次要素呼び出し：
                         // スタック長を変えず、引数・ローカルスロットをその場で入れ替えて `ip = 0` へ戻る。
                         let local_count = proto.local_count as usize;
-                        for i in 0..argc {
-                            let new_v = args[i];
+                        for (i, &new_v) in args.iter().enumerate().take(argc) {
                             self.pool.retain_val(new_v);
-                            let old_v = std::mem::replace(&mut self.stack.as_mut_slice()[base + i], new_v);
+                            let old_v =
+                                std::mem::replace(&mut self.stack.as_mut_slice()[base + i], new_v);
                             self.pool.release_val(old_v);
                         }
                         for i in argc..local_count {

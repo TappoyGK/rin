@@ -8,23 +8,31 @@ mod ops;
 mod runner;
 mod vm;
 
-use crate::alloc::{Allocator, HeapAllocator};
+use crate::alloc::Allocator;
+#[cfg(feature = "std-value")]
+use crate::alloc::HeapAllocator;
 use crate::bytecode::{
     BuiltinId, Capture, Chunk, FnProtoPtr, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name,
 };
-use crate::compiler::{compile_program, compile_program_parts};
+use crate::compiler::compile_program;
+#[cfg(feature = "std-value")]
+use crate::compiler::compile_program_parts;
 use crate::diagnostic::{write_available, write_suggest};
-use crate::error::{ErrRecorded, Error, ErrorKind, ErrorRef, Limits, Span};
+#[cfg(feature = "std-value")]
+use crate::error::Error;
+use crate::error::{ErrRecorded, ErrorKind, ErrorRef, Limits, Span};
 use crate::math::MathFma;
-use crate::mem::{RawMap, RawStr, RawVec, fnv1a_bytes, fnv1a_u32};
+use crate::mem::{MemoryConfig, RawMap, RawStr, RawVec, fnv1a_bytes, fnv1a_u32};
 use crate::parser::parse_program_work;
 use crate::pool::{Obj, Pool, RVal};
+#[cfg(feature = "std-value")]
 use crate::value::Value;
 use crate::value_ref::{Val, ValueRef};
 
 /// 既定の `HeapAllocator` を用いて Rin ソースを評価する。
 ///
 /// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
+#[cfg(feature = "std-value")]
 pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
@@ -33,6 +41,7 @@ pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Re
 /// 呼び出し側が指定した `Allocator` を用いて Rin ソースを評価する。
 ///
 /// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
+#[cfg(feature = "std-value")]
 pub fn eval_with_allocator(
     source: &str,
     bindings: &[(&str, Value)],
@@ -469,6 +478,7 @@ impl EvalBindingValues {
 }
 
 pub(super) enum EvalBindingNames<'a> {
+    #[cfg(feature = "std-value")]
     Values(&'a [(&'a str, Value)]),
     Vals(&'a [(&'a str, Val)]),
 }
@@ -495,6 +505,7 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) active_module: Option<u32>,
     pub(super) export_list: Option<RawVec<RawStr>>,
     pub(super) stack: ValueStack,
+    #[cfg(feature = "std-value")]
     pub(super) check_failures: Vec<crate::test::CheckFailure>,
 }
 

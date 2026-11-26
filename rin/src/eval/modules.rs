@@ -1,10 +1,12 @@
 //! ホスト提供モジュールの読み込みとモジュール内の呼び出し。
+#[cfg(feature = "std-value")]
 use std::fmt::Write;
 
 use super::*;
 
 impl EnvState<'_> {
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する（所有エラー返却）。
+    #[cfg(feature = "std-value")]
     pub(super) fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         self.load_module_inner(name, source)
             .map_err(|_| self.pool.core.error.to_owned_error())
@@ -231,6 +233,7 @@ impl EnvState<'_> {
     }
 
     /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
+    #[cfg(feature = "std-value")]
     pub(super) fn call_in(
         &mut self,
         mod_name: &str,

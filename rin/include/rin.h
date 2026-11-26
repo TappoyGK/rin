@@ -34,6 +34,17 @@ typedef struct RinLimits {
     size_t memory_bytes;
 } RinLimits;
 
+typedef struct RinRegionConfig {
+    size_t initial_block;
+    size_t max_block;
+} RinRegionConfig;
+
+typedef struct RinMemoryConfig {
+    RinRegionConfig perm;
+    RinRegionConfig obj;
+    RinRegionConfig work;
+} RinMemoryConfig;
+
 typedef enum RinMathFma {
     RIN_MATH_FMA_STRICT = 0,
     RIN_MATH_FMA_FUSED = 1
@@ -88,7 +99,9 @@ typedef struct RinEvalResult {
 } RinEvalResult;
 
 RinLimits rin_limits_default(void);
+RinMemoryConfig rin_memory_config_default(void);
 Rin *rin_new(RinLimits limits, RinAllocator alloc);
+Rin *rin_new_with_config(RinLimits limits, RinMemoryConfig memory, RinAllocator alloc);
 void rin_free(Rin *rin);
 bool rin_freeze(Rin *rin);
 bool rin_set_math_fma(Rin *rin, RinMathFma mode);

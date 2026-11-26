@@ -221,10 +221,12 @@ impl<'a, 'p> Runner<'a, 'p> {
             .into_iter()
             .flat_map(|b| {
                 let len = match b.names {
+                    #[cfg(feature = "std-value")]
                     EvalBindingNames::Values(raw) => raw.len(),
                     EvalBindingNames::Vals(raw) => raw.len(),
                 };
                 (0..len).map(move |i| match b.names {
+                    #[cfg(feature = "std-value")]
                     EvalBindingNames::Values(raw) => raw[i].0,
                     EvalBindingNames::Vals(raw) => raw[i].0,
                 })

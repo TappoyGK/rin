@@ -8,14 +8,17 @@ use crate::alloc::{Allocator, HeapAllocator};
 use crate::error::{Limits, Span};
 use crate::eval::{Builder, Machine};
 use crate::math::MathFma;
+use crate::mem::{MemoryConfig, RegionConfig};
 use crate::value_ref::{Val, ValueRef};
 
 mod error;
+#[cfg(feature = "std-value")]
 mod schema;
 mod value;
 
 use error::StoredError;
 pub use error::{RinError, RinErrorKind};
+#[cfg(feature = "std-value")]
 pub use schema::*;
 pub use value::*;
 
@@ -61,6 +64,40 @@ impl From<RinLimits> for Limits {
             steps: l.steps,
             depth: l.depth,
             memory_bytes: l.memory_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RinRegionConfig {
+    pub initial_block: usize,
+    pub max_block: usize,
+}
+
+impl From<RinRegionConfig> for RegionConfig {
+    fn from(c: RinRegionConfig) -> Self {
+        Self {
+            initial_block: c.initial_block,
+            max_block: c.max_block,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RinMemoryConfig {
+    pub perm: RinRegionConfig,
+    pub obj: RinRegionConfig,
+    pub work: RinRegionConfig,
+}
+
+impl From<RinMemoryConfig> for MemoryConfig {
+    fn from(c: RinMemoryConfig) -> Self {
+        Self {
+            perm: c.perm.into(),
+            obj: c.obj.into(),
+            work: c.work.into(),
         }
     }
 }
@@ -409,10 +446,40 @@ pub extern "C" fn rin_limits_default() -> RinLimits {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn rin_memory_config_default() -> RinMemoryConfig {
+    let d = MemoryConfig::default();
+    RinMemoryConfig {
+        perm: RinRegionConfig {
+            initial_block: d.perm.initial_block,
+            max_block: d.perm.max_block,
+        },
+        obj: RinRegionConfig {
+            initial_block: d.obj.initial_block,
+            max_block: d.obj.max_block,
+        },
+        work: RinRegionConfig {
+            initial_block: d.work.initial_block,
+            max_block: d.work.max_block,
+        },
+    }
+}
+
 /// 指定した `RinAllocator` 上に `Rin` 本体を直接確保して返す（システムヒープ不使用）。
 /// 確保に失敗した場合は `NULL` を返す。
 #[unsafe(no_mangle)]
 pub extern "C" fn rin_new(limits: RinLimits, alloc: RinAllocator) -> *mut Rin {
+    rin_new_with_config(limits, rin_memory_config_default(), alloc)
+}
+
+/// 3 領域のブロック設定 (`RinMemoryConfig`) を指定して `Rin` 本体を確保する（システムヒープ不使用）。
+/// 確保に失敗した場合は `NULL` を返す。
+#[unsafe(no_mangle)]
+pub extern "C" fn rin_new_with_config(
+    limits: RinLimits,
+    memory: RinMemoryConfig,
+    alloc: RinAllocator,
+) -> *mut Rin {
     let mut calloc = CAllocator { raw: alloc };
     let layout = Layout::new::<Rin>();
     let Some(raw) = calloc.alloc(layout) else {
@@ -425,7 +492,7 @@ pub extern "C" fn rin_new(limits: RinLimits, alloc: RinAllocator) -> *mut Rin {
         addr_of_mut!((*ptr).alloc).write(calloc);
         let alloc_ref: &'static mut dyn Allocator =
             &mut *(addr_of_mut!((*ptr).alloc) as *mut dyn Allocator);
-        let builder = Builder::new(limits.into(), alloc_ref);
+        let builder = Builder::with_memory_config(limits.into(), memory.into(), alloc_ref);
         addr_of_mut!((*ptr).state).write(Some(RinState::Building(builder)));
         addr_of_mut!((*ptr).handles).write(ValueHandles::new());
         addr_of_mut!((*ptr).last_result).write(RinValue(Val::void()));
@@ -470,7 +537,7 @@ pub unsafe extern "C" fn rin_freeze(machine: *mut Rin) -> bool {
     };
     match m.state.take().expect("Rin state present") {
         RinState::Building(builder) => {
-            let frozen = builder.freeze().expect("freeze does not fail");
+            let frozen = builder.into_machine();
             m.state = Some(RinState::Frozen(frozen));
             true
         }

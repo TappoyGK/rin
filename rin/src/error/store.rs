@@ -2,7 +2,9 @@
 
 use std::fmt::{self, Write};
 
-use super::{Error, ErrorKind, MAX_BACKTRACE_SIDE, Span, StackFrame, fmt_fn_name, fmt_site};
+#[cfg(feature = "std-value")]
+use super::{Error, StackFrame};
+use super::{ErrorKind, MAX_BACKTRACE_SIDE, Span, fmt_fn_name, fmt_site};
 
 /// 内部処理で `ErrorStore` へエラーを書き込んだことを表す 0 バイトのマーカー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +276,7 @@ impl ErrorStore {
         ErrorRef(self)
     }
 
+    #[cfg(feature = "std-value")]
     pub fn to_owned_error(&self) -> Error {
         let mut err = Error::new(self.rule, self.kind, self.at, self.msg.as_str());
         if self.module_resolved {
@@ -429,6 +432,7 @@ impl<'a> ErrorRef<'a> {
     }
 
     /// 所有型の [`Error`] へ変換する。
+    #[cfg(feature = "std-value")]
     pub fn to_error(&self) -> Error {
         self.0.to_owned_error()
     }

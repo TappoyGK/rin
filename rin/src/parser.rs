@@ -8,29 +8,37 @@ mod primary;
 mod resume;
 use frames::*;
 
+#[cfg(feature = "std-value")]
 use crate::alloc::HeapAllocator;
 use crate::ast::{
     DefnExpr, Expr, ExprKind, FnExpr, LetExpr, MatchArm, Pattern, StructExpr, VariantExpr,
 };
-use crate::error::{ErrRecorded, Error, ErrorKind, Span};
+#[cfg(feature = "std-value")]
+use crate::error::Error;
+use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::lexer::{WorkLexer, WorkToken, WorkTokenKind};
-use crate::mem::{AllocCore, RawStr, RawVec, RegionConfig, WorkArena, WorkBox};
+#[cfg(feature = "std-value")]
+use crate::mem::RegionConfig;
+use crate::mem::{AllocCore, RawStr, RawVec, WorkArena, WorkBox};
 
 /// 構文解析および AST の入れ子深さの絶対上限。
 pub(crate) const MAX_SYNTAX_NESTING: usize = 256;
 
 /// `fmt` や `test` など `Pool` の外から構文木を所有するためのラッパー。
+#[cfg(feature = "std-value")]
 pub(crate) struct OwnedAst {
     work: WorkArena,
     exprs: RawVec<Expr>,
 }
 
+#[cfg(feature = "std-value")]
 impl OwnedAst {
     pub(crate) fn exprs(&self) -> &[Expr] {
         self.exprs.as_slice()
     }
 }
 
+#[cfg(feature = "std-value")]
 impl Drop for OwnedAst {
     fn drop(&mut self) {
         let mut alloc = HeapAllocator;
@@ -68,10 +76,12 @@ pub(crate) fn parse_program_work(
     Ok(exprs)
 }
 
+#[cfg(feature = "std-value")]
 pub(crate) fn parse_tests(input: &str) -> Result<OwnedAst, Error> {
     parse_owned(input, true)
 }
 
+#[cfg(feature = "std-value")]
 pub(crate) fn parse_owned(input: &str, test_mode: bool) -> Result<OwnedAst, Error> {
     let mut alloc = HeapAllocator;
     let mut core = AllocCore::new(&mut alloc, usize::MAX);

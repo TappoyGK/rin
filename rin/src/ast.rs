@@ -135,6 +135,7 @@ pub enum Pattern {
     Var(RawStr),
 }
 
+#[cfg(feature = "std-value")]
 pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match &expr.kind {
         ExprKind::List(xs) | ExprKind::Tuple(xs) => out.extend(xs.as_slice()),

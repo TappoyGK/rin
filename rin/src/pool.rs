@@ -9,11 +9,14 @@ use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{
     AllocCore, MemoryConfig, ObjBlock, ObjHeap, PermArena, RawMap, RawStr, RawVec, WorkArena,
 };
+#[cfg(feature = "std-value")]
 use crate::value::Value;
 
+#[cfg(feature = "std-value")]
 mod convert;
-#[cfg(test)]
+#[cfg(all(test, feature = "std-value"))]
 mod release_tests;
+#[cfg(feature = "std-value")]
 mod shallow;
 
 const CHUNK_SLOTS: usize = 256;
@@ -495,6 +498,7 @@ pub(crate) struct Pool<'a> {
 }
 
 impl<'a> Pool<'a> {
+    #[cfg(test)]
     pub fn new(alloc: &'a mut dyn Allocator, max_bytes: usize) -> Self {
         Self::with_config(alloc, max_bytes, MemoryConfig::default())
     }
@@ -1137,6 +1141,7 @@ impl<'a> Pool<'a> {
         }
     }
 
+    #[cfg(feature = "std-value")]
     pub fn struct_desc_field_count(&self, desc: StructDescRef) -> usize {
         match desc {
             StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize].fields.len(),

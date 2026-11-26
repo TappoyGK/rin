@@ -43,6 +43,7 @@ const ORIGIN_BUILTIN: u8 = 3;
 
 impl<'a> RinFrame<'a> {
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         entry: FrameSource<'a>,
         captures: ObjSlice<RVal>,

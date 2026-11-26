@@ -1,4 +1,5 @@
 //! `Builder`・`Machine` の生成・凍結・評価・ホスト呼び出しと後始末。
+#[cfg(feature = "std-value")]
 use std::fmt::Write;
 
 use super::*;
@@ -6,8 +7,17 @@ use super::*;
 impl<'a> Builder<'a> {
     /// 読み込み段階の新しい環境を生成する。
     pub fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
+        Self::with_memory_config(limits, MemoryConfig::default(), alloc)
+    }
+
+    /// 3 領域のブロック設定 (`MemoryConfig`) を指定して読み込み段階の環境を生成する。
+    pub fn with_memory_config(
+        limits: Limits,
+        memory: MemoryConfig,
+        alloc: &'a mut dyn Allocator,
+    ) -> Self {
         Self {
-            inner: EnvState::new(limits, alloc),
+            inner: EnvState::with_memory_config(limits, memory, alloc),
         }
     }
 
@@ -22,16 +32,19 @@ impl<'a> Builder<'a> {
     }
 
     /// ホストの値を大域変数として束縛する（同名があれば上書きし、旧値を解放する）。
+    #[cfg(feature = "std-value")]
     pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
         self.inner.bind(name, value)
     }
 
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
+    #[cfg(feature = "std-value")]
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
         self.inner.load_module(name, source)
     }
 
     /// 読み込み段階の環境でソースを評価する（`def`・`defn`・`import` 等を許可する）。
+    #[cfg(feature = "std-value")]
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         self.inner.eval_building(source)
     }
@@ -41,17 +54,25 @@ impl<'a> Builder<'a> {
         self.inner.pool.live_bytes()
     }
 
-    /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
-    pub fn freeze(mut self) -> Result<Machine<'a>, Error> {
-        self.check_freeze()?;
+    /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する（失敗しない・システムヒープ不使用）。
+    pub fn into_machine(mut self) -> Machine<'a> {
         self.inner.pool.freeze_perm();
-        Ok(Machine { inner: self.inner })
+        Machine { inner: self.inner }
     }
 
+    /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
+    #[cfg(feature = "std-value")]
+    pub fn freeze(self) -> Result<Machine<'a>, Error> {
+        self.check_freeze()?;
+        Ok(self.into_machine())
+    }
+
+    #[cfg(feature = "std-value")]
     pub(crate) fn check_freeze(&self) -> Result<(), Error> {
         Ok(())
     }
 
+    #[cfg(feature = "std-value")]
     pub(crate) fn run_test(
         &mut self,
         setup: &[crate::ast::Expr],
@@ -60,7 +81,7 @@ impl<'a> Builder<'a> {
         self.inner.run_test(setup, body)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std-value"))]
     pub(crate) fn call_in(
         &mut self,
         mod_name: &str,
@@ -86,6 +107,7 @@ impl<'a> Machine<'a> {
     ///
     /// `def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。
     /// 読み込み済みのすべてのモジュールは `import` なしで `mod_name.symbol` として参照できる。
+    #[cfg(feature = "std-value")]
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
         self.eval_with(source, &[])
     }
@@ -93,16 +115,19 @@ impl<'a> Machine<'a> {
     /// 凍結した環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する。
     ///
     /// 評価の成否にかかわらず、大域環境・読み込み済みモジュールは変更せず、一時束縛は終了時に解放する。
+    #[cfg(feature = "std-value")]
     pub fn eval_with(&mut self, source: &str, bindings: &[(&str, Value)]) -> Result<Value, Error> {
         self.inner.eval_frozen(source, bindings)
     }
 
     /// 定義済みの大域関数をソース再解析なしで直接呼び出す。
+    #[cfg(feature = "std-value")]
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
         self.inner.call(fn_name, args, true)
     }
 
     /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
+    #[cfg(feature = "std-value")]
     pub fn call_in(
         &mut self,
         mod_name: &str,
@@ -119,11 +144,15 @@ impl<'a> Machine<'a> {
 }
 
 impl<'a> EnvState<'a> {
-    pub(super) fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
+    pub(super) fn with_memory_config(
+        limits: Limits,
+        memory: MemoryConfig,
+        alloc: &'a mut dyn Allocator,
+    ) -> Self {
         Self {
             limits,
             math_fma: MathFma::default(),
-            pool: Pool::new(alloc, limits.memory_bytes),
+            pool: Pool::with_config(alloc, limits.memory_bytes, memory),
             syms: SymTable::new(),
             globals: EnvSlots::new(),
             modules: ModuleTable::new(),
@@ -131,6 +160,7 @@ impl<'a> EnvState<'a> {
         }
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
         let rval = self
             .pool
@@ -156,6 +186,7 @@ impl<'a> EnvState<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn eval_building(&mut self, source: &str) -> Result<Value, Error> {
         let mark = self.pool.work.mark(&self.pool.core);
         let res = (|| {
@@ -182,6 +213,7 @@ impl<'a> EnvState<'a> {
         Ok(exported)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn eval_frozen(
         &mut self,
         source: &str,
@@ -194,6 +226,7 @@ impl<'a> EnvState<'a> {
         res
     }
 
+    #[cfg(feature = "std-value")]
     fn eval_frozen_inner(
         &mut self,
         source: &str,
@@ -280,6 +313,7 @@ impl<'a> EnvState<'a> {
         Ok(exported)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn run_test(
         &mut self,
         setup: &[crate::ast::Expr],
@@ -313,6 +347,7 @@ impl<'a> EnvState<'a> {
         (failures, result)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn call(
         &mut self,
         fn_name: &str,
@@ -336,6 +371,7 @@ impl<'a> EnvState<'a> {
         self.call_rval(callee, args, frozen)
     }
 
+    #[cfg(feature = "std-value")]
     pub(super) fn call_rval(
         &mut self,
         callee: RVal,
@@ -420,6 +456,7 @@ impl<'a> EnvState<'a> {
             modules: &mut self.modules,
             active_module,
             export_list: None,
+            #[cfg(feature = "std-value")]
             check_failures: Vec::new(),
             stack: ValueStack::new(),
         }

@@ -1,7 +1,10 @@
 //! Rin ソース文字列を位置付きの字句トークン列へ分解する。
 
-use crate::error::{Error, Span};
+#[cfg(feature = "std-value")]
+use crate::error::Error;
+use crate::error::Span;
 
+#[cfg(feature = "std-value")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     LParen,
@@ -21,6 +24,7 @@ pub enum TokenKind {
     Eof,
 }
 
+#[cfg(feature = "std-value")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -29,12 +33,14 @@ pub struct Token {
     pub attached: bool,
 }
 
+#[cfg(feature = "std-value")]
 pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
     let mut tokens = Vec::new();
     tokenize_into(input, &mut tokens)?;
     Ok(tokens)
 }
 
+#[cfg(feature = "std-value")]
 pub(crate) fn tokenize_into(input: &str, tokens: &mut Vec<Token>) -> Result<(), Error> {
     tokens.clear();
     let mut lexer = Lexer::new(input);
@@ -50,6 +56,7 @@ pub(crate) fn tokenize_into(input: &str, tokens: &mut Vec<Token>) -> Result<(), 
 }
 
 /// 整形器向け。通常のTokenを大きくせず、原文の範囲を別に返す。
+#[cfg(feature = "std-value")]
 pub(crate) fn tokenize_lossless(
     input: &str,
 ) -> Result<Vec<(Token, std::ops::Range<usize>)>, Error> {
@@ -134,6 +141,10 @@ impl<'a> Lexer<'a> {
         skipped
     }
 
+}
+
+#[cfg(feature = "std-value")]
+impl<'a> Lexer<'a> {
     fn next_token(&mut self) -> Result<Token, Error> {
         let skipped = self.skip_ws_and_comments();
         let attached = !skipped && self.pos > 0;
