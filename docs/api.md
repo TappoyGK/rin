@@ -114,7 +114,7 @@ pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Re
 - **`Val` の所有権規約**：
   - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_str` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
   - コンテナ構築（`val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）および `bind_val` / `call_ref` / `call_in_ref` / `eval_with_vals` は渡された `Val` を内部で retain して共有参照する。**所有権は移動しない**ため、呼び出し元は自分が生成した `Val` を使い終わったタイミングで必ず同じマシンの `release_val` へ返却する。
-  - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり、パニックするか別の値を読む。特に、解放済みの `Val` をスロット再利用後にもう一度 `release_val` へ渡すと、ほかのハンドルや束縛が保持している別の値を解放し、それらが再利用後の別値を指すようになることがある（どの場合も境界検査によりメモリの範囲外には触れない）。
+  - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり、パニックするか別の値を読む。特に、解放済みの `Val` をスロット再利用後にもう一度 `release_val` へ渡した場合や、別の `Machine` の `Val`（`ObjId` が範囲内のもの）を `release_val` へ渡した場合は、ほかのハンドルや束縛が保持している別の値を解放し、それらが再利用後の別値を指すようになることがある（どの場合も境界検査によりメモリの範囲外には触れない）。
 - **`ValueRef<'_>` と補助借用ビュー**：
   - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
   - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
@@ -409,10 +409,10 @@ if (!result.ok) {
 
 - **失敗時の挙動**：`rin == NULL`、必須引数の `NULL`、不正 UTF-8 文字列、メモリ上限（`memory_bytes`）超過、またはアロケータの確保失敗時は `NULL`（`rin_struct_set` は `false`）を返し、`rin != NULL` であれば `rin_last_error(rin)` にエラー（`RIN_ERR_HOST` または `RIN_ERR_TOO_MUCH_MEMORY`）を記録する。
 - **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_call` / `rin_eval_with` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` へ渡してはならない。
-- **ハンドルの取り違えと解放済みハンドル**：
+- **ハンドルの取り違えと解放済みハンドル**：次はホスト側の誤用であり、してはならない（`[eval.sandbox]` の対象ではなく、`rin_last_error` にも記録されない）。
   - 同じハンドルを 2 回 `rin_drop` した場合は内部の生存フラグ（`alive`）により 2 回目は無視される（ただしスロットが新しいハンドルへ再利用された後に古いポインタを `rin_drop` すると、新しいハンドルを解放してしまう）。
   - `rin_drop` 済みのハンドルを読み取り・入力に渡した場合は、`Void` またはスロット再利用後の別の値を読むことがある。
-  - 別の `Rin` で生成した `RinValue *` を渡した場合、別の値を読むか、内部の `ObjId` 境界検査でパニックする（Rust の `extern "C"` 境界を跨ぐパニックはプロセスの中断（abort）となる。メモリの範囲外には触れない）。
+  - 別の `Rin` で生成した `RinValue *` を `rin_drop` に渡した場合は所有検査により無視される。読み取り・入力に渡した場合は、別の値を読むか、内部の `ObjId` 境界検査でパニックする（Rust の `extern "C"` 境界を跨ぐパニックはプロセスの中断（abort）となる。メモリの範囲外には触れない）。
 
 | 関数 | 説明 |
 |---|---|

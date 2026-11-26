@@ -166,31 +166,28 @@ impl Runner<'_, '_> {
                         }
                         for (idx, fname) in desc.fields.as_slice().iter().enumerate() {
                             let val = self.stack.as_slice()[start + idx];
-                            if let Some(pos) = pairs
-                                .as_slice()
-                                .iter()
-                                .position(|(k, _)| *k == fname.as_ref())
-                            {
-                                let prev = std::mem::replace(&mut pairs.as_mut_slice()[pos].1, val);
-                                self.pool.release_val(prev);
-                            } else {
-                                let _ = pairs.push_work(
-                                    &mut self.pool.work,
-                                    &mut self.pool.core,
-                                    (fname.as_ref(), val),
-                                );
-                            }
+                            let _ = pairs.push_work(
+                                &mut self.pool.work,
+                                &mut self.pool.core,
+                                (fname.as_ref(), val),
+                            );
                         }
                         self.stack.truncate(start);
-                        // 挿入ソート（フィールド数は通常少数、システムヒープ不使用）
-                        let ps = pairs.as_mut_slice();
-                        for i in 1..ps.len() {
-                            let mut j = i;
-                            while j > 0 && ps[j - 1].0 > ps[j].0 {
-                                ps.swap(j - 1, j);
-                                j -= 1;
+                        // 安定マージソート（O(F log F)、システムヒープ不使用）
+                        if super::super::sort_field_pairs_work(
+                            pairs.as_mut_slice(),
+                            &mut self.pool.work,
+                            &mut self.pool.core,
+                        )
+                        .is_none()
+                        {
+                            for &(_, v) in pairs.as_slice() {
+                                self.pool.release_val(v);
                             }
+                            self.pool.work.rewind(&mut self.pool.core, mark);
+                            return Err(self.work_oom(span));
                         }
+                        // ソート済み配列を 1 パスで重複排除（後ろ勝ち・旧値は解放）
                         let mut field_names = RawVec::<&str>::new();
                         let mut field_vals = RawVec::<RVal>::new();
                         if field_names
@@ -207,10 +204,21 @@ impl Runner<'_, '_> {
                             return Err(self.work_oom(span));
                         }
                         for &(k, v) in pairs.as_slice() {
-                            let _ =
-                                field_names.push_work(&mut self.pool.work, &mut self.pool.core, k);
-                            let _ =
-                                field_vals.push_work(&mut self.pool.work, &mut self.pool.core, v);
+                            if field_names.last().copied() == Some(k) {
+                                let prev = std::mem::replace(field_vals.last_mut().unwrap(), v);
+                                self.pool.release_val(prev);
+                            } else {
+                                let _ = field_names.push_work(
+                                    &mut self.pool.work,
+                                    &mut self.pool.core,
+                                    k,
+                                );
+                                let _ = field_vals.push_work(
+                                    &mut self.pool.work,
+                                    &mut self.pool.core,
+                                    v,
+                                );
+                            }
                         }
                         let desc_ref = match self.pool.intern_struct_desc(
                             desc.name.as_ref(),

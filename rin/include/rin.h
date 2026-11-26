@@ -141,11 +141,12 @@ const RinError *rin_last_error(const Rin *rin);
 /* 値ハンドル構築・解放（すべて Rin のアロケータ上で確保される。使い終わったら rin_drop で返却）。
  * 確保失敗・NULL 引数・不正 UTF-8 等のエラー時は NULL（rin_struct_set は false）を返し、
  * rin_last_error を更新する。
- * 注意:
+ * 注意（以下はホスト側の誤用であり、してはならない。rin_last_error には記録されない）:
  * - RinEvalResult.value で返された借用ポインタを rin_drop に渡してはならない。
  * - 同じハンドルの連続二重 rin_drop は無視されるが、再利用後の古いポインタを rin_drop すると
  *   再利用先のハンドルを解放してしまう。解放済みハンドルの使用は Void や別値を読むことがある。
- * - 別の Rin で生成したハンドルを渡すと、別値を読むか境界検査の panic でプロセスが中断（abort）する。
+ * - 別の Rin で生成したハンドルを rin_drop に渡した場合は無視される。読み取り・入力に渡すと、
+ *   別値を読むか境界検査の panic でプロセスが中断（abort）する。
  */
 RinValue *rin_int(Rin *rin, int64_t n);
 RinValue *rin_float(Rin *rin, double x);

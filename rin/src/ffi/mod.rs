@@ -236,10 +236,42 @@ impl ValueHandles {
         }
     }
 
+    fn owns_slot(&self, slot: *const HandleSlot) -> bool {
+        let addr = slot as usize;
+        let stride = std::mem::size_of::<HandleSlot>();
+        if self.inline_used > 0 {
+            let start = self.inline.as_ptr() as usize;
+            let end = start + self.inline_used * stride;
+            if addr >= start && addr < end && (addr - start).is_multiple_of(stride) {
+                return true;
+            }
+        }
+        let mut cur = self.chunks_head;
+        while !cur.is_null() {
+            // SAFETY: `cur` は当プールが所有する有効な `HandleChunk`。
+            unsafe {
+                let used = (*cur).used;
+                if used > 0 {
+                    let start = (*cur).slots.as_ptr() as usize;
+                    let end = start + used * stride;
+                    if addr >= start && addr < end && (addr - start).is_multiple_of(stride) {
+                        return true;
+                    }
+                }
+                cur = (*cur).next;
+            }
+        }
+        false
+    }
+
     /// `val_ptr` を解放リストへ返し、保持していた `Val` を返す。
+    /// 当プールに属さないポインタ（別の `Rin` のハンドル等）は安全のため無視して `None` を返す。
     unsafe fn free_slot(&mut self, val_ptr: *mut RinValue) -> Option<Val> {
         let slot = val_ptr.cast::<HandleSlot>();
-        // SAFETY: `val_ptr` は `alloc_slot` が返した `HandleSlot.val` の先頭アドレス。
+        if !self.owns_slot(slot) {
+            return None;
+        }
+        // SAFETY: `owns_slot` により `slot` は当プール所有の初期化済み `HandleSlot`。
         unsafe {
             if !(*slot).alive {
                 return None;

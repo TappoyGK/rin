@@ -22,7 +22,9 @@ use crate::diagnostic::{write_available, write_suggest};
 use crate::error::Error;
 use crate::error::{ErrRecorded, ErrorKind, ErrorRef, Limits, Span};
 use crate::math::MathFma;
-use crate::mem::{MemoryConfig, RawMap, RawStr, RawVec, fnv1a_bytes, fnv1a_u32};
+use crate::mem::{
+    AllocCore, MemoryConfig, RawMap, RawStr, RawVec, WorkArena, fnv1a_bytes, fnv1a_u32,
+};
 use crate::parser::parse_program_work;
 use crate::pool::{Obj, Pool, RVal};
 #[cfg(feature = "std-value")]
@@ -510,6 +512,118 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) stack: ValueStack,
     #[cfg(feature = "std-value")]
     pub(super) check_failures: Vec<crate::test::CheckFailure>,
+}
+
+/// 構造体フィールド `(name, val)` を `WorkArena` 上の安定マージソートで O(F log F) 整列する。
+/// 同名フィールドの相対順序（後ろ勝ち）を保つ。
+pub(super) fn sort_field_pairs_work<'s>(
+    slice: &mut [(&'s str, RVal)],
+    work: &mut WorkArena,
+    core: &mut AllocCore<'_>,
+) -> Option<()> {
+    const MIN_RUN: usize = 16;
+    let n = slice.len();
+    if n < 2 {
+        return Some(());
+    }
+    if n <= MIN_RUN {
+        for cur in 1..n {
+            let item = slice[cur];
+            let mut lo = 0;
+            let mut hi = cur;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if slice[mid].0 > item.0 {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if lo < cur {
+                slice.copy_within(lo..cur, lo + 1);
+                slice[lo] = item;
+            }
+        }
+        return Some(());
+    }
+    let mark = work.mark(core);
+    let mut scratch = RawVec::<(&'s str, RVal)>::new();
+    scratch.resize_work(work, core, n, ("", RVal::Void))?;
+    let buf = scratch.as_mut_slice();
+
+    // MIN_RUN ごとに安定二分挿入ソート
+    let mut start = 0;
+    while start < n {
+        let end = (start + MIN_RUN).min(n);
+        for cur in (start + 1)..end {
+            let item = slice[cur];
+            let mut lo = start;
+            let mut hi = cur;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if slice[mid].0 > item.0 {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if lo < cur {
+                slice.copy_within(lo..cur, lo + 1);
+                slice[lo] = item;
+            }
+        }
+        start = end;
+    }
+
+    // ピンポン安定マージ
+    let mut width = MIN_RUN;
+    let mut from_slice = true;
+    while width < n {
+        let (src, dst): (&[_], &mut [_]) = if from_slice {
+            (&*slice, &mut *buf)
+        } else {
+            (&*buf, &mut *slice)
+        };
+        let mut left = 0;
+        while left < n {
+            let mid = (left + width).min(n);
+            let right = (left + 2 * width).min(n);
+            if mid >= right || src[mid - 1].0 <= src[mid].0 {
+                dst[left..right].copy_from_slice(&src[left..right]);
+            } else {
+                let mut i = left;
+                let mut j = mid;
+                let mut k = left;
+                while i < mid && j < right {
+                    if src[i].0 <= src[j].0 {
+                        dst[k] = src[i];
+                        i += 1;
+                    } else {
+                        dst[k] = src[j];
+                        j += 1;
+                    }
+                    k += 1;
+                }
+                if i < mid {
+                    let rem = mid - i;
+                    dst[k..k + rem].copy_from_slice(&src[i..mid]);
+                    k += rem;
+                }
+                if j < right {
+                    let rem = right - j;
+                    dst[k..k + rem].copy_from_slice(&src[j..right]);
+                }
+            }
+            left += 2 * width;
+        }
+        width *= 2;
+        from_slice = !from_slice;
+    }
+    if !from_slice {
+        slice.copy_from_slice(buf);
+    }
+    work.rewind(core, mark);
+    Some(())
 }
 
 #[derive(Clone, Copy)]

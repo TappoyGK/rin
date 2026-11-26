@@ -122,14 +122,22 @@ impl EnvState<'_> {
                 return Err(self.pool.core.error.as_ref());
             }
         }
-        // 挿入ソート（システムヒープ不使用）
-        let ps = pairs.as_mut_slice();
-        for i in 1..ps.len() {
-            let mut j = i;
-            while j > 0 && ps[j - 1].0 > ps[j].0 {
-                ps.swap(j - 1, j);
-                j -= 1;
-            }
+        // 安定マージソート（O(F log F)、システムヒープ不使用）
+        if sort_field_pairs_work(
+            pairs.as_mut_slice(),
+            &mut self.pool.work,
+            &mut self.pool.core,
+        )
+        .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            );
+            return Err(self.pool.core.error.as_ref());
         }
         // 重複キーは後勝ちで上書きする。
         let mut unique_keys: RawVec<&str> = RawVec::new();
