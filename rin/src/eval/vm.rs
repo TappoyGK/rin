@@ -74,11 +74,19 @@ impl<'a> Runner<'a, '_> {
         };
         let mut frames = RawVec::<FrameEntry<'_>>::new();
         if frames
-            .push_work(&mut self.pool.work, &mut self.pool.core, FrameEntry::Builtin(bframe))
+            .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
             .is_none()
         {
+            let cleanup_to = bframe.cleanup_stack_to;
+            self.cleanup_builtin_frame(bframe);
+            self.release_stack_from(cleanup_to);
             return Err(self.work_oom(span));
         }
+        let _ = frames.push_work(
+            &mut self.pool.work,
+            &mut self.pool.core,
+            FrameEntry::Builtin(bframe),
+        );
         if let Err(err) = self.handle_callback_step(&mut frames, step) {
             return Err(self.unwind_frames(frames, err));
         }
@@ -133,16 +141,18 @@ impl<'a> Runner<'a, '_> {
                     span,
                 } => {
                     if frames
-                        .push_work(
-                            &mut self.pool.work,
-                            &mut self.pool.core,
-                            FrameEntry::Rin(frame),
-                        )
+                        .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
                         .is_none()
                     {
                         let err = self.work_oom(span);
+                        self.unwind_rin_frame(frame);
                         return Err(self.unwind_frames(frames, err));
                     }
+                    let _ = frames.push_work(
+                        &mut self.pool.work,
+                        &mut self.pool.core,
+                        FrameEntry::Rin(frame),
+                    );
                     if let Err(err) =
                         self.push_closure_call_from_stack(&mut frames, arg_start, argc, span)
                     {
@@ -156,16 +166,18 @@ impl<'a> Runner<'a, '_> {
                     span,
                 } => {
                     if frames
-                        .push_work(
-                            &mut self.pool.work,
-                            &mut self.pool.core,
-                            FrameEntry::Rin(frame),
-                        )
+                        .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
                         .is_none()
                     {
                         let err = self.work_oom(span);
+                        self.unwind_rin_frame(frame);
                         return Err(self.unwind_frames(frames, err));
                     }
+                    let _ = frames.push_work(
+                        &mut self.pool.work,
+                        &mut self.pool.core,
+                        FrameEntry::Rin(frame),
+                    );
                     if let Err(err) = self.start_callback_from_stack(
                         &mut frames,
                         builtin,
@@ -273,15 +285,19 @@ impl<'a> Runner<'a, '_> {
             }
             Some(bframe) => {
                 if frames
-                    .push_work(
-                        &mut self.pool.work,
-                        &mut self.pool.core,
-                        FrameEntry::Builtin(bframe),
-                    )
+                    .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
                     .is_none()
                 {
+                    let cleanup_to = bframe.cleanup_stack_to;
+                    self.cleanup_builtin_frame(bframe);
+                    self.release_stack_from(cleanup_to);
                     return Err(self.work_oom(span));
                 }
+                let _ = frames.push_work(
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    FrameEntry::Builtin(bframe),
+                );
                 self.handle_callback_step(frames, step)
             }
         }
@@ -379,15 +395,19 @@ impl<'a> Runner<'a, '_> {
                         match sub_frame {
                             Some(sf) => {
                                 if frames
-                                    .push_work(
-                                        &mut self.pool.work,
-                                        &mut self.pool.core,
-                                        FrameEntry::Builtin(sf),
-                                    )
+                                    .reserve_work(&mut self.pool.work, &mut self.pool.core, 1)
                                     .is_none()
                                 {
+                                    let cleanup_to = sf.cleanup_stack_to;
+                                    self.cleanup_builtin_frame(sf);
+                                    self.release_stack_from(cleanup_to);
                                     return Err(self.work_oom(span));
                                 }
+                                let _ = frames.push_work(
+                                    &mut self.pool.work,
+                                    &mut self.pool.core,
+                                    FrameEntry::Builtin(sf),
+                                );
                                 step = sub_step;
                                 continue;
                             }
