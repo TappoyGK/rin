@@ -1,7 +1,7 @@
 //! ゲームを起動せずに、独立した環境で Rin のテストを実行する。
 
 use crate::ast::{Expr, ExprKind, Pattern, children};
-use crate::parser::{ParseScratch, ParseScratchGuard, parse_tests};
+use crate::parser::{OwnedAst, parse_owned, parse_tests};
 use crate::{Builder, Error, HeapAllocator, Limits, Span, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -132,23 +132,28 @@ struct Test {
     body: Vec<Expr>,
 }
 struct Program {
+    _ast: OwnedAst,
     setup: Vec<Expr>,
     tests: Vec<Test>,
 }
 
-fn split_tests(exprs: Vec<Expr>) -> Result<Program, Error> {
-    let mut program = Program {
-        setup: Vec::new(),
-        tests: Vec::new(),
-    };
+fn split_tests(ast: OwnedAst) -> Result<Program, Error> {
+    let mut setup = Vec::new();
+    let mut tests = Vec::new();
     let mut names = BTreeSet::new();
-    let globals = exprs.iter().filter(|e| !matches!(&e.kind,
-        ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Ident(n) if n == "deftest")))
+    let exprs = ast.exprs();
+    let globals = exprs
+        .iter()
+        .filter(|e| {
+            !matches!(&e.kind,
+                ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Ident(n) if n.as_str() == "deftest"))
+        })
         .fold(0, |mask, e| mask | declarations(e));
-    for mut expr in exprs {
-        if let ExprKind::Call { callee, args } = &mut expr.kind
-            && matches!(&callee.kind, ExprKind::Ident(name) if name == "deftest")
+    for &expr in exprs {
+        if let ExprKind::Call { callee, args } = &expr.kind
+            && matches!(&callee.kind, ExprKind::Ident(name) if name.as_str() == "deftest")
         {
+            let args = args.as_slice();
             let Some(Expr {
                 kind: ExprKind::Str(name),
                 ..
@@ -160,33 +165,35 @@ fn split_tests(exprs: Vec<Expr>) -> Result<Program, Error> {
                     "deftest requires a string name",
                 ));
             };
-            if !names.insert(name.clone()) {
+            let name_str = name.as_str().to_owned();
+            if !names.insert(name_str.clone()) {
                 return Err(Error::parse(
                     "test.deftest",
                     expr.span,
                     "duplicate test name",
                 ));
             }
-            let name = name.clone();
             let bound = args[1..]
                 .iter()
                 .fold(globals, |mask, e| mask | declarations(e));
             for body in &args[1..] {
                 validate(body, true, bound)?;
             }
-            let mut body = std::mem::take(args);
-            body.remove(0);
-            program.tests.push(Test {
-                name,
+            tests.push(Test {
+                name: name_str,
                 at: expr.span,
-                body,
+                body: args[1..].to_vec(),
             });
         } else {
             validate(&expr, false, globals)?;
-            program.setup.push(expr);
+            setup.push(expr);
         }
     }
-    Ok(program)
+    Ok(Program {
+        _ast: ast,
+        setup,
+        tests,
+    })
 }
 
 // 特殊形式と同名の値を、字面だけで拒否しないための束縛集合。
@@ -203,8 +210,10 @@ fn declarations(root: &Expr) -> u8 {
     let mut mask = 0;
     let mut work = vec![root];
     while let Some(expr) = work.pop() {
-        if let ExprKind::Def { name, .. } | ExprKind::Defn { name, .. } = &expr.kind {
-            mask |= test_name(name);
+        match &expr.kind {
+            ExprKind::Def { name, .. } => mask |= test_name(name.as_str()),
+            ExprKind::Defn(d) => mask |= test_name(d.name.as_str()),
+            _ => {}
         }
         children(expr, &mut work);
     }
@@ -217,6 +226,8 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
         if let ExprKind::Call { callee, args } = &expr.kind
             && let ExprKind::Ident(name) = &callee.kind
         {
+            let name = name.as_str();
+            let args = args.as_slice();
             if name == "deftest" {
                 return Err(Error::parse(
                     "test.deftest",
@@ -224,7 +235,7 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
                     "deftest is only allowed at the top level",
                 ));
             }
-            if matches!(name.as_str(), "check" | "check_eq") {
+            if matches!(name, "check" | "check_eq") {
                 if !in_test {
                     return Err(Error::parse(
                         "test.check",
@@ -247,7 +258,7 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
                 continue;
             }
         }
-        if matches!(&expr.kind, ExprKind::Ident(name) if test_name(name) != 0 && bound & test_name(name) == 0)
+        if matches!(&expr.kind, ExprKind::Ident(name) if test_name(name.as_str()) != 0 && bound & test_name(name.as_str()) == 0)
         {
             return Err(Error::parse(
                 "test.check",
@@ -256,33 +267,43 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
             ));
         }
         match &expr.kind {
-            ExprKind::Let { bindings, body } => {
+            ExprKind::Let(l) => {
                 let mut scope = bound;
-                for (name, value) in bindings {
+                for (name, value) in l.bindings.as_slice() {
                     work.push((value, scope));
-                    scope |= test_name(name);
+                    scope |= test_name(name.as_str());
                 }
-                work.extend(body.iter().map(|e| (e, scope)));
+                work.extend(l.body.as_slice().iter().map(|e| (e, scope)));
             }
-            ExprKind::Fn { params, body } | ExprKind::Defn { params, body, .. } => {
-                let scope = params
+            ExprKind::Fn(f) => {
+                let scope = f
+                    .params
+                    .as_slice()
                     .iter()
-                    .fold(bound, |mask, name| mask | test_name(name));
-                work.extend(body.iter().map(|e| (e, scope)));
+                    .fold(bound, |mask, name| mask | test_name(name.as_str()));
+                work.extend(f.body.as_slice().iter().map(|e| (e, scope)));
+            }
+            ExprKind::Defn(d) => {
+                let scope = d
+                    .params
+                    .as_slice()
+                    .iter()
+                    .fold(bound, |mask, name| mask | test_name(name.as_str()));
+                work.extend(d.body.as_slice().iter().map(|e| (e, scope)));
             }
             ExprKind::Match { scrutinee, arms } => {
-                work.push((scrutinee, bound));
-                for arm in arms {
+                work.push((scrutinee.as_ref(), bound));
+                for arm in arms.as_slice() {
                     let name = match &arm.pattern {
-                        Pattern::Var(name) => Some(name),
+                        Pattern::Var(name) => Some(name.as_str()),
                         Pattern::Some(name)
                         | Pattern::Ok(name)
                         | Pattern::Err(name)
-                        | Pattern::Variant { binding: name, .. } => name.as_ref(),
+                        | Pattern::Variant { binding: name, .. } => name.as_ref().map(|s| s.as_str()),
                         _ => None,
                     };
-                    let scope = bound | name.map_or(0, |n| test_name(n));
-                    work.extend(arm.body.iter().map(|e| (e, scope)));
+                    let scope = bound | name.map_or(0, test_name);
+                    work.extend(arm.body.as_slice().iter().map(|e| (e, scope)));
                 }
             }
             _ => {
@@ -305,19 +326,17 @@ fn module_order(modules: &[(&str, &str)]) -> Result<Vec<usize>, Box<SourceError>
                 error: Error::parse("test.modules", Span::default(), "duplicate module name"),
             }));
         }
-        let mut scratch = ParseScratch::new();
-        let mut guard = ParseScratchGuard::new(&mut scratch);
-        let exprs = guard.parse(source).map_err(|error| {
+        let ast = parse_owned(source, false).map_err(|error| {
             Box::new(SourceError {
                 source: name.into(),
                 error,
             })
         })?;
-        let mut work: Vec<_> = exprs.iter().collect();
+        let mut work: Vec<_> = ast.exprs().iter().collect();
         let mut imports = Vec::new();
         while let Some(expr) = work.pop() {
             if let ExprKind::Import { name } = &expr.kind {
-                imports.push((name.clone(), expr.span));
+                imports.push((name.as_str().to_owned(), expr.span));
             }
             children(expr, &mut work);
         }

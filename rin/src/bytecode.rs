@@ -4,7 +4,7 @@ use std::cell::{Cell, OnceCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::ast::Pattern;
+use crate::ast::OwnedPattern as Pattern;
 use crate::error::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

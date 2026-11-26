@@ -137,11 +137,11 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
         Limits {
             steps: 100_000,
             depth: 200,
-            memory_bytes: 1200,
+            memory_bytes: 2048,
         },
         &mut alloc2,
     );
-    let big_mod = format!(r#"(def s "{}")"#, "a".repeat(2000));
+    let big_mod = format!(r#"(def s "{}")"#, "a".repeat(3000));
     let merr = m2.load_module("m", &big_mod).unwrap_err();
     assert_eq!(merr.kind, ErrorKind::TooMuchMemory);
     m2.eval(r#"(def t "xyz")"#).unwrap();
@@ -150,23 +150,26 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
 
 #[test]
 fn parse_scratch_releases_large_buffers_after_eval_and_error() {
-    let mut scratch = crate::parser::ParseScratch::new();
+    let mut backing = vec![0u8; 256 * 1024];
+    let mut arena = ArenaAllocator::new(&mut backing);
+    let mut core = crate::mem::AllocCore::new(&mut arena, 256 * 1024);
+    let mut work = crate::mem::WorkArena::new(crate::RegionConfig::new(4 * 1024, 64 * 1024));
+
     let big_src = "(+ 1 2) ".repeat(200);
-    {
-        let mut guard = crate::parser::ParseScratchGuard::new(&mut scratch);
-        let exprs = guard.parse(&big_src).unwrap();
-        assert_eq!(exprs.len(), 200);
-    }
-    let caps1 = scratch.capacities();
-    assert_eq!((caps1.0, caps1.2), (0, 0));
-    assert!(caps1.1 <= 32);
+    let mark = work.mark(&core);
+    let exprs = crate::parser::parse_program_work(&big_src, &mut work, &mut core, false).unwrap();
+    assert_eq!(exprs.len(), 200);
+    assert!(core.work_bytes() > 0);
+    work.rewind(&mut core, mark);
+    assert_eq!(core.work_bytes(), 0);
 
     let bad_deep = "(+ 1 ".repeat(100);
-    {
-        let mut guard = crate::parser::ParseScratchGuard::new(&mut scratch);
-        assert!(guard.parse(&bad_deep).is_err());
-    }
-    assert_eq!(scratch.capacities(), (0, 0, 0));
+    let mark2 = work.mark(&core);
+    assert!(crate::parser::parse_program_work(&bad_deep, &mut work, &mut core, false).is_err());
+    work.rewind(&mut core, mark2);
+    assert_eq!(core.work_bytes(), 0);
+
+    work.destroy(&mut core);
 }
 
 #[test]

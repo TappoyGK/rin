@@ -2,9 +2,8 @@ use super::*;
 use crate::ErrorKind;
 
 fn compile(source: &str) -> Chunk {
-    let mut scratch = crate::parser::ParseScratch::new();
-    let exprs = crate::parser::parse_program_with_scratch(source, &mut scratch).unwrap();
-    compile_program(exprs, None, &mut SymTable::default(), &[], false).unwrap()
+    let ast = crate::parser::parse_owned(source, false).unwrap();
+    compile_program(ast.exprs(), None, &mut SymTable::default(), &[], false).unwrap()
 }
 
 #[test]

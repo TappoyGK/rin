@@ -115,7 +115,7 @@ fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
     let mut alloc = HeapAllocator;
     let mut builder = Builder::new(
         Limits {
-            memory_bytes: 1024,
+            memory_bytes: 4096,
             ..Limits::default()
         },
         &mut alloc,
@@ -146,7 +146,7 @@ fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
     assert_eq!(err.rule(), "op.arith");
     assert_eq!(machine.live_bytes(), baseline);
 
-    let big = Value::str("a".repeat(2048));
+    let big = Value::str("a".repeat(8192));
     let mem_err = machine
         .eval_with("x", &[("small", Value::str("ok")), ("big", big)])
         .unwrap_err();

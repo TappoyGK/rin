@@ -18,12 +18,21 @@ impl EnvState<'_> {
                 id
             }
         };
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source).map_err(with_mod)?;
-            compile_program(exprs, Some(mod_id), &mut self.syms, &self.globals, false)
-                .map_err(with_mod)?
-        };
+        let mark = self.pool.work.mark(&self.pool.core);
+        let chunk = (|| {
+            let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)
+                .map_err(with_mod)?;
+            compile_program(
+                exprs.as_slice(),
+                Some(mod_id),
+                &mut self.syms,
+                &self.globals,
+                false,
+            )
+            .map_err(with_mod)
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let chunk = chunk?;
         for v in std::mem::take(&mut self.module_envs[mod_id as usize])
             .into_iter()
             .flatten()

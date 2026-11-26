@@ -338,6 +338,56 @@ impl WorkArena {
         NonNull::new(ptr)
     }
 
+    /// 作業領域へ値を 1 つ書き込んでポインタを返す。
+    pub fn alloc_val<T>(&mut self, core: &mut AllocCore<'_>, val: T) -> Option<NonNull<T>> {
+        let layout = Layout::new::<T>();
+        let raw = self.alloc_raw(core, layout)?;
+        let ptr = raw.cast::<T>();
+        if std::mem::size_of::<T>() > 0 {
+            // SAFETY: `ptr` は `Layout::new::<T>()` で確保した未初期化領域。
+            unsafe { ptr.as_ptr().write(val) };
+        }
+        Some(ptr)
+    }
+
+    /// `ptr` が現在チャンクの末尾直前にある場合、インプレースで `old_size` → `new_size` へ拡張する。
+    ///
+    /// # Safety
+    /// `ptr` はこの `WorkArena` から `old_size` バイトで確保された有効なポインタでなければならない。
+    pub unsafe fn try_grow_in_place(
+        &mut self,
+        core: &mut AllocCore<'_>,
+        ptr: NonNull<u8>,
+        old_size: usize,
+        new_size: usize,
+    ) -> bool {
+        if new_size <= old_size {
+            return true;
+        }
+        let Some(mut cur_ptr) = self.cur else {
+            return false;
+        };
+        // SAFETY: `cur_ptr` はこのアリーナが所有する有効なチャンク。
+        let chunk = unsafe { cur_ptr.as_mut() };
+        let data_base = unsafe { chunk_data_ptr(cur_ptr) } as usize;
+        let p = ptr.as_ptr() as usize;
+        if p < data_base || p.saturating_add(old_size) != data_base + chunk.used {
+            return false;
+        }
+        let delta = new_size - old_size;
+        let Some(new_used) = chunk.used.checked_add(delta) else {
+            return false;
+        };
+        if new_used > chunk.data_cap {
+            return false;
+        }
+        if !core.charge_work(delta) {
+            return false;
+        }
+        chunk.used = new_used;
+        true
+    }
+
     /// 確保した全チャンクを `Allocator` へ返却する。
     pub fn destroy(&mut self, core: &mut AllocCore<'_>) {
         let head = self.head.take();

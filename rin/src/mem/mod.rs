@@ -20,7 +20,7 @@ use crate::alloc::Allocator;
 #[allow(unused_imports)]
 pub(crate) use arena::{PermArena, WorkArena, WorkMark};
 #[allow(unused_imports)]
-pub(crate) use containers::{RawMap, RawStr, RawVec};
+pub(crate) use containers::{RawMap, RawStr, RawVec, WorkBox, fnv1a_bytes, fnv1a_u32};
 #[allow(unused_imports)]
 pub(crate) use obj_heap::{ObjBlock, ObjHeap};
 

@@ -211,7 +211,7 @@ impl<'a> Compiler<'a> {
                         continue;
                     }
                     let arm = &ms.arms[ms.idx];
-                    let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
+                    let pat_idx = self.chunk().add_pattern(arm.pattern.to_owned_pattern());
                     let try_ip = self.emit(
                         Op::TryMatch {
                             pat_idx,
@@ -240,7 +240,7 @@ impl<'a> Compiler<'a> {
                         is_tail: ms.is_tail,
                         span: ms.span,
                     })));
-                    self.push_body(steps, &arm.body, ms.is_tail);
+                    self.push_body(steps, arm.body.as_slice(), ms.is_tail);
                 }
                 Step::MatchAfterArm(mut ma) => {
                     let arm = &ma.arms[ma.idx];

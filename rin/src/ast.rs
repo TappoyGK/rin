@@ -1,8 +1,11 @@
-//! 構文解析で生成する抽象構文木（AST）とパターン表現を定義する。
+//! 作業領域 (`WorkArena`) 上に構築する抽象構文木（AST）とパターン表現を定義する。
+//!
+//! すべてのノードは作業領域の巻き戻しで一括解放されるため、`Copy` かつ `Drop` 不要となる。
 
 use crate::error::Span;
+use crate::mem::{RawStr, RawVec, WorkBox};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Expr {
     pub span: Span,
     pub kind: ExprKind,
@@ -14,339 +17,127 @@ impl Expr {
     }
 }
 
-const SHALLOW_EXPR_DEPTH: usize = 32;
-
-impl Drop for Expr {
-    #[inline]
-    fn drop(&mut self) {
-        self.drop_shallow(0);
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct StructExpr {
+    pub name: RawStr,
+    pub fields: RawVec<(RawStr, Expr)>,
 }
 
-impl Expr {
-    fn drop_shallow(&mut self, depth: usize) {
-        if !has_expr_children(&self.kind) {
-            return;
-        }
-        if depth >= SHALLOW_EXPR_DEPTH {
-            self.drop_iter();
-            return;
-        }
-        match std::mem::replace(&mut self.kind, ExprKind::None) {
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Bool(_)
-            | ExprKind::Char(_)
-            | ExprKind::Str(_)
-            | ExprKind::None
-            | ExprKind::Ident(_)
-            | ExprKind::Import { .. }
-            | ExprKind::Export { .. }
-            | ExprKind::Variant { data: None, .. } => {}
-            ExprKind::List(mut items) | ExprKind::Tuple(mut items) => {
-                for item in &mut items {
-                    item.drop_shallow(depth + 1);
-                }
-            }
-            ExprKind::Struct { mut fields, .. } => {
-                for (_, v) in &mut fields {
-                    v.drop_shallow(depth + 1);
-                }
-            }
-            ExprKind::Variant {
-                data: Some(mut d), ..
-            }
-            | ExprKind::Some(mut d)
-            | ExprKind::Ok(mut d)
-            | ExprKind::Err(mut d)
-            | ExprKind::Field { target: mut d, .. }
-            | ExprKind::Def { value: mut d, .. } => d.drop_shallow(depth + 1),
-            ExprKind::Index {
-                mut target,
-                mut index,
-            } => {
-                target.drop_shallow(depth + 1);
-                index.drop_shallow(depth + 1);
-            }
-            ExprKind::With {
-                mut target,
-                mut fields,
-            } => {
-                target.drop_shallow(depth + 1);
-                for (_, v) in &mut fields {
-                    v.drop_shallow(depth + 1);
-                }
-            }
-            ExprKind::Defn { mut body, .. } | ExprKind::Fn { mut body, .. } => {
-                for item in &mut body {
-                    item.drop_shallow(depth + 1);
-                }
-            }
-            ExprKind::Let {
-                mut bindings,
-                mut body,
-            } => {
-                for (_, v) in &mut bindings {
-                    v.drop_shallow(depth + 1);
-                }
-                for item in &mut body {
-                    item.drop_shallow(depth + 1);
-                }
-            }
-            ExprKind::If {
-                mut cond,
-                mut then_branch,
-                mut else_branch,
-            } => {
-                cond.drop_shallow(depth + 1);
-                then_branch.drop_shallow(depth + 1);
-                else_branch.drop_shallow(depth + 1);
-            }
-            ExprKind::When { mut cond, mut body } => {
-                cond.drop_shallow(depth + 1);
-                for item in &mut body {
-                    item.drop_shallow(depth + 1);
-                }
-            }
-            ExprKind::Match {
-                mut scrutinee,
-                mut arms,
-            } => {
-                scrutinee.drop_shallow(depth + 1);
-                for arm in &mut arms {
-                    for item in &mut arm.body {
-                        item.drop_shallow(depth + 1);
-                    }
-                }
-            }
-            ExprKind::Call {
-                mut callee,
-                mut args,
-            } => {
-                callee.drop_shallow(depth + 1);
-                for arg in &mut args {
-                    arg.drop_shallow(depth + 1);
-                }
-            }
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn drop_iter(&mut self) {
-        let mut next = None;
-        let mut work = Vec::new();
-        take_expr_children(&mut self.kind, &mut next, &mut work);
-        loop {
-            let mut cur = match next.take() {
-                Some(c) => c,
-                None => match work.pop() {
-                    Some(c) => c,
-                    None => break,
-                },
-            };
-            take_expr_children(&mut cur.kind, &mut next, &mut work);
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct VariantExpr {
+    pub type_name: RawStr,
+    pub variant: RawStr,
+    pub data: Option<WorkBox<Expr>>,
 }
 
-#[inline(always)]
-fn has_expr_children(kind: &ExprKind) -> bool {
-    !matches!(
-        kind,
-        ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Bool(_)
-            | ExprKind::Char(_)
-            | ExprKind::Str(_)
-            | ExprKind::None
-            | ExprKind::Ident(_)
-            | ExprKind::Import { .. }
-            | ExprKind::Export { .. }
-            | ExprKind::Variant { data: None, .. }
-    )
+#[derive(Debug, Clone, Copy)]
+pub struct DefnExpr {
+    pub name: RawStr,
+    pub params: RawVec<RawStr>,
+    pub body: RawVec<Expr>,
 }
 
-#[inline(always)]
-fn push_if_non_leaf(expr: Expr, next: &mut Option<Expr>, work: &mut Vec<Expr>) {
-    if has_expr_children(&expr.kind) {
-        if next.is_none() {
-            *next = Some(expr);
-        } else {
-            work.push(expr);
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct FnExpr {
+    pub params: RawVec<RawStr>,
+    pub body: RawVec<Expr>,
 }
 
-fn take_expr_children(kind: &mut ExprKind, next: &mut Option<Expr>, work: &mut Vec<Expr>) {
-    match std::mem::replace(kind, ExprKind::None) {
-        ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::Bool(_)
-        | ExprKind::Char(_)
-        | ExprKind::Str(_)
-        | ExprKind::None
-        | ExprKind::Ident(_)
-        | ExprKind::Import { .. }
-        | ExprKind::Export { .. }
-        | ExprKind::Variant { data: None, .. } => {}
-        ExprKind::List(items) | ExprKind::Tuple(items) => {
-            for item in items {
-                push_if_non_leaf(item, next, work);
-            }
-        }
-        ExprKind::Struct { fields, .. } => {
-            for (_, v) in fields {
-                push_if_non_leaf(v, next, work);
-            }
-        }
-        ExprKind::Variant { data: Some(d), .. }
-        | ExprKind::Some(d)
-        | ExprKind::Ok(d)
-        | ExprKind::Err(d)
-        | ExprKind::Field { target: d, .. }
-        | ExprKind::Def { value: d, .. } => push_if_non_leaf(*d, next, work),
-        ExprKind::Index { target, index } => {
-            push_if_non_leaf(*target, next, work);
-            push_if_non_leaf(*index, next, work);
-        }
-        ExprKind::With { target, fields } => {
-            push_if_non_leaf(*target, next, work);
-            for (_, v) in fields {
-                push_if_non_leaf(v, next, work);
-            }
-        }
-        ExprKind::Defn { body, .. } | ExprKind::Fn { body, .. } => {
-            for item in body {
-                push_if_non_leaf(item, next, work);
-            }
-        }
-        ExprKind::Let { bindings, body } => {
-            for (_, v) in bindings {
-                push_if_non_leaf(v, next, work);
-            }
-            for item in body {
-                push_if_non_leaf(item, next, work);
-            }
-        }
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            push_if_non_leaf(*cond, next, work);
-            push_if_non_leaf(*then_branch, next, work);
-            push_if_non_leaf(*else_branch, next, work);
-        }
-        ExprKind::When { cond, body } => {
-            push_if_non_leaf(*cond, next, work);
-            for item in body {
-                push_if_non_leaf(item, next, work);
-            }
-        }
-        ExprKind::Match { scrutinee, arms } => {
-            push_if_non_leaf(*scrutinee, next, work);
-            for arm in arms {
-                for item in arm.body {
-                    push_if_non_leaf(item, next, work);
-                }
-            }
-        }
-        ExprKind::Call { callee, args } => {
-            push_if_non_leaf(*callee, next, work);
-            for arg in args {
-                push_if_non_leaf(arg, next, work);
-            }
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct LetExpr {
+    pub bindings: RawVec<(RawStr, Expr)>,
+    pub body: RawVec<Expr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),
     Bool(bool),
     Char(char),
-    Str(String),
+    Str(RawStr),
     None,
-    Ident(String),
-    List(Vec<Expr>),
-    Tuple(Vec<Expr>),
-    Struct {
-        name: String,
-        fields: Vec<(String, Expr)>,
-    },
-    Variant {
-        type_name: String,
-        variant: String,
-        data: Option<Box<Expr>>,
-    },
-    Some(Box<Expr>),
-    Ok(Box<Expr>),
-    Err(Box<Expr>),
+    Ident(RawStr),
+    List(RawVec<Expr>),
+    Tuple(RawVec<Expr>),
+    Struct(WorkBox<StructExpr>),
+    Variant(WorkBox<VariantExpr>),
+    Some(WorkBox<Expr>),
+    Ok(WorkBox<Expr>),
+    Err(WorkBox<Expr>),
     Field {
-        target: Box<Expr>,
-        field: String,
+        target: WorkBox<Expr>,
+        field: RawStr,
     },
     Index {
-        target: Box<Expr>,
-        index: Box<Expr>,
+        target: WorkBox<Expr>,
+        index: WorkBox<Expr>,
     },
     With {
-        target: Box<Expr>,
-        fields: Vec<(String, Expr)>,
+        target: WorkBox<Expr>,
+        fields: RawVec<(RawStr, Expr)>,
     },
     Def {
-        name: String,
-        value: Box<Expr>,
+        name: RawStr,
+        value: WorkBox<Expr>,
     },
     Import {
-        name: String,
+        name: RawStr,
     },
     Export {
-        names: Vec<String>,
+        names: RawVec<RawStr>,
     },
-    Defn {
-        name: String,
-        params: Vec<String>,
-        body: Vec<Expr>,
-    },
-    Fn {
-        params: Vec<String>,
-        body: Vec<Expr>,
-    },
-    Let {
-        bindings: Vec<(String, Expr)>,
-        body: Vec<Expr>,
-    },
+    Defn(WorkBox<DefnExpr>),
+    Fn(WorkBox<FnExpr>),
+    Let(WorkBox<LetExpr>),
     If {
-        cond: Box<Expr>,
-        then_branch: Box<Expr>,
-        else_branch: Box<Expr>,
+        cond: WorkBox<Expr>,
+        then_branch: WorkBox<Expr>,
+        else_branch: WorkBox<Expr>,
     },
     When {
-        cond: Box<Expr>,
-        body: Vec<Expr>,
+        cond: WorkBox<Expr>,
+        body: RawVec<Expr>,
     },
     Match {
-        scrutinee: Box<Expr>,
-        arms: Vec<MatchArm>,
+        scrutinee: WorkBox<Expr>,
+        arms: RawVec<MatchArm>,
     },
     Call {
-        callee: Box<Expr>,
-        args: Vec<Expr>,
+        callee: WorkBox<Expr>,
+        args: RawVec<Expr>,
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct MatchArm {
     pub span: Span,
     pub pattern: Pattern,
-    pub body: Vec<Expr>,
+    pub body: RawVec<Expr>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pattern {
+    Wildcard,
+    Int(i64),
+    Bool(bool),
+    Char(char),
+    Str(RawStr),
+    None,
+    Some(Option<RawStr>),
+    Ok(Option<RawStr>),
+    Err(Option<RawStr>),
+    Variant {
+        type_name: RawStr,
+        variant: RawStr,
+        binding: Option<RawStr>,
+    },
+    Var(RawStr),
+}
+
+/// バイトコード側が一時的に所有するパターン（ステップ 4 で永続領域 `Pattern` へ統合予定）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OwnedPattern {
     Wildcard,
     Int(i64),
     Bool(bool),
@@ -364,27 +155,56 @@ pub enum Pattern {
     Var(String),
 }
 
+impl Pattern {
+    pub(crate) fn to_owned_pattern(self) -> OwnedPattern {
+        match self {
+            Pattern::Wildcard => OwnedPattern::Wildcard,
+            Pattern::Int(n) => OwnedPattern::Int(n),
+            Pattern::Bool(b) => OwnedPattern::Bool(b),
+            Pattern::Char(c) => OwnedPattern::Char(c),
+            Pattern::Str(s) => OwnedPattern::Str(s.as_str().to_owned()),
+            Pattern::None => OwnedPattern::None,
+            Pattern::Some(b) => OwnedPattern::Some(b.map(|s| s.as_str().to_owned())),
+            Pattern::Ok(b) => OwnedPattern::Ok(b.map(|s| s.as_str().to_owned())),
+            Pattern::Err(b) => OwnedPattern::Err(b.map(|s| s.as_str().to_owned())),
+            Pattern::Variant {
+                type_name,
+                variant,
+                binding,
+            } => OwnedPattern::Variant {
+                type_name: type_name.as_str().to_owned(),
+                variant: variant.as_str().to_owned(),
+                binding: binding.map(|s| s.as_str().to_owned()),
+            },
+            Pattern::Var(s) => OwnedPattern::Var(s.as_str().to_owned()),
+        }
+    }
+}
+
 pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match &expr.kind {
-        ExprKind::List(xs)
-        | ExprKind::Tuple(xs)
-        | ExprKind::Fn { body: xs, .. }
-        | ExprKind::Defn { body: xs, .. } => out.extend(xs),
-        ExprKind::Struct { fields, .. } => out.extend(fields.iter().map(|(_, e)| e)),
+        ExprKind::List(xs) | ExprKind::Tuple(xs) => out.extend(xs.as_slice()),
+        ExprKind::Fn(f) => out.extend(f.body.as_slice()),
+        ExprKind::Defn(d) => out.extend(d.body.as_slice()),
+        ExprKind::Struct(s) => out.extend(s.fields.as_slice().iter().map(|(_, e)| e)),
         ExprKind::Some(x)
         | ExprKind::Ok(x)
         | ExprKind::Err(x)
         | ExprKind::Def { value: x, .. }
-        | ExprKind::Field { target: x, .. } => out.push(x),
-        ExprKind::Variant { data, .. } => out.extend(data.as_deref()),
+        | ExprKind::Field { target: x, .. } => out.push(x.as_ref()),
+        ExprKind::Variant(v) => {
+            if let Some(d) = &v.data {
+                out.push(d.as_ref());
+            }
+        }
         ExprKind::Index { target, index } => out.extend([target.as_ref(), index.as_ref()]),
         ExprKind::With { target, fields } => {
-            out.push(target);
-            out.extend(fields.iter().map(|(_, e)| e));
+            out.push(target.as_ref());
+            out.extend(fields.as_slice().iter().map(|(_, e)| e));
         }
-        ExprKind::Let { bindings, body } => {
-            out.extend(bindings.iter().map(|(_, e)| e));
-            out.extend(body);
+        ExprKind::Let(l) => {
+            out.extend(l.bindings.as_slice().iter().map(|(_, e)| e));
+            out.extend(l.body.as_slice());
         }
         ExprKind::If {
             cond,
@@ -392,18 +212,18 @@ pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
             else_branch,
         } => out.extend([cond.as_ref(), then_branch.as_ref(), else_branch.as_ref()]),
         ExprKind::When { cond, body } => {
-            out.push(cond);
-            out.extend(body);
+            out.push(cond.as_ref());
+            out.extend(body.as_slice());
         }
         ExprKind::Match { scrutinee, arms } => {
-            out.push(scrutinee);
-            for arm in arms {
-                out.extend(&arm.body);
+            out.push(scrutinee.as_ref());
+            for arm in arms.as_slice() {
+                out.extend(arm.body.as_slice());
             }
         }
         ExprKind::Call { callee, args } => {
-            out.push(callee);
-            out.extend(args);
+            out.push(callee.as_ref());
+            out.extend(args.as_slice());
         }
         _ => {}
     }

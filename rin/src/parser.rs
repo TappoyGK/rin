@@ -1,4 +1,4 @@
-//! 字句トークン列から AST を構築する。
+//! 字句トークン列から作業領域 (`WorkArena`) 上の AST を構築する。
 //!
 //! 深い入れ子でもネイティブスタックを消費しないよう、明示的スタックで構文解析する。
 
@@ -8,118 +8,91 @@ mod primary;
 mod resume;
 use frames::*;
 
-use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
-use crate::error::{Error, Span};
-use crate::lexer::{Token, TokenKind, tokenize_into};
+use crate::alloc::HeapAllocator;
+use crate::ast::{
+    DefnExpr, Expr, ExprKind, FnExpr, LetExpr, MatchArm, Pattern, StructExpr, VariantExpr,
+};
+use crate::error::{Error, ErrorKind, Span};
+use crate::lexer::{WorkLexer, WorkToken, WorkTokenKind};
+use crate::mem::{AllocCore, RawStr, RawVec, RegionConfig, WorkArena, WorkBox};
 
 /// 構文解析および AST の入れ子深さの絶対上限。
 pub(crate) const MAX_SYNTAX_NESTING: usize = 256;
 
-/// 構文解析器が再利用する作業バッファ。
-///
-/// 小さな入力ではバッファを再利用し、評価終了時（エラー時を含む）に即座に中身と過大領域を解放する。
-pub(crate) struct ParseScratch {
-    tokens: Vec<Token>,
-    frames: Vec<ParseFrame>,
-    exprs: Vec<Expr>,
+/// `fmt` や `test` など `Pool` の外から構文木を所有するためのラッパー。
+pub(crate) struct OwnedAst {
+    work: WorkArena,
+    exprs: RawVec<Expr>,
 }
 
-impl ParseScratch {
-    pub(crate) fn new() -> Self {
-        Self {
-            tokens: Vec::new(),
-            frames: Vec::new(),
-            exprs: Vec::new(),
-        }
-    }
-
-    /// 評価の終了時（エラー時を含む）に AST・トークン列を即座に解放し、過大なバッファを縮退させる。
-    pub(crate) fn reset_after_eval(&mut self) {
-        self.exprs.clear();
-        if self.exprs.capacity() > 16 {
-            self.exprs = Vec::new();
-        }
-        self.tokens.clear();
-        if self.tokens.capacity() > 64 {
-            self.tokens = Vec::new();
-        }
-        self.frames.clear();
-        if self.frames.capacity() > 32 {
-            self.frames = Vec::new();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn capacities(&self) -> (usize, usize, usize) {
-        (
-            self.tokens.capacity(),
-            self.frames.capacity(),
-            self.exprs.capacity(),
-        )
+impl OwnedAst {
+    pub(crate) fn exprs(&self) -> &[Expr] {
+        self.exprs.as_slice()
     }
 }
 
-/// 評価スコープ終了時に `ParseScratch` を確実に解放する RAII ガード。
-pub(crate) struct ParseScratchGuard<'a>(&'a mut ParseScratch);
-
-impl<'a> ParseScratchGuard<'a> {
-    pub(crate) fn new(scratch: &'a mut ParseScratch) -> Self {
-        Self(scratch)
-    }
-
-    pub(crate) fn parse<'s>(&'s mut self, input: &str) -> Result<&'s [Expr], Error> {
-        parse_program_with_scratch(input, self.0)
-    }
-}
-
-impl Drop for ParseScratchGuard<'_> {
+impl Drop for OwnedAst {
     fn drop(&mut self) {
-        self.0.reset_after_eval();
+        let mut alloc = HeapAllocator;
+        let mut core = AllocCore::new(&mut alloc, usize::MAX);
+        self.work.destroy(&mut core);
     }
 }
 
-/// 作業バッファを再利用して Rin ソース文字列を解析する。
-pub(crate) fn parse_program_with_scratch<'s>(
+/// 作業領域 `WorkArena` 上へ Rin ソース文字列を解析する（システムヒープ不使用・ストリーミング字句解析）。
+pub(crate) fn parse_program_work(
     input: &str,
-    scratch: &'s mut ParseScratch,
-) -> Result<&'s [Expr], Error> {
-    parse_with_mode(input, scratch, false)
+    work: &mut WorkArena,
+    core: &mut AllocCore<'_>,
+    test_mode: bool,
+) -> Result<RawVec<Expr>, Error> {
+    let mut lexer = WorkLexer::new(input);
+    let first = lexer.next_token(work, core)?;
+    let mut frames = RawVec::<ParseFrame>::new();
+    let mut exprs = RawVec::<Expr>::new();
+    let mut parser = Parser {
+        test_mode,
+        lexer,
+        cur: first,
+        next: None,
+        frames: &mut frames,
+        work,
+        core,
+    };
+    while !parser.at_eof() {
+        let expr = parser.parse_expr_iter()?;
+        if exprs.push_work(parser.work, parser.core, expr).is_none() {
+            return Err(parser.oom(expr.span));
+        }
+    }
+    Ok(exprs)
 }
 
-pub(crate) fn parse_tests(input: &str) -> Result<Vec<Expr>, Error> {
+pub(crate) fn parse_tests(input: &str) -> Result<OwnedAst, Error> {
     parse_owned(input, true)
 }
 
-pub(crate) fn parse_owned(input: &str, test_mode: bool) -> Result<Vec<Expr>, Error> {
-    let mut scratch = ParseScratch::new();
-    parse_with_mode(input, &mut scratch, test_mode)?;
-    Ok(std::mem::take(&mut scratch.exprs))
-}
-
-fn parse_with_mode<'s>(
-    input: &str,
-    scratch: &'s mut ParseScratch,
-    test_mode: bool,
-) -> Result<&'s [Expr], Error> {
-    tokenize_into(input, &mut scratch.tokens)?;
-    scratch.exprs.clear();
-    let mut parser = Parser {
-        tokens: &scratch.tokens,
-        pos: 0,
-        frames: &mut scratch.frames,
-        test_mode,
-    };
-    while !parser.at_eof() {
-        scratch.exprs.push(parser.parse_expr_iter()?);
+pub(crate) fn parse_owned(input: &str, test_mode: bool) -> Result<OwnedAst, Error> {
+    let mut alloc = HeapAllocator;
+    let mut core = AllocCore::new(&mut alloc, usize::MAX);
+    let mut work = WorkArena::new(RegionConfig::new(4 * 1024, 64 * 1024));
+    match parse_program_work(input, &mut work, &mut core, test_mode) {
+        Ok(exprs) => Ok(OwnedAst { work, exprs }),
+        Err(e) => {
+            work.destroy(&mut core);
+            Err(e)
+        }
     }
-    Ok(&scratch.exprs)
 }
 
-struct Parser<'f> {
+struct Parser<'s, 'f, 'c> {
     test_mode: bool,
-    tokens: &'f [Token],
-    pos: usize,
-    frames: &'f mut Vec<ParseFrame>,
+    lexer: WorkLexer<'s>,
+    cur: WorkToken,
+    next: Option<WorkToken>,
+    frames: &'f mut RawVec<ParseFrame>,
+    work: &'f mut WorkArena,
+    core: &'f mut AllocCore<'c>,
 }
 
 #[cfg(test)]
@@ -132,40 +105,71 @@ enum NextStep {
     HaveExpr(Expr, usize),
 }
 
-impl Parser<'_> {
-    #[inline(always)]
-    fn peek(&self) -> &Token {
-        &self.tokens[self.pos]
+impl Parser<'_, '_, '_> {
+    #[cold]
+    pub(super) fn oom(&self, span: Span) -> Error {
+        Error::new(
+            "eval.limits",
+            ErrorKind::TooMuchMemory,
+            span,
+            format!("memory limit exceeded ({} bytes)", self.core.max_bytes()),
+        )
+    }
+
+    pub(super) fn push_frame(&mut self, frame: ParseFrame, span: Span) -> Result<(), Error> {
+        if self.frames.push_work(self.work, self.core, frame).is_none() {
+            return Err(self.oom(span));
+        }
+        Ok(())
+    }
+
+    pub(super) fn alloc_box<T>(&mut self, val: T, span: Span) -> Result<WorkBox<T>, Error> {
+        WorkBox::new(self.work, self.core, val).ok_or_else(|| self.oom(span))
     }
 
     #[inline(always)]
-    fn peek_next(&self) -> Option<&Token> {
-        self.tokens.get(self.pos + 1)
+    fn peek(&self) -> WorkToken {
+        self.cur
+    }
+
+    #[inline(always)]
+    fn peek_next(&mut self) -> Result<Option<WorkToken>, Error> {
+        if self.cur.kind == WorkTokenKind::Eof {
+            return Ok(None);
+        }
+        if self.next.is_none() {
+            self.next = Some(self.lexer.next_token(self.work, self.core)?);
+        }
+        Ok(self.next)
     }
 
     #[inline(always)]
     fn at_eof(&self) -> bool {
-        self.peek().kind == TokenKind::Eof
+        self.cur.kind == WorkTokenKind::Eof
     }
 
     #[inline(always)]
-    fn advance(&mut self) {
-        if !self.at_eof() {
-            self.pos += 1;
+    fn advance(&mut self) -> Result<(), Error> {
+        if self.cur.kind != WorkTokenKind::Eof {
+            self.cur = match self.next.take() {
+                Some(tok) => tok,
+                None => self.lexer.next_token(self.work, self.core)?,
+            };
         }
+        Ok(())
     }
 
-    fn bump(&mut self) -> Token {
-        let tok = self.tokens[self.pos].clone();
-        self.advance();
-        tok
+    fn bump(&mut self) -> Result<WorkToken, Error> {
+        let tok = self.cur;
+        self.advance()?;
+        Ok(tok)
     }
 
-    fn expect(&mut self, expected: TokenKind, what: &str) -> Result<Span, Error> {
+    fn expect(&mut self, expected: WorkTokenKind, what: &str) -> Result<Span, Error> {
         let tok = self.peek();
         if tok.kind == expected {
             let span = tok.span;
-            self.advance();
+            self.advance()?;
             Ok(span)
         } else {
             Err(Error::parse(
@@ -176,10 +180,10 @@ impl Parser<'_> {
         }
     }
 
-    fn expect_ident(&mut self, what: &str) -> Result<(String, Span), Error> {
-        let tok = self.bump();
+    fn expect_ident(&mut self, what: &str) -> Result<(RawStr, Span), Error> {
+        let tok = self.bump()?;
         match tok.kind {
-            TokenKind::Ident(name) => Ok((name, tok.span)),
+            WorkTokenKind::Ident(name) => Ok((name, tok.span)),
             _ => Err(Error::parse(
                 "src.syntax",
                 tok.span,
@@ -213,29 +217,26 @@ impl Parser<'_> {
                 NextStep::HaveExpr(mut expr, mut depth) => {
                     // 後置アクセス（`.` と隣接 `[`）はここで処理する。
                     loop {
-                        let next_kind = &self.peek().kind;
-                        let next_span = self.peek().span;
-                        let next_attached = self.peek().attached;
-                        if *next_kind == TokenKind::Dot {
-                            Self::check_nesting(self.frames.len() + depth + 1, next_span)?;
-                            self.advance();
+                        let next_tok = self.peek();
+                        if next_tok.kind == WorkTokenKind::Dot {
+                            Self::check_nesting(self.frames.len() + depth + 1, next_tok.span)?;
+                            self.advance()?;
                             let (field, _) = self.expect_ident("field name after '.'")?;
                             let span = expr.span;
-                            expr = Expr::new(
-                                span,
-                                ExprKind::Field {
-                                    target: Box::new(expr),
-                                    field,
-                                },
-                            );
+                            let target = self.alloc_box(expr, span)?;
+                            expr = Expr::new(span, ExprKind::Field { target, field });
                             depth += 1;
-                        } else if *next_kind == TokenKind::LBracket && next_attached {
-                            Self::check_nesting(self.frames.len() + depth + 1, next_span)?;
-                            self.advance();
-                            self.frames.push(ParseFrame::PostfixIndex {
-                                target: Box::new(expr),
-                                target_depth: depth,
-                            });
+                        } else if next_tok.kind == WorkTokenKind::LBracket && next_tok.attached {
+                            Self::check_nesting(self.frames.len() + depth + 1, next_tok.span)?;
+                            self.advance()?;
+                            let target = self.alloc_box(expr, next_tok.span)?;
+                            self.push_frame(
+                                ParseFrame::PostfixIndex {
+                                    target,
+                                    target_depth: depth,
+                                },
+                                next_tok.span,
+                            )?;
                             next = NextStep::StartExpr;
                             continue 'outer;
                         } else {

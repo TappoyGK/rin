@@ -16,7 +16,7 @@ use crate::compiler::{compile_program, compile_program_parts};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, ErrorKind, Limits, Span};
 use crate::math::MathFma;
-use crate::parser::{ParseScratch, ParseScratchGuard};
+use crate::parser::parse_program_work;
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
 
@@ -70,7 +70,6 @@ pub(super) struct EnvState<'a> {
     module_ids: BTreeMap<String, u32>,
     module_names: Vec<String>,
     module_envs: Vec<Vec<Option<RVal>>>,
-    parse_scratch: ParseScratch,
 }
 
 fn bound_names<'a>(

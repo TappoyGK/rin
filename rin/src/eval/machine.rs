@@ -139,7 +139,6 @@ impl<'a> EnvState<'a> {
             module_ids: BTreeMap::new(),
             module_names: Vec::new(),
             module_envs: Vec::new(),
-            parse_scratch: ParseScratch::new(),
         }
     }
 
@@ -153,11 +152,19 @@ impl<'a> EnvState<'a> {
     }
 
     pub(super) fn eval_building(&mut self, source: &str) -> Result<Value, Error> {
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals, false)?
-        };
+        let mark = self.pool.work.mark(&self.pool.core);
+        let chunk = (|| {
+            let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            compile_program(
+                exprs.as_slice(),
+                None,
+                &mut self.syms,
+                &self.globals,
+                false,
+            )
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let chunk = chunk?;
         let mark = self.pool.work.mark(&self.pool.core);
         let res = {
             let mut runner = self.runner(None, false);
@@ -175,11 +182,19 @@ impl<'a> EnvState<'a> {
         source: &str,
         bindings: &[(&str, Value)],
     ) -> Result<Value, Error> {
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals, true)?
-        };
+        let mark = self.pool.work.mark(&self.pool.core);
+        let chunk = (|| {
+            let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            compile_program(
+                exprs.as_slice(),
+                None,
+                &mut self.syms,
+                &self.globals,
+                true,
+            )
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        let chunk = chunk?;
 
         if bindings.is_empty() {
             let mark = self.pool.work.mark(&self.pool.core);

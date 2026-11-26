@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use crate::ast::Pattern;
+use crate::ast::OwnedPattern as Pattern;
 use crate::bytecode::{BuiltinId, Op};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, Span, StackFrame};

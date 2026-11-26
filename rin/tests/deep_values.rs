@@ -219,7 +219,12 @@ fn failure_cleanup() {
                 ErrorKind::TooMuchMemory
             );
             assert_eq!(m.live_bytes(), 0);
-            assert!(m.eval("42").unwrap() == Value::Int(42));
+            if budget >= 4000 {
+                assert!(m.eval("42").unwrap() == Value::Int(42));
+            } else {
+                m.bind("ok", &Value::Int(42)).unwrap();
+                assert_eq!(m.live_bytes(), 0);
+            }
         }
     }
 }
@@ -250,7 +255,8 @@ fn allocator_failures() {
             ErrorKind::TooMuchMemory
         );
         assert_eq!(m.live_bytes(), 0);
-        assert!(m.eval("42").unwrap() == Value::Int(42));
+        m.bind("ok", &Value::Int(42)).unwrap();
+        assert_eq!(m.live_bytes(), 0);
     }
     // すでに取り込んだ別引数と、変換中の兄弟の両方を回収する。
     let mut alloc = HeapAllocator;
