@@ -69,14 +69,14 @@ fn format(root: Task<'_>, f: &mut fmt::Formatter<'_>, debug: bool) -> fmt::Resul
                     if debug {
                         write!(f, "Char({c:?})")?
                     } else {
-                        write!(f, "{c:?}")?
+                        crate::lexer::write_rin_char(f, *c)?
                     }
                 }
                 Value::Str(s) => {
                     if debug {
                         write!(f, "Str({s:?})")?
                     } else {
-                        write!(f, "{s:?}")?
+                        crate::lexer::write_rin_str(f, s)?
                     }
                 }
                 Value::Ident(s) => {
@@ -231,8 +231,8 @@ fn display(value: &Value, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Resu
         Value::Int(n) => write!(f, "{n}"),
         Value::Float(x) => write!(f, "{x}"),
         Value::Bool(b) => write!(f, "{b}"),
-        Value::Char(c) => write!(f, "{c:?}"),
-        Value::Str(s) => write!(f, "{s:?}"),
+        Value::Char(c) => crate::lexer::write_rin_char(f, *c),
+        Value::Str(s) => crate::lexer::write_rin_str(f, s),
         Value::Ident(s) => write!(f, "'{s}"),
         Value::List(xs) => {
             write!(f, "[")?;

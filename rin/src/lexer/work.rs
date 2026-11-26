@@ -3,7 +3,7 @@
 use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{AllocCore, RawStr, RawVec, WorkArena};
 
-use super::{Lexer, is_char_delimiter, is_ident_continue, is_ident_start, is_quote_rewind_char};
+use super::{Lexer, is_ident_continue, is_ident_start, named_char, unicode};
 
 /// 作業領域 (`WorkArena`) 上に構築する字句トークン種別（`Copy`・システムヒープ不使用）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,7 +121,11 @@ impl Lexer<'_> {
                 WorkTokenKind::Quasiquote
             }
             b'"' => WorkTokenKind::Str(self.lex_work_string(span, work, core)?),
-            b'\'' => self.lex_work_quote_or_char(span, core)?,
+            b'\'' => {
+                self.bump();
+                WorkTokenKind::Quote
+            }
+            b'\\' => self.lex_work_char(span, core)?,
             b'0'..=b'9' => self.lex_work_number(span, false, work, core)?,
             b'-' if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
                 self.bump();
@@ -166,7 +170,6 @@ impl Lexer<'_> {
             b't' => Ok('\t'),
             b'\\' => Ok('\\'),
             b'"' => Ok('"'),
-            b'\'' => Ok('\''),
             b'0' => Ok('\0'),
             b'u' => self.lex_work_unicode_escape(span, core),
             _ => {
@@ -248,78 +251,76 @@ impl Lexer<'_> {
         })
     }
 
-    fn lex_work_quote_or_char(
+    fn lex_work_char(
         &mut self,
         span: Span,
         core: &mut AllocCore<'_>,
     ) -> Result<WorkTokenKind, ErrRecorded> {
-        let saved = (self.pos, self.line, self.col);
-        self.bump(); // 開始の '\''
-        let Some(b) = self.bump() else {
-            return Ok(WorkTokenKind::Quote);
-        };
-        if matches!(b, b'\'' | b'\n' | b'\r') {
-            (self.pos, self.line, self.col) = saved;
-            self.bump();
-            return Ok(WorkTokenKind::Quote);
-        }
-        let ch = if b == b'\\' {
-            match self.lex_work_escape(span, core) {
-                Ok(c) => c,
-                Err(e) => {
-                    if self.peek() == Some(b'\'') {
-                        return Err(e);
-                    }
-                    (self.pos, self.line, self.col) = saved;
-                    self.bump();
-                    return Ok(WorkTokenKind::Quote);
-                }
-            }
-        } else if b < 0x80 {
-            b as char
-        } else {
-            let start = self.pos - 1;
-            while let Some(next) = self.peek() {
-                if (next & 0xC0) != 0x80 {
-                    break;
-                }
-                self.bump();
-            }
-            let Ok(s) = std::str::from_utf8(&self.src[start..self.pos]) else {
-                return Err(core.err_str(
-                    "src.encoding",
-                    ErrorKind::Lex,
-                    span,
-                    "invalid UTF-8 in char literal",
-                ));
-            };
-            let Some(c) = s.chars().next() else {
-                return Err(core.err_str("src.char", ErrorKind::Lex, span, "empty char literal"));
-            };
-            c
-        };
-        if self.peek() != Some(b'\'') {
-            (self.pos, self.line, self.col) = saved;
-            self.bump();
-            return Ok(WorkTokenKind::Quote);
-        }
-        self.bump(); // 閉じの '\''
-        if let Some(after) = self.peek()
-            && !is_char_delimiter(after)
-        {
-            if is_quote_rewind_char(b) {
-                (self.pos, self.line, self.col) = saved;
-                self.bump();
-                return Ok(WorkTokenKind::Quote);
-            }
+        self.bump(); // 開始の '\\'
+        let start = self.pos;
+        let Some(first) = self.bump_char() else {
             return Err(core.err_str(
                 "src.char",
                 ErrorKind::Lex,
                 span,
-                "unexpected character immediately after char literal",
+                "unterminated char literal",
+            ));
+        };
+        if unicode::is_char_forbidden_raw(first) {
+            return Err(core.err_str(
+                "src.char",
+                ErrorKind::Lex,
+                span,
+                "invisible or control character is not allowed directly after '\\' in char literal",
             ));
         }
-        Ok(WorkTokenKind::Char(ch))
+        if first == 'u' && self.peek() == Some(b'{') {
+            return self
+                .lex_work_unicode_escape(span, core)
+                .map(WorkTokenKind::Char);
+        }
+        // 後続が入力末尾または ASCII 非名前文字なら 1 文字で確定（非 ASCII の二分探索を省略）。
+        let Some(next_b) = self.peek() else {
+            return Ok(WorkTokenKind::Char(first));
+        };
+        if next_b < 0x80 && !(next_b.is_ascii_alphanumeric() || next_b == b'_') {
+            return Ok(WorkTokenKind::Char(first));
+        }
+        if unicode::is_char_name_char(first) {
+            let mut count = 1usize;
+            while let Some(nb) = self.peek() {
+                if nb < 0x80 {
+                    if nb.is_ascii_alphanumeric() || nb == b'_' {
+                        self.bump();
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    let next_ch = self.char_at(self.pos);
+                    if !unicode::is_char_name_char(next_ch) {
+                        break;
+                    }
+                    self.bump_char();
+                    count += 1;
+                }
+            }
+            if count == 1 {
+                return Ok(WorkTokenKind::Char(first));
+            }
+            let name = &self.src[start..self.pos];
+            if let Some(ch) = named_char(name) {
+                return Ok(WorkTokenKind::Char(ch));
+            }
+            let name_str = std::str::from_utf8(name).unwrap_or("");
+            return Err(core.err_fmt(
+                "src.char",
+                ErrorKind::Lex,
+                span,
+                format_args!("unknown character name '\\{name_str}'"),
+            ));
+        }
+        Ok(WorkTokenKind::Char(first))
     }
 
     fn lex_work_ident(

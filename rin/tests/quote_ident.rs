@@ -11,23 +11,147 @@ use rin::{Builder, ErrorKind, HeapAllocator, Limits, Schema, Value, ValueTag, ev
 
 #[test]
 fn lex_char_vs_quote_and_unicode_escapes() {
-    assert_eq!(eval("'a'").unwrap(), Value::Char('a'));
-    assert_eq!(eval("'\\n'").unwrap(), Value::Char('\n'));
-    assert_eq!(eval("'\\r'").unwrap(), Value::Char('\r'));
-    assert_eq!(eval("'\\t'").unwrap(), Value::Char('\t'));
-    assert_eq!(eval("'\\\\'").unwrap(), Value::Char('\\'));
-    assert_eq!(eval("'\\''").unwrap(), Value::Char('\''));
-    assert_eq!(eval("'\\\"'").unwrap(), Value::Char('"'));
-    assert_eq!(eval("'\\0'").unwrap(), Value::Char('\0'));
-    assert_eq!(eval("'\\u{20}'").unwrap(), Value::Char(' '));
-    assert_eq!(eval("'\\u{3042}'").unwrap(), Value::Char('あ'));
+    // 文字リテラルの各行（評価・rin fmt 双方）
+    for (src, expected) in [
+        ("\\u{41}", 'A'),
+        ("\\u{1F600}", '😀'),
+        ("\\u{3042}", 'あ'),
+        ("\\a", 'a'),
+        ("\\n", 'n'),
+        ("\\7", '7'),
+        ("\\_", '_'),
+        ("\\日", '日'),
+        ("\\é", 'é'),
+        ("\\u", 'u'),
+        ("\\(", '('),
+        ("\\\\", '\\'),
+        ("\\\"", '"'),
+        ("\\'", '\''),
+        ("\\😀", '😀'),
+        ("\\;", ';'),
+        ("\\`", '`'),
+        ("\\nul", '\0'),
+        ("\\tab", '\t'),
+        ("\\newline", '\n'),
+        ("\\return", '\r'),
+        ("\\space", ' '),
+    ] {
+        assert_eq!(eval(src).unwrap(), Value::Char(expected), "{src}");
+        let formatted = rin::fmt::format(src).unwrap();
+        assert_eq!(formatted.trim_end(), src, "fmt preserves {src}");
+    }
 
-    // `'X'` の直後に区切り以外の文字が続く場合、エスケープでない X が前置記号・開き括弧のときだけ quote から読み直す
+    // 結合文字単独は 1 スカラー値なので文字、基底文字＋結合文字は 2 スカラー値なので名前扱いになり src.char エラー
+    // また Z（Zs・Zl・Zp）・Cc・Cf の文字や入力末尾が `\` 直後に来た場合も src.char エラー
+    assert_eq!(eval("\\\u{0301}").unwrap(), Value::Char('\u{0301}'));
+    for bad_char in [
+        "\\ab",
+        "\\日本",
+        "\\ua",
+        "\\newline1",
+        "\\e\u{0301}",
+        "\\",
+        "\\ ",
+        "\\\t",
+        "\\\n",
+        "\\\r",
+        "\\\0",
+        "\\\x0b",
+        "\\\x0c",
+        "\\\x7f",
+        "\\\u{0085}",
+        "\\\u{00a0}",
+        "\\\u{00ad}",
+        "\\\u{200b}",
+        "\\\u{2028}",
+        "\\\u{2029}",
+        "\\\u{3000}",
+    ] {
+        let err = eval(bad_char).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Lex, "{bad_char}: {err}");
+        assert_eq!(err.rule(), "src.char", "{bad_char}: {err}");
+        let fmt_err = rin::fmt::format(bad_char).unwrap_err();
+        assert_eq!(fmt_err.kind, ErrorKind::Lex, "fmt {bad_char}: {fmt_err}");
+        assert_eq!(fmt_err.rule(), "src.char", "fmt {bad_char}: {fmt_err}");
+    }
+
+    // `\u{H}` の範囲外・空・未閉鎖・7桁超過は src.escape エラー（評価・rin fmt 双方）
+    for bad_esc in [
+        "\\u{}",
+        "\\u{D800}",
+        "\\u{DFFF}",
+        "\\u{110000}",
+        "\\u{0000041}",
+        "\\u{41",
+        "\"\\u{}\"",
+        "\"\\u{D800}\"",
+        "\"\\u{110000}\"",
+        "\"\\'\"",
+    ] {
+        let err = eval(bad_esc).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Lex, "{bad_esc}: {err}");
+        assert_eq!(err.rule(), "src.escape", "{bad_esc}: {err}");
+        let fmt_err = rin::fmt::format(bad_esc).unwrap_err();
+        assert_eq!(fmt_err.kind, ErrorKind::Lex, "fmt {bad_esc}: {fmt_err}");
+        assert_eq!(fmt_err.rule(), "src.escape", "fmt {bad_esc}: {fmt_err}");
+    }
+
+    // 文字列エスケープ（Suz と共通）
+    assert_eq!(
+        eval("\"\\0\\n\\r\\t\\\\\\\"\\u{41}\\u{1F600}'\"").unwrap(),
+        Value::str("\0\n\r\t\\\"A😀'")
+    );
+
+    // 文字リテラルの直後に記号や識別子が続く場合は次のトークンとして読まれる
+    assert_eq!(
+        eval("(list \\a\\b \\u{41}'foo \\('x \\u'y \\newline'z)").unwrap(),
+        Value::list(vec![
+            Value::Char('a'),
+            Value::Char('b'),
+            Value::Char('A'),
+            Value::ident("foo"),
+            Value::Char('('),
+            Value::ident("x"),
+            Value::Char('u'),
+            Value::ident("y"),
+            Value::Char('\n'),
+            Value::ident("z"),
+        ])
+    );
+    assert_eq!(
+        eval("(let (x 1) (list \\(x))").unwrap(),
+        Value::list(vec![Value::Char('('), Value::Int(1)])
+    );
+    assert_eq!(
+        eval("(let (x 1) (list \\u{41}x))").unwrap(),
+        Value::list(vec![Value::Char('A'), Value::Int(1)])
+    );
+    assert_eq!(
+        eval("(let (a 1) (list \\日 \\é'x \\😀a))").unwrap(),
+        Value::list(vec![
+            Value::Char('日'),
+            Value::Char('é'),
+            Value::ident("x"),
+            Value::Char('😀'),
+            Value::Int(1),
+        ])
+    );
+
+    // match パターンの文字リテラル
+    assert_eq!(
+        eval("(match \\newline (\\a 1) (\\newline 2) (_ 3))").unwrap(),
+        Value::Int(2)
+    );
+
+    // `'` は quote だけに使われる（評価・rin fmt 双方）
     assert_eq!(
         eval("'('a 'b)").unwrap(),
         eval("[['quote 'a] ['quote 'b]]").unwrap()
     );
-    assert_eq!(eval("'('a')").unwrap(), eval("['a']").unwrap());
+    assert_eq!(eval("'\nfoo").unwrap(), Value::ident("foo"));
+    assert!(rin::fmt::format("'\nfoo").is_ok());
+    assert!(rin::fmt::format("'('a 'b)").is_ok());
+    assert!(rin::fmt::format("'`'`,x").is_ok());
     assert_eq!(
         eval("'['a 'b]").unwrap(),
         eval("['list ['quote 'a] ['quote 'b]]").unwrap()
@@ -40,48 +164,12 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(err.kind, ErrorKind::Parse);
     assert_eq!(err.rule(), "src.syntax");
 
-    // 単独の開き括弧・前置記号の文字リテラルは直後が区切りなら引き続き文字として読まれる
-    assert_eq!(
-        eval("(list '(' '[' '{' ',' '`')").unwrap(),
-        Value::list(vec![
-            Value::Char('('),
-            Value::Char('['),
-            Value::Char('{'),
-            Value::Char(','),
-            Value::Char('`'),
-        ])
-    );
-
-    // それ以外の `'X'`（英字・数字・`;`・`"`・非ASCII・エスケープ等）の直後に区切り以外が続く場合は src.char 字句エラー
-    for bad in [
-        "'a'b",
-        "(list 'a'(list))",
-        "(list 'a'[1])",
-        "(list 'a'\"s\")",
-        "(list 'a''b')",
-        "(list ';'a\n1)",
-        "(list '\"'x \" \"y\")",
-        "(list '1'a 1)",
-        "(list '9'(+ 1 2))",
-        "(list 'é'x 1)",
-        "'\\u{28}'a",
-        "'\\n'a",
-    ] {
-        let err = eval(bad).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Lex, "{bad}: {err}");
-        assert_eq!(err.rule(), "src.char", "{bad}: {err}");
-        let fmt_err = rin::fmt::format(bad).unwrap_err();
-        assert_eq!(fmt_err.kind, ErrorKind::Lex, "fmt {bad}: {fmt_err}");
-        assert_eq!(fmt_err.rule(), "src.char", "fmt {bad}: {fmt_err}");
-    }
-
     // 非 ASCII 文字の字句エラー・未知エスケープエラーで文字化けしない（評価・rin fmt 双方）
     for (src, rule, expected) in [
         ("é", "src.token", "'é'"),
         ("'é", "src.token", "'é'"),
         ("あ", "src.token", "'あ'"),
         ("\"\\é\"", "src.escape", "\\é"),
-        ("'\\é'", "src.escape", "\\é"),
     ] {
         let err = eval(src).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Lex, "{src}: {err}");
@@ -110,7 +198,7 @@ fn lex_char_vs_quote_and_unicode_escapes() {
 
     // quote としての `'`
     assert_eq!(eval("'foo").unwrap(), Value::ident("foo"));
-    assert_eq!(eval("''a'").unwrap(), Value::Char('a'));
+    assert_eq!(eval("'\\a").unwrap(), Value::Char('a'));
     assert_eq!(eval("'123").unwrap(), Value::Int(123));
     assert_eq!(eval("'\"hi\"").unwrap(), Value::str("hi"));
     assert_eq!(
@@ -261,9 +349,9 @@ fn quasiquote_unquote_splicing_and_nesting() {
         eval("(def x 1) '`'(a `(b ,x))").unwrap(),
         eval("['quasiquote ['quote ['a ['quasiquote ['b ['unquote 'x]]]]]]").unwrap()
     );
-    // 単独の `` '`' `` は引き続きバッククォート文字リテラル
-    assert_eq!(eval("'`'").unwrap(), Value::Char('`'));
-    assert_eq!(eval("(== '`' '\\u{60}')").unwrap(), Value::Bool(true));
+    // バッククォートの文字リテラルは `\` 始まり
+    assert_eq!(eval("\\`").unwrap(), Value::Char('`'));
+    assert_eq!(eval("(== \\` \\u{60})").unwrap(), Value::Bool(true));
     // quote の中の quasiquote でも深さ 0 を超えて unquote を重ねると構文エラー
     let err = eval("'(a `(b ,,x))").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Parse);
@@ -421,13 +509,54 @@ fn tuple_syntax_and_display_roundtrip() {
         ("P {}", "P {}"),
         ("(tuple 1 2)", "(tuple 1 2)"),
         ("'foo", "'foo"),
+        ("\\nul", "\\nul"),
+        ("\\tab", "\\tab"),
+        ("\\newline", "\\newline"),
+        ("\\return", "\\return"),
+        ("\\space", "\\space"),
+        ("\\u{1}", "\\u{1}"),
+        ("\\u{b}", "\\u{b}"),
+        ("\\u{c}", "\\u{c}"),
+        ("\\u{7f}", "\\u{7f}"),
+        ("\\u{80}", "\\u{80}"),
+        ("\\u{a0}", "\\u{a0}"),
+        ("\\u{ad}", "\\u{ad}"),
+        ("\\u{200b}", "\\u{200b}"),
+        ("\\u{2028}", "\\u{2028}"),
+        ("\\u{3000}", "\\u{3000}"),
+        ("\\u{301}", "\\u{301}"),
+        ("\\a", "\\a"),
+        ("\\n", "\\n"),
+        ("\\\\", "\\\\"),
+        ("\\'", "\\'"),
+        ("\\\"", "\\\""),
+        ("\\日", "\\日"),
+        ("\\😀", "\\😀"),
+        (
+            "\"hello world \\0\\n\\r\\t\\\\\\\"'\\u{1}\\u{7f}\\u{85}\\u{200b}\\u{2028}\\u{2029}\\u{202e}\\u{feff}あ😀\"",
+            "\"hello world \\0\\n\\r\\t\\\\\\\"'\\u{1}\\u{7f}\\u{85}\\u{200b}\\u{2028}\\u{2029}\\u{202e}\\u{feff}あ😀\"",
+        ),
+        // 文字列では結合文字（M）・Zs・ZWNJ・ZWJ・タグ文字を生のまま表示する
+        ("\"हिन्दी\"", "\"हिन्दी\""),
+        ("\"か\u{3099}\"", "\"か\u{3099}\""),
+        ("\"👨\u{200d}👩\u{200d}👧\"", "\"👨\u{200d}👩\u{200d}👧\""),
+        ("\"❤\u{fe0f}\"", "\"❤\u{fe0f}\""),
+        (
+            "\"\u{200c}نمی\u{200c}خواهم\"",
+            "\"\u{200c}نمی\u{200c}خواهم\"",
+        ),
+        ("\"\u{3000}全角\u{a0}NBSP\"", "\"\u{3000}全角\u{a0}NBSP\""),
+        (
+            "\"🏴\u{e0067}\u{e0062}\u{e007f}\"",
+            "\"🏴\u{e0067}\u{e0062}\u{e007f}\"",
+        ),
     ] {
         let v = eval(src).unwrap();
-        assert_eq!(v.to_string(), expected_display);
-        assert_eq!(eval(&v.to_string()).unwrap(), v);
+        assert_eq!(v.to_string(), expected_display, "Value Display {src}");
+        assert_eq!(eval(&v.to_string()).unwrap(), v, "Value roundtrip {src}");
 
         let vr = b.eval_ref(src).unwrap();
-        assert_eq!(vr.to_string(), expected_display);
+        assert_eq!(vr.to_string(), expected_display, "ValueRef Display {src}");
     }
 }
 

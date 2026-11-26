@@ -107,10 +107,10 @@ fn language_diagnostics_and_display() {
     for (source, kind, rule) in [
         ("@", ErrorKind::Lex, "src.token"),
         ("\"\\q\"", ErrorKind::Lex, "src.escape"),
-        ("'\\q'", ErrorKind::Lex, "src.escape"),
+        ("\\u{}", ErrorKind::Lex, "src.escape"),
         ("9223372036854775808", ErrorKind::Lex, "src.int"),
         ("1e", ErrorKind::Lex, "src.float"),
-        ("'a'b", ErrorKind::Lex, "src.char"),
+        ("\\ab", ErrorKind::Lex, "src.char"),
         ("(", ErrorKind::Parse, "src.syntax"),
         ("(fn ())", ErrorKind::Parse, "expr.body"),
         ("(match 1 (1.5 0))", ErrorKind::Parse, "pat.kinds"),

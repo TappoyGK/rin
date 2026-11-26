@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- **構文の破壊的変更（文字リテラル `\a` 形式への移行と文字列エスケープの Suz 共通化）**: 文字リテラルを `'a'` から `\` 始まり（`\a`・`\u{H}`・名前つき文字 `\nul` / `\tab` / `\newline` / `\return` / `\space`）へ変更し、`'` を `quote` 専用とした。文字列のエスケープから `\'` を廃止し `\u{H}` を追加して Suz と共通化し、`Value` / `ValueRef` の `Display` 表現も新しい文字リテラル・エスケープ形式へ更新した（[PR #77](https://github.com/TappoyGK/rin/pull/77)）。
+
 - **構文・API の破壊的変更（字句整理・`quote` / `quasiquote`・`ident` 型・`(tuple ...)` の導入）**: リスト `[e1 e2 ...]`、構造体 `Name { f1: e1 f2: e2 }`、`with` のカンマ区切りと旧タプル構文 `(e1, e2)` を廃止し、空白区切りと `(tuple e1 e2 ...)`（2 要素以上）へ移行した。`'` を文字リテラル（`'a'` / `'\n'` / `'\u{H}'` 等、直後に区切り必須）と `quote` に割り当て、`` ` ``（`quasiquote`）・`,`（`unquote`）・`,@`（`unquote_splicing`）を導入し、識別子中および直後の `'` を字句エラーとした。糖衣構文の正規 S 式形式（`(field ...)` / `(index ...)` / `(some ...)` / `(ok ...)` / `(err ...)` / `(variant ...)` / `(struct ...)` / `(with target (f v) ...)`）を通常のソース構文としても受け入れ、`quote` / `quasiquote` 内で糖衣を正規 S 式へ正規化するようにした。不変の識別子値型 `ident`（`==` / `!=` / `<` / `<=` / `>` / `>=` / `sort` / `match` パターン `'foo` / 組み込み `(ident->text i)`・`(text->ident t)` / Rust `Value::Ident`・`ValueTag::Ident`・`val_ident`・`as_ident` / C FFI `RIN_TAG_IDENT`・`rin_ident`・`rin_as_ident` / スキーマ `ident`）を追加し、値の `Display` 表現を Rin ソースとして再入力可能な形（`[1 2 3]`、`P { x: 1 y: 2 }`、`(tuple 1 2)`、`'foo`）へ更新し、`rin fmt` も新構文と `'` / `` ` `` / `,` / `,@` に対応した（[PR #75](https://github.com/TappoyGK/rin/pull/75)）。
 
 - **Rust API の破壊的変更**: `Allocator` トレイトを `unsafe trait` に変更し、確保領域の有効性・整列・非重複・寿命およびサイズ 0 要求の安全性契約を実装側・呼び出し側それぞれについて定義した（独自実装には `unsafe impl Allocator` が必要）。`HeapAllocator` のサイズ 0 確保も要求アラインメントを満たす非 NULL ポインタを返すように統一し、C FFI の `RinAllocator` ではサイズ 0 要求で `alloc` / `dealloc` を呼ばず、`alloc == NULL` のときは `dealloc` の有無によらず標準ヒープで解放するようにした（[PR #73](https://github.com/TappoyGK/rin/pull/73)）。

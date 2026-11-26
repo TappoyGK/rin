@@ -1,9 +1,12 @@
 //! Rin ソース文字列を位置付きの字句トークン列へ分解する。
 
+use std::fmt::{self, Write as _};
+
 #[cfg(feature = "std-value")]
 use crate::error::Error;
 use crate::error::Span;
 
+mod unicode;
 mod work;
 
 pub(crate) use work::{WorkLexer, WorkToken, WorkTokenKind};
@@ -133,6 +136,20 @@ impl<'a> Lexer<'a> {
         Some(b)
     }
 
+    fn bump_char(&mut self) -> Option<char> {
+        let b = self.peek()?;
+        if b < 0x80 {
+            self.bump();
+            Some(b as char)
+        } else {
+            let ch = self.char_at(self.pos);
+            for _ in 0..ch.len_utf8() {
+                self.bump();
+            }
+            Some(ch)
+        }
+    }
+
     fn skip_ws_and_comments(&mut self) -> bool {
         let mut skipped = false;
         loop {
@@ -221,7 +238,11 @@ impl<'a> Lexer<'a> {
                 TokenKind::Quasiquote
             }
             b'"' => TokenKind::Str(self.lex_string(span)?),
-            b'\'' => self.lex_quote_or_char(span)?,
+            b'\'' => {
+                self.bump();
+                TokenKind::Quote
+            }
+            b'\\' => self.lex_char(span)?,
             b'0'..=b'9' => self.lex_number(span, false)?,
             b'-' if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
                 self.bump();
@@ -260,7 +281,6 @@ impl<'a> Lexer<'a> {
             b't' => Ok('\t'),
             b'\\' => Ok('\\'),
             b'"' => Ok('"'),
-            b'\'' => Ok('\''),
             b'0' => Ok('\0'),
             b'u' => self.lex_unicode_escape(span),
             _ => {
@@ -365,66 +385,63 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_quote_or_char(&mut self, span: Span) -> Result<TokenKind, Error> {
-        let saved = (self.pos, self.line, self.col);
-        self.bump(); // 開始の '\''
-        let Some(b) = self.bump() else {
-            return Ok(TokenKind::Quote);
+    fn lex_char(&mut self, span: Span) -> Result<TokenKind, Error> {
+        self.bump(); // 開始の '\\'
+        let start = self.pos;
+        let Some(first) = self.bump_char() else {
+            return Err(Error::lex("src.char", span, "unterminated char literal"));
         };
-        if matches!(b, b'\'' | b'\n' | b'\r') {
-            (self.pos, self.line, self.col) = saved;
-            self.bump();
-            return Ok(TokenKind::Quote);
-        }
-        let ch = if b == b'\\' {
-            match self.lex_escape(span) {
-                Ok(c) => c,
-                Err(e) => {
-                    if self.peek() == Some(b'\'') {
-                        return Err(e);
-                    }
-                    (self.pos, self.line, self.col) = saved;
-                    self.bump();
-                    return Ok(TokenKind::Quote);
-                }
-            }
-        } else if b < 0x80 {
-            b as char
-        } else {
-            let start = self.pos - 1;
-            while let Some(next) = self.peek() {
-                if (next & 0xC0) != 0x80 {
-                    break;
-                }
-                self.bump();
-            }
-            let s = std::str::from_utf8(&self.src[start..self.pos])
-                .map_err(|_| Error::lex("src.encoding", span, "invalid UTF-8 in char literal"))?;
-            s.chars()
-                .next()
-                .ok_or_else(|| Error::lex("src.char", span, "empty char literal"))?
-        };
-        if self.peek() != Some(b'\'') {
-            (self.pos, self.line, self.col) = saved;
-            self.bump();
-            return Ok(TokenKind::Quote);
-        }
-        self.bump(); // 閉じの '\''
-        if let Some(after) = self.peek()
-            && !is_char_delimiter(after)
-        {
-            if is_quote_rewind_char(b) {
-                (self.pos, self.line, self.col) = saved;
-                self.bump();
-                return Ok(TokenKind::Quote);
-            }
+        if unicode::is_char_forbidden_raw(first) {
             return Err(Error::lex(
                 "src.char",
                 span,
-                "unexpected character immediately after char literal",
+                "invisible or control character is not allowed directly after '\\' in char literal",
             ));
         }
-        Ok(TokenKind::Char(ch))
+        if first == 'u' && self.peek() == Some(b'{') {
+            return self.lex_unicode_escape(span).map(TokenKind::Char);
+        }
+        // 後続が入力末尾または ASCII 非名前文字なら 1 文字で確定（非 ASCII の二分探索を省略）。
+        let Some(next_b) = self.peek() else {
+            return Ok(TokenKind::Char(first));
+        };
+        if next_b < 0x80 && !(next_b.is_ascii_alphanumeric() || next_b == b'_') {
+            return Ok(TokenKind::Char(first));
+        }
+        if unicode::is_char_name_char(first) {
+            let mut count = 1usize;
+            while let Some(nb) = self.peek() {
+                if nb < 0x80 {
+                    if nb.is_ascii_alphanumeric() || nb == b'_' {
+                        self.bump();
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    let next_ch = self.char_at(self.pos);
+                    if !unicode::is_char_name_char(next_ch) {
+                        break;
+                    }
+                    self.bump_char();
+                    count += 1;
+                }
+            }
+            if count == 1 {
+                return Ok(TokenKind::Char(first));
+            }
+            let name = &self.src[start..self.pos];
+            if let Some(ch) = named_char(name) {
+                return Ok(TokenKind::Char(ch));
+            }
+            let name_str = std::str::from_utf8(name).unwrap_or("");
+            return Err(Error::lex(
+                "src.char",
+                span,
+                format!("unknown character name '\\{name_str}'"),
+            ));
+        }
+        Ok(TokenKind::Char(first))
     }
 
     fn lex_number(&mut self, span: Span, neg: bool) -> Result<TokenKind, Error> {
@@ -560,10 +577,81 @@ pub(crate) fn is_valid_ident(s: &str) -> bool {
     is_ident_start(first) && bytes[1..].iter().copied().all(is_ident_continue)
 }
 
-pub(crate) fn is_char_delimiter(b: u8) -> bool {
-    b.is_ascii_whitespace() || matches!(b, b';' | b')' | b']' | b'}')
+pub(crate) fn named_char(name: &[u8]) -> Option<char> {
+    match name {
+        b"nul" => Some('\0'),
+        b"tab" => Some('\t'),
+        b"newline" => Some('\n'),
+        b"return" => Some('\r'),
+        b"space" => Some(' '),
+        _ => None,
+    }
 }
 
-pub(crate) fn is_quote_rewind_char(b: u8) -> bool {
-    matches!(b, b'`' | b',' | b'(' | b'[' | b'{')
+/// `[value.display]` に従い `char` 値を Rin 文字リテラル形式で書き出す。
+pub(crate) fn write_rin_char(f: &mut fmt::Formatter<'_>, c: char) -> fmt::Result {
+    match c {
+        '\0' => f.write_str("\\nul"),
+        '\t' => f.write_str("\\tab"),
+        '\n' => f.write_str("\\newline"),
+        '\r' => f.write_str("\\return"),
+        ' ' => f.write_str("\\space"),
+        c if c.is_ascii_control()
+            || (!c.is_ascii() && unicode::is_char_display_escaped_non_ascii(c)) =>
+        {
+            write!(f, "\\u{{{:x}}}", c as u32)
+        }
+        c => {
+            f.write_char('\\')?;
+            f.write_char(c)
+        }
+    }
+}
+
+/// `[value.display]` に従い `string` 値を Rin 文字列リテラル形式で書き出す。
+pub(crate) fn write_rin_str(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    f.write_char('"')?;
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            if (0x20..=0x7E).contains(&b) && b != b'\\' && b != b'"' {
+                i += 1;
+                continue;
+            }
+            if start < i {
+                f.write_str(&s[start..i])?;
+            }
+            match b {
+                b'\0' => f.write_str("\\0")?,
+                b'\n' => f.write_str("\\n")?,
+                b'\r' => f.write_str("\\r")?,
+                b'\t' => f.write_str("\\t")?,
+                b'\\' => f.write_str("\\\\")?,
+                b'"' => f.write_str("\\\"")?,
+                _ => write!(f, "\\u{{{:x}}}", b)?,
+            }
+            i += 1;
+            start = i;
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            let len = ch.len_utf8();
+            if unicode::is_str_display_escaped_non_ascii(ch) {
+                if start < i {
+                    f.write_str(&s[start..i])?;
+                }
+                write!(f, "\\u{{{:x}}}", ch as u32)?;
+                i += len;
+                start = i;
+            } else {
+                i += len;
+            }
+        }
+    }
+    if start < bytes.len() {
+        f.write_str(&s[start..])?;
+    }
+    f.write_char('"')
 }
