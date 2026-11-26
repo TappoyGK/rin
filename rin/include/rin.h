@@ -60,6 +60,8 @@ typedef enum RinMathFma {
  * - dealloc == NULL（alloc != NULL）の場合は個別解放を省略する（アリーナ用途）。その場合も生存中の領域を早期に再利用してはならない。
  * - dealloc に渡される ptr・size・align は確保時と同じ値である。
  * - size == 0 の要求では alloc / dealloc のいずれも呼び出さない。
+ * - ctx と alloc / dealloc が指す関数は、rin_new（または rin_new_with_config）の呼び出しから
+ *   rin_free が戻るまで有効に保つこと（rin_free は Rin 本体の解放にも dealloc を使用する）。
  */
 typedef struct RinAllocator {
     void *ctx;

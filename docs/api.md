@@ -349,6 +349,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
   - `alloc` が非 `NULL` かつ `dealloc` が `NULL` の場合は個別解放を省略する（アリーナ用途）。その場合も、生存中の領域を早期に再利用してはならない。
   - `dealloc` には確保時と同一の `ptr`・`size`・`align` が渡される。
   - `size == 0` の要求では C の `alloc` / `dealloc` のいずれも呼び出さない。
+  - `ctx` と `alloc` / `dealloc` が指す関数は、`rin_new`（または `rin_new_with_config`）の呼び出しから `rin_free` が戻るまで有効に保つこと（`rin_free` は `Rin` 本体の解放にも `dealloc` を使用する）。
 - `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
 - `RinBinding`：`{ const char *name; const RinValue *value; }`
 - `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。**`rin_drop` へ渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等への入力引数として渡せる）

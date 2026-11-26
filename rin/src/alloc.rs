@@ -28,9 +28,22 @@ use std::ptr::NonNull;
 /// use std::ptr::NonNull;
 /// use rin::Allocator;
 ///
-/// struct Bad;
+/// struct Sample;
 /// // `unsafe impl` なしでは実装できない。
-/// impl Allocator for Bad {
+/// impl Allocator for Sample {
+///     fn alloc(&mut self, _: Layout) -> Option<NonNull<u8>> { None }
+///     unsafe fn dealloc(&mut self, _: NonNull<u8>, _: Layout) {}
+/// }
+/// ```
+///
+/// ```rust
+/// use std::alloc::Layout;
+/// use std::ptr::NonNull;
+/// use rin::Allocator;
+///
+/// struct Sample;
+/// // SAFETY: 常に `None` を返すため確保領域は発生せず、`dealloc` が呼ばれることもない。
+/// unsafe impl Allocator for Sample {
 ///     fn alloc(&mut self, _: Layout) -> Option<NonNull<u8>> { None }
 ///     unsafe fn dealloc(&mut self, _: NonNull<u8>, _: Layout) {}
 /// }
