@@ -20,8 +20,9 @@ use crate::bytecode::{
     Capture, Chunk, FnProto, NameInfo, NameNode, NameSite, NameTable, Op, StructDesc, SymTable,
 };
 use crate::diagnostic::needs_name_candidates;
-use crate::error::{Error, Span};
-use crate::pool::RVal;
+use crate::error::{Error, ErrorKind, Span};
+use crate::eval::{EnvSlots, global_slot};
+use crate::pool::Pool;
 
 const SHALLOW_COMPILE_DEPTH: usize = 6;
 
@@ -30,24 +31,27 @@ pub(crate) fn compile_program(
     exprs: &[Expr],
     module: Option<u32>,
     syms: &mut SymTable,
-    globals: &[Option<RVal>],
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
     frozen: bool,
 ) -> Result<Chunk, Error> {
-    compile_program_parts(exprs, &[], module, syms, globals, frozen)
+    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)
 }
 
-pub(crate) fn compile_program_parts<'a>(
+pub(crate) fn compile_program_parts<'a, 'p>(
     exprs: &'a [Expr],
     body: &'a [Expr],
     module: Option<u32>,
-    syms: &mut SymTable,
-    globals: &[Option<RVal>],
+    syms: &'a mut SymTable,
+    pool: &'a mut Pool<'p>,
+    globals: &'a EnvSlots,
     frozen: bool,
 ) -> Result<Chunk, Error> {
     let mut compiler = Compiler {
         scopes: vec![Scope::new(module)],
         module,
         syms,
+        pool,
         globals,
         frozen,
         name_table: NameTable::default(),
@@ -82,17 +86,28 @@ pub(crate) fn step_size() -> usize {
     std::mem::size_of::<Step<'_>>()
 }
 
-struct Compiler<'a> {
+struct Compiler<'a, 'p> {
     scopes: Vec<Scope<'a>>,
     module: Option<u32>,
     syms: &'a mut SymTable,
-    globals: &'a [Option<RVal>],
+    pool: &'a mut Pool<'p>,
+    globals: &'a EnvSlots,
     frozen: bool,
     name_table: NameTable,
     shared_names: Option<Rc<OnceCell<NameTable>>>,
 }
 
-impl<'a> Compiler<'a> {
+impl<'a, 'p> Compiler<'a, 'p> {
+    fn intern_sym(&mut self, name: &str, span: Span) -> Result<u32, Error> {
+        self.syms.intern(self.pool, name).ok_or_else(|| {
+            Error::new(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                span,
+                "memory limit exceeded",
+            )
+        })
+    }
     fn decl_error(&self, form: &str, span: Span) -> Error {
         if self.frozen {
             Error::parse(
@@ -129,7 +144,7 @@ impl<'a> Compiler<'a> {
         self.flush_ticks();
         let ip = self.chunk().emit(op, span);
         if let Op::GetGlobal(id) = op
-            && !matches!(self.globals.get(id as usize), Some(Some(_)))
+            && global_slot(self.globals, id).is_none()
         {
             self.record_name_site(id, ip);
         }

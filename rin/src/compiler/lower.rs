@@ -1,7 +1,7 @@
 //! 式を明示的な作業スタックへ展開する。
 use super::*;
 
-impl<'a> Compiler<'a> {
+impl<'a, 'p> Compiler<'a, 'p> {
     pub(super) fn step_expr(
         &mut self,
         expr: &'a Expr,

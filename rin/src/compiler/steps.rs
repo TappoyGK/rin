@@ -103,7 +103,7 @@ pub(super) enum Step<'a> {
     ShortCircuitAfterArg(Box<ShortCircuitStep<'a>>),
 }
 
-impl<'a> Compiler<'a> {
+impl<'a, 'p> Compiler<'a, 'p> {
     pub(super) fn run_steps(&mut self, steps: &mut Vec<Step<'a>>) -> Result<(), Error> {
         while let Some(step) = steps.pop() {
             match step {

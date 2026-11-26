@@ -92,7 +92,7 @@ impl Runner<'_, '_> {
                                 "'def' is not allowed in a frozen environment",
                             ));
                         }
-                        self.define_top(id, v);
+                        self.define_top(id, v, span)?;
                         self.stack_push(RVal::Void, span)?;
                     }
                     Op::DefFn(name_id, proto_idx) => {
@@ -107,7 +107,7 @@ impl Runner<'_, '_> {
                         let proto = &chunk.protos[proto_idx as usize];
                         let closure =
                             self.build_closure(proto, frame.captures.as_slice(), base, span)?;
-                        self.define_top(name_id, closure);
+                        self.define_top(name_id, closure, span)?;
                         self.stack_push(RVal::Void, span)?;
                     }
                     Op::MakeClosure(proto_idx) => {
@@ -700,20 +700,20 @@ impl Runner<'_, '_> {
                                 "'import' is not allowed in a frozen environment",
                             ));
                         }
-                        let name = &self.syms.names[id as usize];
-                        let Some(&mod_val) = self.modules.get(name.as_ref()) else {
+                        let name = self.syms.name(id).unwrap_or("?");
+                        let Some(mod_val) = self.modules.get_val(name) else {
                             return Err(Error::runtime(
                                 "expr.module",
                                 span,
                                 suggest(
                                     format!("unknown module '{name}'"),
                                     name,
-                                    self.modules.keys().map(String::as_str),
+                                    self.modules.loaded_names(),
                                 ),
                             ));
                         };
                         self.pool.retain_val(mod_val);
-                        self.define_top(id, mod_val);
+                        self.define_top(id, mod_val, span)?;
                         self.stack_push(RVal::Void, span)?;
                     }
                     Op::Export(idx) => {
@@ -733,8 +733,32 @@ impl Runner<'_, '_> {
                             ));
                         }
                         let names = &chunk.export_lists[idx as usize];
-                        let list = self.export_list.get_or_insert_with(Vec::new);
-                        list.extend(names.iter().cloned());
+                        let list = self.export_list.get_or_insert_with(RawVec::new);
+                        for sym in names {
+                            let Some(raw) = crate::mem::RawStr::from_work(
+                                &mut self.pool.work,
+                                &mut self.pool.core,
+                                sym,
+                            ) else {
+                                return Err(Error::new(
+                                    "eval.limits",
+                                    crate::error::ErrorKind::TooMuchMemory,
+                                    span,
+                                    "memory limit exceeded",
+                                ));
+                            };
+                            if list
+                                .push_work(&mut self.pool.work, &mut self.pool.core, raw)
+                                .is_none()
+                            {
+                                return Err(Error::new(
+                                    "eval.limits",
+                                    crate::error::ErrorKind::TooMuchMemory,
+                                    span,
+                                    "memory limit exceeded",
+                                ));
+                            }
+                        }
                         self.stack_push(RVal::Void, span)?;
                     }
                 }

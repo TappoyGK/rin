@@ -1,7 +1,7 @@
 //! 浅い構文の高速経路。深さ上限で反復処理へ切り替える。
 use super::*;
 
-impl<'a> Compiler<'a> {
+impl<'a, 'p> Compiler<'a, 'p> {
     pub(super) fn compile_top_level(&mut self, exprs: &'a [Expr]) -> Result<(), Error> {
         for (i, expr) in exprs.iter().enumerate() {
             let last = i + 1 == exprs.len();
@@ -13,7 +13,7 @@ impl<'a> Compiler<'a> {
                     }
                     self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
                     self.compile_expr_shallow(value.as_ref(), false, 1)?;
-                    let n_idx = self.syms.intern(name.as_str());
+                    let n_idx = self.intern_sym(name.as_str(), span)?;
                     self.emit(Op::DefGlobal(n_idx), span);
                 }
                 ExprKind::Defn(d) => {
@@ -45,7 +45,7 @@ impl<'a> Compiler<'a> {
                         chunk: finished.chunk,
                     });
                     let p_idx = self.chunk().add_proto(proto);
-                    let n_idx = self.syms.intern(name.as_str());
+                    let n_idx = self.intern_sym(name.as_str(), span)?;
                     self.emit(Op::DefFn(n_idx, p_idx), span);
                 }
                 ExprKind::Import { name } => {
@@ -53,7 +53,7 @@ impl<'a> Compiler<'a> {
                         return Err(self.decl_error("import", span));
                     }
                     self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
-                    let idx = self.syms.intern(name.as_str());
+                    let idx = self.intern_sym(name.as_str(), span)?;
                     self.emit(Op::Import(idx), span);
                 }
                 ExprKind::Export { names } => {

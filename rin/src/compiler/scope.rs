@@ -126,7 +126,7 @@ impl<'a> Scope<'a> {
     }
 }
 
-impl<'a> Compiler<'a> {
+impl<'a, 'p> Compiler<'a, 'p> {
     pub(super) fn new_scope(&self) -> Scope<'a> {
         let parent = self.scopes.last().unwrap();
         let mut inner = Scope::new(self.module);
@@ -180,7 +180,10 @@ impl<'a> Compiler<'a> {
         if scope.outer_local_count == 0 && scope.locals.is_empty() {
             return;
         }
-        if !needs_name_candidates(&self.syms.names[id as usize]) {
+        let Some(sym_name) = self.syms.name(id) else {
+            return;
+        };
+        if !needs_name_candidates(sym_name) {
             return;
         }
         if self.shared_names.is_none() {
@@ -212,7 +215,7 @@ impl<'a> Compiler<'a> {
         {
             return Ok(Op::GetCapture(cap_idx));
         }
-        let id = self.syms.intern(name);
+        let id = self.intern_sym(name, span)?;
         Ok(Op::GetGlobal(id))
     }
 

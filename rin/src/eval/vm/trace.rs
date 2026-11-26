@@ -16,19 +16,17 @@ impl Runner<'_, '_> {
             FrameSource::Proto(tp) => tp.module,
             FrameSource::Top(_) => self.active_module,
         };
-        err.resolve_module(active_mod.map(|id| self.module_names[id as usize].clone()));
+        err.resolve_module(active_mod.map(|id| self.modules.name(id).to_owned()));
         let (Some(orig), FrameSource::Proto(proto)) = (origin, entry) else {
             return;
         };
-        let module = proto
-            .module
-            .map(|id| self.module_names[id as usize].clone());
-        let caller_module = caller_module_id.map(|id| self.module_names[id as usize].clone());
+        let module = proto.module.map(|id| self.modules.name(id).to_owned());
+        let caller_module = caller_module_id.map(|id| self.modules.name(id).to_owned());
         let (tail_target_module, tail_target_name) = if tail_calls > 0
             && let Some(FrameSource::Proto(tp)) = tail_source
         {
             (
-                tp.module.map(|id| self.module_names[id as usize].clone()),
+                tp.module.map(|id| self.modules.name(id).to_owned()),
                 tp.name.clone(),
             )
         } else {

@@ -3,7 +3,17 @@ use crate::ErrorKind;
 
 fn compile(source: &str) -> Chunk {
     let ast = crate::parser::parse_owned(source, false).unwrap();
-    compile_program(ast.exprs(), None, &mut SymTable::default(), &[], false).unwrap()
+    let mut alloc = crate::HeapAllocator;
+    let mut pool = crate::pool::Pool::new(&mut alloc, usize::MAX);
+    compile_program(
+        ast.exprs(),
+        None,
+        &mut SymTable::default(),
+        &mut pool,
+        &crate::eval::EnvSlots::new(),
+        false,
+    )
+    .unwrap()
 }
 
 #[test]

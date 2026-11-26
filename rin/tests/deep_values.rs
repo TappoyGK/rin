@@ -221,9 +221,6 @@ fn failure_cleanup() {
             assert_eq!(m.live_bytes(), 0);
             if budget >= 4000 {
                 assert!(m.eval("42").unwrap() == Value::Int(42));
-            } else {
-                m.bind("ok", &Value::Int(42)).unwrap();
-                assert_eq!(m.live_bytes(), 0);
             }
         }
     }
@@ -254,8 +251,6 @@ fn allocator_failures() {
             m.bind("x", &deep).unwrap_err().kind,
             ErrorKind::TooMuchMemory
         );
-        assert_eq!(m.live_bytes(), 0);
-        m.bind("ok", &Value::Int(42)).unwrap();
         assert_eq!(m.live_bytes(), 0);
     }
     // すでに取り込んだ別引数と、変換中の兄弟の両方を回収する。

@@ -110,9 +110,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         chunk: &Chunk,
         ip: usize,
     ) -> Result<RVal, Error> {
-        let idx = id as usize;
         if let Some(mod_id) = self.active_module {
-            if let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied() {
+            if let Some(v) = self.modules.env(mod_id).get(id) {
                 self.pool.retain_val(v);
                 return Ok(v);
             }
@@ -122,14 +121,14 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.pool.retain_val(v);
             return Ok(v);
         }
-        if let Some(Some(v)) = self.globals.get(idx).copied() {
+        if let Some(v) = global_slot(self.globals, id) {
             self.pool.retain_val(v);
             return Ok(v);
         }
         if self.frozen
             && self.active_module.is_none()
-            && let Some(name) = self.syms.names.get(idx)
-            && let Some(&v) = self.modules.get(name.as_ref())
+            && let Some(name) = self.syms.name(id)
+            && let Some(v) = self.modules.get_val(name)
         {
             self.pool.retain_val(v);
             return Ok(v);
@@ -139,12 +138,7 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     #[cold]
     fn unknown_name(&self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> Error {
-        let name = self
-            .syms
-            .names
-            .get(id as usize)
-            .map(|s| s.as_ref())
-            .unwrap_or("?");
+        let name = self.syms.name(id).unwrap_or("?");
         let eval_names = self
             .active_module
             .is_none()
@@ -153,7 +147,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             .into_iter()
             .flat_map(|b| b.raw.iter().map(|(k, _)| *k));
         let frozen_mod_names = (self.frozen && self.active_module.is_none())
-            .then(|| self.modules.keys().map(String::as_str))
+            .then(|| self.modules.loaded_names())
             .into_iter()
             .flatten();
         Error::runtime(
@@ -165,31 +159,34 @@ impl<'a, 'p> Runner<'a, 'p> {
                 chunk
                     .visible_names(ip)
                     .chain(eval_names)
-                    .chain(bound_names(self.syms, self.globals))
+                    .chain(global_bound_names(self.syms, self.globals))
                     .chain(frozen_mod_names)
                     .chain(
                         self.active_module
                             .into_iter()
-                            .flat_map(|id| bound_names(self.syms, &self.module_envs[id as usize])),
+                            .flat_map(|id| env_bound_names(self.syms, self.modules.env(id))),
                     ),
             ),
         )
     }
 
-    pub(super) fn define_top(&mut self, id: u32, val: RVal) {
-        let prev = if let Some(mod_id) = self.active_module {
-            set_slot(&mut self.module_envs[mod_id as usize], id, val)
+    pub(super) fn define_top(&mut self, id: u32, val: RVal, span: Span) -> Result<(), Error> {
+        let res = if let Some(mod_id) = self.active_module {
+            self.modules
+                .set_env_slot(self.pool, mod_id, id, val, span)
         } else {
-            set_slot(self.globals, id, val)
+            self.globals.set(self.pool, id, val, span)
         };
-        if let Some(p) = prev {
-            self.pool.release_val(p);
-        }
-    }
-
-    pub(super) fn release_all(&mut self, vals: impl IntoIterator<Item = RVal>) {
-        for v in vals {
-            self.pool.release_val(v);
+        match res {
+            Ok(Some(p)) => {
+                self.pool.release_val(p);
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(e) => {
+                self.pool.release_val(val);
+                Err(e)
+            }
         }
     }
 

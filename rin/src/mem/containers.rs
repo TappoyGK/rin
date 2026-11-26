@@ -307,6 +307,26 @@ impl<T: Copy> RawVec<T> {
         Some(())
     }
 
+    pub fn resize_perm(
+        &mut self,
+        perm: &mut PermArena,
+        core: &mut AllocCore<'_>,
+        new_len: usize,
+        fill: T,
+    ) -> Option<()> {
+        if new_len <= self.len as usize {
+            self.len = new_len as u32;
+            return Some(());
+        }
+        self.reserve_perm(perm, core, new_len - self.len as usize)?;
+        for i in self.len as usize..new_len {
+            // SAFETY: `i < self.cap`。
+            unsafe { self.ptr.as_ptr().add(i).write(fill) };
+        }
+        self.len = new_len as u32;
+        Some(())
+    }
+
     pub fn extend_from_slice_work(
         &mut self,
         work: &mut WorkArena,

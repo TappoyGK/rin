@@ -7,15 +7,17 @@ mod ops;
 mod runner;
 mod vm;
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::alloc::{Allocator, HeapAllocator};
-use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
+use crate::bytecode::{
+    BuiltinId, Capture, Chunk, FnProto, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name,
+};
 use crate::compiler::{compile_program, compile_program_parts};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, ErrorKind, Limits, Span};
 use crate::math::MathFma;
+use crate::mem::{RawMap, RawStr, RawVec, fnv1a_bytes, fnv1a_u32};
 use crate::parser::parse_program_work;
 use crate::pool::{Obj, Pool, RVal};
 use crate::value::Value;
@@ -60,34 +62,292 @@ pub struct Machine<'a> {
     inner: EnvState<'a>,
 }
 
+/// 永続領域 (`PermArena`) 上に配置する環境スロット。
+///
+/// 組み込み名 (`id < STATIC_SYM_COUNT`) の上書きがない限り、ユーザー定義変数は 0 始まりの
+/// 密な配列に格納されるため、モジュールや環境ごとに 54 スロット分の空き領域を消費しない。
+#[derive(Clone, Copy)]
+pub(crate) struct EnvSlots {
+    dynamic: RawVec<Option<RVal>>,
+    overrides: RawVec<(u32, RVal)>,
+}
+
+impl EnvSlots {
+    pub(crate) const fn new() -> Self {
+        Self {
+            dynamic: RawVec::new(),
+            overrides: RawVec::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, id: u32) -> Option<RVal> {
+        if id >= STATIC_SYM_COUNT {
+            self.dynamic
+                .as_slice()
+                .get((id - STATIC_SYM_COUNT) as usize)
+                .copied()
+                .flatten()
+        } else {
+            for &(k, v) in self.overrides.as_slice() {
+                if k == id {
+                    return Some(v);
+                }
+            }
+            None
+        }
+    }
+
+    pub(crate) fn set(
+        &mut self,
+        pool: &mut Pool<'_>,
+        id: u32,
+        val: RVal,
+        span: Span,
+    ) -> Result<Option<RVal>, Error> {
+        if id >= STATIC_SYM_COUNT {
+            set_slot_perm(&mut self.dynamic, pool, id - STATIC_SYM_COUNT, val, span)
+        } else {
+            for (k, v) in self.overrides.as_mut_slice() {
+                if *k == id {
+                    return Ok(Some(std::mem::replace(v, val)));
+                }
+            }
+            if self
+                .overrides
+                .push_perm(&mut pool.perm, &mut pool.core, (id, val))
+                .is_none()
+            {
+                return Err(Error::new(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    span,
+                    "memory limit exceeded",
+                ));
+            }
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn clear(&mut self, pool: &mut Pool<'_>) {
+        for slot in self.dynamic.as_mut_slice() {
+            if let Some(v) = slot.take() {
+                pool.release_val(v);
+            }
+        }
+        for &(_, v) in self.overrides.as_slice() {
+            pool.release_val(v);
+        }
+        self.overrides.clear();
+    }
+
+    pub(crate) fn iter_defined(&self) -> impl Iterator<Item = (u32, RVal)> + '_ {
+        let ov = self.overrides.as_slice().iter().copied();
+        let dy = self
+            .dynamic
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| v.map(|val| (STATIC_SYM_COUNT + i as u32, val)));
+        ov.chain(dy)
+    }
+}
+
+/// 永続領域 (`PermArena`) 上に配置する読み込み済みモジュール表。
+pub(super) struct ModuleTable {
+    ids: RawMap<RawStr, u32>,
+    names: RawVec<RawStr>,
+    vals: RawVec<Option<RVal>>,
+    envs: RawVec<EnvSlots>,
+}
+
+impl ModuleTable {
+    pub(super) const fn new() -> Self {
+        Self {
+            ids: RawMap::new(),
+            names: RawVec::new(),
+            vals: RawVec::new(),
+            envs: RawVec::new(),
+        }
+    }
+
+    pub(super) fn get_id(&self, name: &str) -> Option<u32> {
+        let hash = fnv1a_bytes(name.as_bytes());
+        self.ids.get_by(hash, |k| k.as_str() == name)
+    }
+
+    pub(super) fn get_val(&self, name: &str) -> Option<RVal> {
+        let id = self.get_id(name)?;
+        self.vals.as_slice()[id as usize]
+    }
+
+    pub(super) fn name(&self, id: u32) -> &str {
+        self.names.as_slice()[id as usize].as_str()
+    }
+
+    pub(super) fn loaded_names(&self) -> impl Iterator<Item = &str> {
+        let names = self.names.as_slice();
+        let vals = self.vals.as_slice();
+        (0..names.len()).filter_map(move |i| vals[i].map(|_| names[i].as_str()))
+    }
+
+    pub(super) fn ensure_module(&mut self, pool: &mut Pool<'_>, name: &str) -> Result<u32, Error> {
+        if let Some(id) = self.get_id(name) {
+            return Ok(id);
+        }
+        let id = self.names.len() as u32;
+        let oom = || {
+            Error::new(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            )
+        };
+        let raw = RawStr::from_perm(&mut pool.perm, &mut pool.core, name).ok_or_else(oom)?;
+        self.names
+            .push_perm(&mut pool.perm, &mut pool.core, raw)
+            .ok_or_else(oom)?;
+        if self
+            .vals
+            .push_perm(&mut pool.perm, &mut pool.core, None)
+            .is_none()
+        {
+            self.names.pop();
+            return Err(oom());
+        }
+        if self
+            .envs
+            .push_perm(&mut pool.perm, &mut pool.core, EnvSlots::new())
+            .is_none()
+        {
+            self.vals.pop();
+            self.names.pop();
+            return Err(oom());
+        }
+        let hash = fnv1a_bytes(name.as_bytes());
+        if self
+            .ids
+            .insert_perm(
+                &mut pool.perm,
+                &mut pool.core,
+                hash,
+                raw,
+                id,
+                |a, b| a.as_str() == b.as_str(),
+            )
+            .is_none()
+        {
+            self.envs.pop();
+            self.vals.pop();
+            self.names.pop();
+            return Err(oom());
+        }
+        Ok(id)
+    }
+
+    pub(super) fn env(&self, id: u32) -> &EnvSlots {
+        &self.envs.as_slice()[id as usize]
+    }
+
+    pub(super) fn set_env_slot(
+        &mut self,
+        pool: &mut Pool<'_>,
+        mod_id: u32,
+        sym_id: u32,
+        val: RVal,
+        span: Span,
+    ) -> Result<Option<RVal>, Error> {
+        self.envs.as_mut_slice()[mod_id as usize].set(pool, sym_id, val, span)
+    }
+
+    pub(super) fn clear_env(&mut self, id: u32, pool: &mut Pool<'_>) {
+        self.envs.as_mut_slice()[id as usize].clear(pool);
+    }
+
+    pub(super) fn set_val(&mut self, id: u32, val: RVal) -> Option<RVal> {
+        self.vals.as_mut_slice()[id as usize].replace(val)
+    }
+
+    pub(super) fn release_all(&mut self, pool: &mut Pool<'_>) {
+        for slot in self.vals.as_mut_slice() {
+            if let Some(v) = slot.take() {
+                pool.release_val(v);
+            }
+        }
+        for env in self.envs.as_mut_slice() {
+            env.clear(pool);
+        }
+    }
+}
+
 pub(super) struct EnvState<'a> {
     limits: Limits,
     math_fma: MathFma,
     pool: Pool<'a>,
     syms: SymTable,
-    globals: Vec<Option<RVal>>,
-    modules: BTreeMap<String, RVal>,
-    module_ids: BTreeMap<String, u32>,
-    module_names: Vec<String>,
-    module_envs: Vec<Vec<Option<RVal>>>,
+    globals: EnvSlots,
+    modules: ModuleTable,
 }
 
-fn bound_names<'a>(
+#[inline]
+pub(crate) fn global_slot(globals: &EnvSlots, id: u32) -> Option<RVal> {
+    if let Some(v) = globals.get(id) {
+        return Some(v);
+    }
+    let idx = id as usize;
+    if idx < BuiltinId::ALL.len() {
+        Some(RVal::Builtin(BuiltinId::ALL[idx]))
+    } else if id == PI_SYM_ID {
+        Some(RVal::Float(std::f64::consts::PI))
+    } else {
+        None
+    }
+}
+
+fn global_bound_names<'a>(
     syms: &'a SymTable,
-    values: &'a [Option<RVal>],
-) -> impl Iterator<Item = &'a str> {
-    values
+    globals: &'a EnvSlots,
+) -> impl Iterator<Item = &'a str> + 'a {
+    let statics = (0..STATIC_SYM_COUNT).filter_map(|id| -> Option<&'a str> { static_sym_name(id) });
+    let dynamics = globals
+        .dynamic
+        .as_slice()
         .iter()
         .enumerate()
-        .filter_map(|(id, value)| value.map(|_| syms.names[id].as_ref()))
+        .filter_map(|(i, value)| value.and_then(|_| syms.name(STATIC_SYM_COUNT + i as u32)));
+    statics.chain(dynamics)
 }
 
-fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
+fn env_bound_names<'a>(
+    syms: &'a SymTable,
+    env: &'a EnvSlots,
+) -> impl Iterator<Item = &'a str> + 'a {
+    env.iter_defined()
+        .filter_map(|(id, _)| syms.name(id))
+}
+
+fn set_slot_perm(
+    slots: &mut RawVec<Option<RVal>>,
+    pool: &mut Pool<'_>,
+    id: u32,
+    val: RVal,
+    span: Span,
+) -> Result<Option<RVal>, Error> {
     let idx = id as usize;
-    if idx >= slots.len() {
-        slots.resize(idx + 1, None);
+    if idx >= slots.len()
+        && slots
+            .resize_perm(&mut pool.perm, &mut pool.core, idx + 1, None)
+            .is_none()
+    {
+        return Err(Error::new(
+            "eval.limits",
+            ErrorKind::TooMuchMemory,
+            span,
+            "memory limit exceeded",
+        ));
     }
-    slots[idx].replace(val)
+    Ok(slots.as_mut_slice()[idx].replace(val))
 }
 
 #[derive(Clone, Copy)]
@@ -104,7 +364,7 @@ pub(super) enum EvalBindingValues {
         entries: [(u32, RVal); INLINE_EVAL_BINDINGS],
         len: usize,
     },
-    Map(BTreeMap<u32, RVal>),
+    Map(RawMap<u32, RVal>),
 }
 
 impl EvalBindingValues {
@@ -115,23 +375,37 @@ impl EvalBindingValues {
                 len: 0,
             }
         } else {
-            Self::Map(BTreeMap::new())
+            Self::Map(RawMap::new())
         }
     }
 
-    pub(super) fn insert(&mut self, id: u32, val: RVal) -> Option<RVal> {
+    pub(super) fn insert(
+        &mut self,
+        pool: &mut Pool<'_>,
+        id: u32,
+        val: RVal,
+    ) -> Result<Option<RVal>, Error> {
         match self {
             Self::Inline { entries, len } => {
                 for entry in &mut entries[..*len] {
                     if entry.0 == id {
-                        return Some(std::mem::replace(&mut entry.1, val));
+                        return Ok(Some(std::mem::replace(&mut entry.1, val)));
                     }
                 }
                 entries[*len] = (id, val);
                 *len += 1;
-                None
+                Ok(None)
             }
-            Self::Map(map) => map.insert(id, val),
+            Self::Map(map) => map
+                .insert_work(&mut pool.work, &mut pool.core, fnv1a_u32(id), id, val, |a, b| a == b)
+                .ok_or_else(|| {
+                    Error::new(
+                        "eval.limits",
+                        ErrorKind::TooMuchMemory,
+                        Span::default(),
+                        "memory limit exceeded",
+                    )
+                }),
         }
     }
 
@@ -145,7 +419,7 @@ impl EvalBindingValues {
                 }
                 None
             }
-            Self::Map(map) => map.get(&id).copied(),
+            Self::Map(map) => map.get_by(fnv1a_u32(id), |k| *k == id),
         }
     }
 
@@ -157,7 +431,7 @@ impl EvalBindingValues {
                 }
             }
             Self::Map(map) => {
-                for v in map.into_values() {
+                for (_, v) in map.iter() {
                     pool.release_val(v);
                 }
             }
@@ -327,12 +601,10 @@ pub(super) struct Runner<'a, 'p> {
     pub(super) eval_bindings: Option<&'a EvalBindings<'a>>,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,
-    pub(super) globals: &'a mut Vec<Option<RVal>>,
-    pub(super) modules: &'a BTreeMap<String, RVal>,
-    pub(super) module_names: &'a [String],
-    pub(super) module_envs: &'a mut Vec<Vec<Option<RVal>>>,
+    pub(super) globals: &'a mut EnvSlots,
+    pub(super) modules: &'a mut ModuleTable,
     pub(super) active_module: Option<u32>,
-    pub(super) export_list: Option<Vec<String>>,
+    pub(super) export_list: Option<RawVec<RawStr>>,
     pub(super) stack: ValueStack,
     pub(super) check_failures: Vec<crate::test::CheckFailure>,
 }

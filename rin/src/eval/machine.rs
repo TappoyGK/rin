@@ -121,32 +121,37 @@ impl<'a> Machine<'a> {
 
 impl<'a> EnvState<'a> {
     pub(super) fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
-        let mut syms = SymTable::default();
-        let mut globals = Vec::new();
-        for &b in BuiltinId::ALL {
-            let id = syms.intern(b.name());
-            set_slot(&mut globals, id, RVal::Builtin(b));
-        }
-        let pi_id = syms.intern("pi");
-        set_slot(&mut globals, pi_id, RVal::Float(std::f64::consts::PI));
         Self {
             limits,
             math_fma: MathFma::default(),
             pool: Pool::new(alloc, limits.memory_bytes),
-            syms,
-            globals,
-            modules: BTreeMap::new(),
-            module_ids: BTreeMap::new(),
-            module_names: Vec::new(),
-            module_envs: Vec::new(),
+            syms: SymTable::new(),
+            globals: EnvSlots::new(),
+            modules: ModuleTable::new(),
         }
     }
 
     pub(super) fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
         let rval = self.pool.import(value, Span::default())?;
-        let id = self.syms.intern(name);
-        if let Some(prev) = set_slot(&mut self.globals, id, rval) {
-            self.pool.release_val(prev);
+        let Some(id) = self.syms.intern(&mut self.pool, name) else {
+            self.pool.release_val(rval);
+            return Err(Error::new(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        };
+        match self
+            .globals
+            .set(&mut self.pool, id, rval, Span::default())
+        {
+            Ok(Some(prev)) => self.pool.release_val(prev),
+            Ok(None) => {}
+            Err(e) => {
+                self.pool.release_val(rval);
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -159,6 +164,7 @@ impl<'a> EnvState<'a> {
                 exprs.as_slice(),
                 None,
                 &mut self.syms,
+                &mut self.pool,
                 &self.globals,
                 false,
             )
@@ -182,27 +188,35 @@ impl<'a> EnvState<'a> {
         source: &str,
         bindings: &[(&str, Value)],
     ) -> Result<Value, Error> {
-        let mark = self.pool.work.mark(&self.pool.core);
-        let chunk = (|| {
+        let outer_mark = self.pool.work.mark(&self.pool.core);
+        let res = self.eval_frozen_inner(source, bindings);
+        self.syms.clear_temp();
+        self.pool.work.rewind(&mut self.pool.core, outer_mark);
+        res
+    }
+
+    fn eval_frozen_inner(
+        &mut self,
+        source: &str,
+        bindings: &[(&str, Value)],
+    ) -> Result<Value, Error> {
+        let chunk = {
             let exprs = parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
             compile_program(
                 exprs.as_slice(),
                 None,
                 &mut self.syms,
+                &mut self.pool,
                 &self.globals,
                 true,
-            )
-        })();
-        self.pool.work.rewind(&mut self.pool.core, mark);
-        let chunk = chunk?;
+            )?
+        };
 
         if bindings.is_empty() {
-            let mark = self.pool.work.mark(&self.pool.core);
             let res = {
                 let mut runner = self.runner(None, true);
                 runner.run_top_chunk(&chunk)
             };
-            self.pool.work.rewind(&mut self.pool.core, mark);
             let last = res?;
             let exported = self.pool.export(last);
             self.pool.release_val(last);
@@ -210,16 +224,20 @@ impl<'a> EnvState<'a> {
         }
 
         // 一時束縛を取り込み、失敗時は取り込み済みをすべて解放する。
-        // 少数の束縛はスタック配列に格納し、多数は BTreeMap で O(log N) 参照を保つ。
+        // 少数の束縛はスタック配列に格納し、多数は WorkArena 上の RawMap を使う。
         let mut values = EvalBindingValues::new(bindings.len());
         for (name, value) in bindings {
             if let Some(id) = self.syms.get(name) {
                 match self.pool.import(value, Span::default()) {
-                    Ok(rval) => {
-                        if let Some(prev) = values.insert(id, rval) {
-                            self.pool.release_val(prev);
+                    Ok(rval) => match values.insert(&mut self.pool, id, rval) {
+                        Ok(Some(prev)) => self.pool.release_val(prev),
+                        Ok(None) => {}
+                        Err(e) => {
+                            self.pool.release_val(rval);
+                            values.release_all(&mut self.pool);
+                            return Err(e);
                         }
-                    }
+                    },
                     Err(e) => {
                         values.release_all(&mut self.pool);
                         return Err(e);
@@ -241,13 +259,11 @@ impl<'a> EnvState<'a> {
             values,
             raw: bindings,
         };
-        let mark = self.pool.work.mark(&self.pool.core);
         let res = {
             let mut runner = self.runner(None, true);
             runner.eval_bindings = Some(&eval_bindings);
             runner.run_top_chunk(&chunk)
         };
-        self.pool.work.rewind(&mut self.pool.core, mark);
         eval_bindings.values.release_all(&mut self.pool);
         let last = res?;
         let exported = self.pool.export(last);
@@ -260,11 +276,18 @@ impl<'a> EnvState<'a> {
         setup: &[crate::ast::Expr],
         body: &[crate::ast::Expr],
     ) -> (Vec<crate::test::CheckFailure>, Result<(), Error>) {
-        let chunk =
-            match compile_program_parts(setup, body, None, &mut self.syms, &self.globals, false) {
-                Ok(chunk) => chunk,
-                Err(error) => return (Vec::new(), Err(error)),
-            };
+        let chunk = match compile_program_parts(
+            setup,
+            body,
+            None,
+            &mut self.syms,
+            &mut self.pool,
+            &self.globals,
+            false,
+        ) {
+            Ok(chunk) => chunk,
+            Err(error) => return (Vec::new(), Err(error)),
+        };
         let mark = self.pool.work.mark(&self.pool.core);
         let (failures, result) = {
             let mut runner = self.runner(None, false);
@@ -286,7 +309,7 @@ impl<'a> EnvState<'a> {
         let Some(callee) = self
             .syms
             .get(fn_name)
-            .and_then(|id| self.globals.get(id as usize).copied().flatten())
+            .and_then(|id| global_slot(&self.globals, id))
         else {
             return Err(Error::runtime(
                 "expr.name",
@@ -294,7 +317,7 @@ impl<'a> EnvState<'a> {
                 suggest(
                     format!("unknown function '{fn_name}'"),
                     fn_name,
-                    bound_names(&self.syms, &self.globals),
+                    global_bound_names(&self.syms, &self.globals),
                 ),
             ));
         };
@@ -307,25 +330,58 @@ impl<'a> EnvState<'a> {
         args: &[Value],
         frozen: bool,
     ) -> Result<Value, Error> {
-        let mut r_args = Vec::with_capacity(args.len());
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut r_args = RawVec::new();
+        if !args.is_empty()
+            && r_args
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, args.len())
+                .is_none()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            return Err(Error::new(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        }
         for arg in args {
             match self.pool.import(arg, Span::default()) {
-                Ok(rv) => r_args.push(rv),
+                Ok(rv) => {
+                    if r_args
+                        .push_work(&mut self.pool.work, &mut self.pool.core, rv)
+                        .is_none()
+                    {
+                        self.pool.release_val(rv);
+                        for &v in r_args.as_slice() {
+                            self.pool.release_val(v);
+                        }
+                        self.pool.work.rewind(&mut self.pool.core, mark);
+                        return Err(Error::new(
+                            "eval.limits",
+                            ErrorKind::TooMuchMemory,
+                            Span::default(),
+                            "memory limit exceeded",
+                        ));
+                    }
+                }
                 Err(e) => {
-                    for v in r_args {
+                    for &v in r_args.as_slice() {
                         self.pool.release_val(v);
                     }
+                    self.pool.work.rewind(&mut self.pool.core, mark);
                     return Err(e);
                 }
             }
         }
         self.pool.retain_val(callee);
-        let mark = self.pool.work.mark(&self.pool.core);
         let res = {
             let mut runner = self.runner(None, frozen);
-            let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
+            let res = runner.apply(callee, r_args.as_slice(), Span::default(), CallOrigin::Host);
             runner.pool.release_val(callee);
-            runner.release_all(r_args);
+            for &v in r_args.as_slice() {
+                runner.pool.release_val(v);
+            }
             res
         };
         self.pool.work.rewind(&mut self.pool.core, mark);
@@ -346,9 +402,7 @@ impl<'a> EnvState<'a> {
             pool: &mut self.pool,
             syms: &self.syms,
             globals: &mut self.globals,
-            modules: &self.modules,
-            module_names: &self.module_names,
-            module_envs: &mut self.module_envs,
+            modules: &mut self.modules,
             active_module,
             export_list: None,
             check_failures: Vec::new(),
@@ -359,19 +413,7 @@ impl<'a> EnvState<'a> {
 
 impl Drop for EnvState<'_> {
     fn drop(&mut self) {
-        let old_mods = std::mem::take(&mut self.modules);
-        for v in old_mods.into_values() {
-            self.pool.release_val(v);
-        }
-        let old_mod_envs = std::mem::take(&mut self.module_envs);
-        for env in old_mod_envs {
-            for v in env.into_iter().flatten() {
-                self.pool.release_val(v);
-            }
-        }
-        let old = std::mem::take(&mut self.globals);
-        for v in old.into_iter().flatten() {
-            self.pool.release_val(v);
-        }
+        self.modules.release_all(&mut self.pool);
+        self.globals.clear(&mut self.pool);
     }
 }
