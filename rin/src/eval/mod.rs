@@ -526,6 +526,10 @@ pub(super) fn sort_field_pairs_work<'s>(
     if n < 2 {
         return Some(());
     }
+    // すでに昇順（重複ありを含む）なら F-1 回の比較のみで即終了する。
+    if slice.windows(2).all(|w| w[0].0 <= w[1].0) {
+        return Some(());
+    }
     if n <= MIN_RUN {
         for cur in 1..n {
             let item = slice[cur];

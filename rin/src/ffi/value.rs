@@ -596,6 +596,10 @@ pub unsafe extern "C" fn rin_struct_set(
         m.record_host_error("null pointer argument");
         return false;
     };
+    if !unsafe { m.owns_handle(sr as *const RinValue) } {
+        m.record_host_error("invalid struct handle");
+        return false;
+    }
     if field.is_null() {
         m.record_host_error("null pointer argument");
         return false;

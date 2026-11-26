@@ -149,6 +149,7 @@ const CHUNK_HANDLES: usize = 64;
 struct HandleSlot {
     val: RinValue,
     next_free: *mut HandleSlot,
+    owner: *const ValueHandles,
     alive: bool,
 }
 
@@ -157,6 +158,7 @@ impl HandleSlot {
         Self {
             val: RinValue(Val::void()),
             next_free: std::ptr::null_mut(),
+            owner: std::ptr::null(),
             alive: false,
         }
     }
@@ -187,6 +189,7 @@ impl ValueHandles {
     }
 
     fn alloc_slot(&mut self, val: Val, alloc: &mut CAllocator) -> Option<*mut RinValue> {
+        let owner = self as *const ValueHandles;
         if !self.free_head.is_null() {
             let slot = self.free_head;
             // SAFETY: `free_head` は当プール所有の有効な空きスロットを指す。
@@ -194,6 +197,7 @@ impl ValueHandles {
                 self.free_head = (*slot).next_free;
                 (*slot).val = RinValue(val);
                 (*slot).next_free = std::ptr::null_mut();
+                (*slot).owner = owner;
                 (*slot).alive = true;
                 return Some(addr_of_mut!((*slot).val));
             }
@@ -203,6 +207,7 @@ impl ValueHandles {
             self.inline_used += 1;
             slot.val = RinValue(val);
             slot.next_free = std::ptr::null_mut();
+            slot.owner = owner;
             slot.alive = true;
             return Some(addr_of_mut!(slot.val));
         }
@@ -231,53 +236,41 @@ impl ValueHandles {
             chunk.used += 1;
             slot.val = RinValue(val);
             slot.next_free = std::ptr::null_mut();
+            slot.owner = owner;
             slot.alive = true;
             Some(addr_of_mut!(slot.val))
         }
     }
 
-    fn owns_slot(&self, slot: *const HandleSlot) -> bool {
-        let addr = slot as usize;
-        let stride = std::mem::size_of::<HandleSlot>();
-        if self.inline_used > 0 {
-            let start = self.inline.as_ptr() as usize;
-            let end = start + self.inline_used * stride;
-            if addr >= start && addr < end && (addr - start).is_multiple_of(stride) {
-                return true;
-            }
+    /// `val_ptr` が当プール所有の生存中ハンドルかどうかを O(1) で判定する。
+    ///
+    /// # Safety
+    /// `val_ptr` は `NULL`、`alloc_slot` が返したハンドル、または `Rin.last_result.val`（`HandleSlot` 先頭）
+    /// のいずれかへの有効なポインタでなければならない。
+    unsafe fn owns_live_val(&self, val_ptr: *const RinValue) -> bool {
+        if val_ptr.is_null() {
+            return false;
         }
-        let mut cur = self.chunks_head;
-        while !cur.is_null() {
-            // SAFETY: `cur` は当プールが所有する有効な `HandleChunk`。
-            unsafe {
-                let used = (*cur).used;
-                if used > 0 {
-                    let start = (*cur).slots.as_ptr() as usize;
-                    let end = start + used * stride;
-                    if addr >= start && addr < end && (addr - start).is_multiple_of(stride) {
-                        return true;
-                    }
-                }
-                cur = (*cur).next;
-            }
+        if !(val_ptr as usize).is_multiple_of(std::mem::align_of::<HandleSlot>()) {
+            return false;
         }
-        false
+        let slot = val_ptr.cast::<HandleSlot>();
+        // SAFETY: 呼び出し側が有効な `HandleSlot` 先頭ポインタを保証する。
+        unsafe { (*slot).alive && std::ptr::eq((*slot).owner, self) }
     }
 
-    /// `val_ptr` を解放リストへ返し、保持していた `Val` を返す。
-    /// 当プールに属さないポインタ（別の `Rin` のハンドル等）は安全のため無視して `None` を返す。
+    /// `val_ptr` を解放リストへ O(1) で返し、保持していた `Val` を返す。
+    /// 当プールに属さないポインタ（別の `Rin` のハンドルや `RinEvalResult.value` 等）は安全のため無視して `None` を返す。
     unsafe fn free_slot(&mut self, val_ptr: *mut RinValue) -> Option<Val> {
-        let slot = val_ptr.cast::<HandleSlot>();
-        if !self.owns_slot(slot) {
+        if !unsafe { self.owns_live_val(val_ptr) } {
             return None;
         }
-        // SAFETY: `owns_slot` により `slot` は当プール所有の初期化済み `HandleSlot`。
+        let slot = val_ptr.cast::<HandleSlot>();
+        // SAFETY: `owns_live_val` により `slot` は当プール所有の生存中 `HandleSlot`。
         unsafe {
-            if !(*slot).alive {
-                return None;
-            }
             let val = (*slot).val.0;
             (*slot).alive = false;
+            (*slot).owner = std::ptr::null();
             (*slot).val = RinValue(Val::void());
             (*slot).next_free = self.free_head;
             self.free_head = slot;
@@ -355,7 +348,7 @@ impl RinState {
 pub struct Rin {
     state: Option<RinState>,
     handles: ValueHandles,
-    last_result: RinValue,
+    last_result: HandleSlot,
     last_error: StoredError,
     has_error: bool,
     alloc: CAllocator,
@@ -428,12 +421,17 @@ impl Rin {
         }
     }
 
+    pub(super) unsafe fn owns_handle(&self, ptr: *const RinValue) -> bool {
+        // SAFETY: 呼び出し側が有効なハンドルポインタを保証する。
+        unsafe { self.handles.owns_live_val(ptr) }
+    }
+
     fn finish_eval_result(&mut self) -> RinEvalResult {
         let val = self.state_ref().last_result_val();
-        self.last_result = RinValue(val);
+        self.last_result.val = RinValue(val);
         RinEvalResult {
             ok: true,
-            value: &self.last_result as *const RinValue,
+            value: &self.last_result.val as *const RinValue,
         }
     }
 }
@@ -527,7 +525,7 @@ pub extern "C" fn rin_new_with_config(
         let builder = Builder::with_memory_config(limits.into(), memory.into(), alloc_ref);
         addr_of_mut!((*ptr).state).write(Some(RinState::Building(builder)));
         addr_of_mut!((*ptr).handles).write(ValueHandles::new());
-        addr_of_mut!((*ptr).last_result).write(RinValue(Val::void()));
+        addr_of_mut!((*ptr).last_result).write(HandleSlot::empty());
         addr_of_mut!((*ptr).last_error).write(StoredError::new_empty());
         addr_of_mut!((*ptr).has_error).write(false);
     }

@@ -145,8 +145,9 @@ const RinError *rin_last_error(const Rin *rin);
  * - RinEvalResult.value で返された借用ポインタを rin_drop に渡してはならない。
  * - 同じハンドルの連続二重 rin_drop は無視されるが、再利用後の古いポインタを rin_drop すると
  *   再利用先のハンドルを解放してしまう。解放済みハンドルの使用は Void や別値を読むことがある。
- * - 別の Rin で生成したハンドルを rin_drop に渡した場合は無視される。読み取り・入力に渡すと、
- *   別値を読むか境界検査の panic でプロセスが中断（abort）する。
+ * - 別の生存中 Rin で生成したハンドルを rin_drop に渡した場合は無視され、rin_struct_set の第 2 引数に
+ *   渡した場合は RIN_ERR_HOST を記録して false を返す。読み取り・入力に渡すと、別値を読むか境界検査の
+ *   panic でプロセスが中断（abort）する。rin_free した Rin のハンドルは無効なポインタであり、どの関数にも渡してはならない。
  */
 RinValue *rin_int(Rin *rin, int64_t n);
 RinValue *rin_float(Rin *rin, double x);

@@ -286,3 +286,58 @@ fn hints_are_in_ffi_message_and_text_with_original_rule() {
         }
     }
 }
+
+#[test]
+fn foreign_and_non_owned_handles_are_rejected_in_struct_set_and_drop() {
+    unsafe {
+        let m1 = Machine::new(rin_limits_default());
+        let m2 = Machine::new(rin_limits_default());
+
+        // m2 の構造体ハンドルと整数ハンドルを用意
+        let s2 = rin_struct(m2.0, c"Point".as_ptr());
+        assert!(!s2.is_null());
+        let v2 = rin_int(m2.0, 10);
+        assert!(rin_struct_set(m2.0, s2, c"x".as_ptr(), v2));
+        rin_drop(m2.0, v2);
+
+        // m1 の整数ハンドルを用意
+        let v1 = rin_int(m1.0, 99);
+
+        // 別 Rin (m2) の struct ハンドルを m1 の rin_struct_set に渡すと拒否され、m2 側の値は変わらない
+        assert!(!rin_struct_set(m1.0, s2, c"x".as_ptr(), v1));
+        check_error(m1.0, RinErrorKind::Host);
+        let got = rin_field(m2.0, s2, c"x".as_ptr());
+        assert!(!got.is_null());
+        let mut x = 0;
+        assert!(rin_as_int(m2.0, got, &mut x));
+        assert_eq!(x, 10);
+        rin_drop(m2.0, got);
+
+        // 別 Rin (m2) のハンドルを m1 の rin_drop に渡しても無視され、m2 側で引き続き読める
+        rin_drop(m1.0, s2);
+        let got2 = rin_field(m2.0, s2, c"x".as_ptr());
+        assert!(!got2.is_null());
+        let mut x2 = 0;
+        assert!(rin_as_int(m2.0, got2, &mut x2));
+        assert_eq!(x2, 10);
+        rin_drop(m2.0, got2);
+
+        // RinEvalResult.value（所有ハンドルではない）を rin_struct_set / rin_drop に渡しても安全に拒否・無視される
+        let eval_res = rin_build(m1.0, c"Point{x: 7}".as_ptr());
+        assert!(eval_res.ok && !eval_res.value.is_null());
+        let eval_mut = eval_res.value as *mut RinValue;
+        assert!(!rin_struct_set(m1.0, eval_mut, c"x".as_ptr(), v1));
+        check_error(m1.0, RinErrorKind::Host);
+        rin_drop(m1.0, eval_mut);
+
+        // 解放済みハンドルを rin_struct_set に渡すと拒否される
+        let s1 = rin_struct(m1.0, c"Point".as_ptr());
+        assert!(!s1.is_null());
+        rin_drop(m1.0, s1);
+        assert!(!rin_struct_set(m1.0, s1, c"x".as_ptr(), v1));
+        check_error(m1.0, RinErrorKind::Host);
+
+        rin_drop(m1.0, v1);
+        rin_drop(m2.0, s2);
+    }
+}
