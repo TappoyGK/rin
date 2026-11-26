@@ -14,8 +14,9 @@ impl Runner<'_, '_> {
         let mut base = frame.base as usize;
         'frame: loop {
             let chunk = frame.active_chunk();
-            while ip < chunk.code.len() {
-                let op = chunk.code[ip];
+            let code = chunk.code.as_slice();
+            while ip < code.len() {
+                let op = code[ip];
                 ip += 1;
 
                 match op {
@@ -67,16 +68,13 @@ impl Runner<'_, '_> {
                     Op::None => self.stack_push_at(RVal::None, chunk, ip - 1)?,
                     Op::EmptyList => self.stack_push_at(RVal::EmptyList, chunk, ip - 1)?,
                     Op::GetLocal(slot) => {
-                        let v = self.stack.as_slice()[base + slot as usize];
+                        let v = self.stack.get_copy(base + slot as usize);
                         self.pool.retain_val(v);
                         self.stack_push_at(v, chunk, ip - 1)?;
                     }
                     Op::SetLocal(slot) => {
                         let v = self.stack.pop().expect("stack underflow on SetLocal");
-                        let old = std::mem::replace(
-                            &mut self.stack.as_mut_slice()[base + slot as usize],
-                            v,
-                        );
+                        let old = self.stack.replace_at(base + slot as usize, v);
                         self.pool.release_val(old);
                     }
                     Op::GetCapture(idx) => {
@@ -503,7 +501,7 @@ impl Runner<'_, '_> {
                     Op::Call(argc) => {
                         let argc = argc as usize;
                         let arg_start = self.stack.len() - argc;
-                        let callee = self.stack.as_slice()[arg_start - 1];
+                        let callee = self.stack.get_copy(arg_start - 1);
                         if let RVal::Builtin(b) = callee {
                             if b.has_callback() {
                                 frame.ip = ip as u32;
@@ -574,7 +572,7 @@ impl Runner<'_, '_> {
                         let span = chunk.spans[ip - 1];
                         let argc = argc as usize;
                         let arg_start = self.stack.len() - argc;
-                        let callee = self.stack.as_slice()[arg_start - 1];
+                        let callee = self.stack.get_copy(arg_start - 1);
                         match callee {
                             RVal::Obj(id)
                                 if matches!(frame.active_source(), FrameSource::Proto(_)) =>
@@ -587,12 +585,12 @@ impl Runner<'_, '_> {
                                     return Err(self.call_arity_error(proto.arity, argc, span));
                                 }
                                 for i in base..(arg_start - 1) {
-                                    let old = self.stack.as_slice()[i];
+                                    let old = self.stack.get_copy(i);
                                     self.pool.release_val(old);
                                 }
                                 for i in 0..argc {
-                                    let arg = self.stack.as_slice()[arg_start + i];
-                                    self.stack.as_mut_slice()[base + i] = arg;
+                                    let arg = self.stack.get_copy(arg_start + i);
+                                    self.stack.set_at(base + i, arg);
                                 }
                                 self.stack.truncate(base + argc);
                                 let new_locals = proto.local_count as usize;
@@ -604,7 +602,7 @@ impl Runner<'_, '_> {
                                 }
                                 self.active_module = proto.module;
                                 frame.set_tail_proto(proto);
-                                frame.tail_calls += 1;
+                                frame.tail_calls = frame.tail_calls.saturating_add(1);
                                 frame.captures = cap.as_slice().as_ptr();
                                 frame_stack_start = self.stack.len();
                                 ip = 0;
@@ -830,15 +828,11 @@ impl Runner<'_, '_> {
                         let local_count = proto.local_count as usize;
                         for (i, &new_v) in args.iter().enumerate().take(argc) {
                             self.pool.retain_val(new_v);
-                            let old_v =
-                                std::mem::replace(&mut self.stack.as_mut_slice()[base + i], new_v);
+                            let old_v = self.stack.replace_at(base + i, new_v);
                             self.pool.release_val(old_v);
                         }
                         for i in argc..local_count {
-                            let old_v = std::mem::replace(
-                                &mut self.stack.as_mut_slice()[base + i],
-                                RVal::Void,
-                            );
+                            let old_v = self.stack.replace_at(base + i, RVal::Void);
                             self.pool.release_val(old_v);
                         }
                         ip = 0;

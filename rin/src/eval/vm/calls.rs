@@ -13,9 +13,8 @@ impl Runner<'_, '_> {
         op_ip: usize,
     ) -> Result<(), ErrRecorded> {
         if argc == 2 {
-            let s = self.stack.as_slice();
-            let lhs = s[arg_start];
-            let rhs = s[arg_start + 1];
+            let lhs = self.stack.get_copy(arg_start);
+            let rhs = self.stack.get_copy(arg_start + 1);
             if let (RVal::Int(x), RVal::Int(y)) = (lhs, rhs) {
                 let (value, cost) = match b {
                     BuiltinId::Add => (x.checked_add(y).map(RVal::Int), 1),
@@ -35,7 +34,7 @@ impl Runner<'_, '_> {
                 }
                 return match value {
                     Some(value) => {
-                        self.stack.as_mut_slice()[arg_start - 1] = value;
+                        self.stack.set_at(arg_start - 1, value);
                         self.stack.truncate(arg_start);
                         Ok(())
                     }

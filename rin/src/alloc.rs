@@ -117,11 +117,6 @@ impl<T> AllocBuf<T> {
     }
 
     #[inline(always)]
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-
-    #[inline(always)]
     pub fn as_slice(&self, len: usize) -> &[T] {
         debug_assert!(len <= self.cap);
         if len == 0 {

@@ -67,13 +67,13 @@ impl<'a> Machine<'a> {
 - `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。
 - `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。
-- **永続領域の追記特性**：読み込み段階（`Builder`）の評価が関数（`fn` リテラル・`defn`）や新しいシンボル定義を含むたびに、バイトコード・シンボルは永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（再定義に限らず、関数リテラルを含む式を `Builder` で反復評価すると永続領域が増え続ける。古い値スロットは解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
+- **永続領域の追記特性**：読み込み段階（`Builder`）の評価では、初めて現れる大域名・構造体名・フィールド名（定義か参照かを問わず、エラーになった評価も含む）と関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（古い値スロットは解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
 - `Builder::into_machine` / `Builder::freeze`：大域環境と読み込み済みモジュール、および永続領域（`PermArena`）を凍結し、実行段階の `Machine` を返す。`into_machine` は失敗しないゼロヒープ API、`freeze` は `std-value` フィーチャ有効時の `Result` ラッパー（現行実装では常に `Ok` を返す）。
 - 凍結後の `Machine` から読み込みの段階には戻れない。Mod を読み直す場合は、新しい `Builder` を作って読み込み・凍結し、ホスト側で `Machine` を差し替える（ホットリロードは組み込む側が担う）。
 - `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効で、評価するソースとそこから呼ばれるモジュール外の関数から参照でき（モジュール内の関数からは参照されない）、評価終了時に解放する。`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。名前解決の優先順位は、局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛 → 読み込み済みモジュール名とする。
 - Rust API では `call` / `call_in` は凍結後の `Machine` のみ提供する（C FFI では同一ハンドル上で `rin_call` / `rin_call_in` を凍結前・凍結後のどちらでも呼び出せる）。
 - `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
-- `live_bytes`：現在オブジェクト領域上で生存している実確保バイト数を返す。
+- `live_bytes`：現在オブジェクト領域上で生存している論理使用バイト数を返す。
 
 ### 1.2.1 ゼロヒープ・ホスト境界 API（`Val` / `ValueRef` / `ErrorRef`）
 
@@ -232,7 +232,7 @@ impl Error {
 - ホストと内部プールの値変換（`std-value` の import / export）。`bind`・評価結果・関数の引数と戻り値を含む。
 - `Value` の `Display`・`Debug`・`PartialEq`・`approx_bytes`、`ListNode` の `Debug`・等値比較、および Rin 内の `==` / `!=` と `ValueRef` の `Display`。
 - `Schema::check`（`std-value` 有効時の C FFI `rin_check` / `rin_check_str` を含む）。値を消費せず同じ参照を巡回するスキーマは検証エラーとなる。
-- `Value` / `ListNode` の解放および内部プールオブジェクトの解放（侵入型 `Slot::Dying` キューによる O(1) 追加メモリ反復解放）。共有された子は残し、最後の強参照を解放する際に子を分解する。Weak 参照が残る場合も扱う。
+- `Value` / `ListNode` の解放および内部プールオブジェクトの解放（追加メモリ確保なし・非再帰の反復解放）。共有された子は残し、最後の強参照を解放する際に子を分解する。Weak 参照が残る場合も扱う。
 
 import がメモリ上限・アロケータの確保失敗・取り込めない値で失敗した場合、生成途中の値を回収する。既存の束縛は保持し、同じ `Builder` または `Machine` を引き続き使える。一方、ゼロヒープ経路（Rust の `Val` / `ValueRef` および C FFI の `RinValue`）は `Value` を経由せず、渡された `Allocator` 上のプール値を直接操作する。
 
@@ -388,7 +388,7 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_str` / `rin_cons` / `rin_struct` 等）および `rin_struct_set` も失敗時（OOM・NULL 引数・不正 UTF-8 等）に `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
+- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_str` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
 - 有効な `Rin` への状態変更・評価操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（**ホスト側で `rin_drop` に渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等の入力値として渡せる）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。

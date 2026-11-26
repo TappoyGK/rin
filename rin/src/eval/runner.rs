@@ -290,7 +290,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             let mut i = len;
             while i > from {
                 i -= 1;
-                let v = self.stack.as_slice()[i];
+                let v = self.stack.get_copy(i);
                 self.pool.release_val(v);
             }
             self.stack.truncate(from);

@@ -92,13 +92,16 @@ impl EnvSlots {
     #[inline(always)]
     pub(crate) fn get(&self, id: u32) -> Option<RVal> {
         if id >= STATIC_SYM_COUNT {
-            self.dynamic
-                .as_slice()
-                .get((id - STATIC_SYM_COUNT) as usize)
-                .copied()
-                .flatten()
+            let idx = (id - STATIC_SYM_COUNT) as usize;
+            if idx < self.dynamic.len() {
+                self.dynamic.get_copy(idx)
+            } else {
+                None
+            }
         } else {
-            for &(k, v) in self.overrides.as_slice() {
+            let n = self.overrides.len();
+            for i in 0..n {
+                let (k, v) = self.overrides.get_copy(i);
                 if k == id {
                     return Some(v);
                 }

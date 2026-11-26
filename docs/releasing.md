@@ -25,6 +25,8 @@
 cargo fmt --all -- --check
 cargo clippy --workspace --locked --all-targets -- -D warnings
 cargo check -p rin --no-default-features --locked
+cargo clippy -p rin --no-default-features --locked --all-targets -- -D warnings
+cargo test -p rin --no-default-features --locked --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps
 cargo test --workspace --locked
 cargo test --workspace --locked --release

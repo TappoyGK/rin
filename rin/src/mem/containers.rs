@@ -99,14 +99,18 @@ impl<T> std::ops::Index<usize> for RawVec<T> {
 
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
-        &self.as_slice()[index]
+        assert!(index < self.len as usize);
+        // SAFETY: 直上で `index < self.len` を検査済み。
+        unsafe { &*self.ptr.as_ptr().add(index) }
     }
 }
 
 impl<T> std::ops::IndexMut<usize> for RawVec<T> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.as_mut_slice()[index]
+        assert!(index < self.len as usize);
+        // SAFETY: 直上で `index < self.len` を検査済み。
+        unsafe { &mut *self.ptr.as_ptr().add(index) }
     }
 }
 
@@ -139,6 +143,32 @@ impl<T> RawVec<T> {
     #[inline(always)]
     pub fn capacity(&self) -> usize {
         self.cap as usize
+    }
+
+    #[inline(always)]
+    pub fn get_copy(&self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        debug_assert!(index < self.len as usize);
+        // SAFETY: 呼び出し側が `index < self.len` を保証する。
+        unsafe { *self.ptr.as_ptr().add(index) }
+    }
+
+    #[inline(always)]
+    pub fn set_at(&mut self, index: usize, value: T) {
+        debug_assert!(index < self.len as usize);
+        // SAFETY: 呼び出し側が `index < self.len` を保証する。
+        unsafe {
+            *self.ptr.as_ptr().add(index) = value;
+        }
+    }
+
+    #[inline(always)]
+    pub fn replace_at(&mut self, index: usize, value: T) -> T {
+        debug_assert!(index < self.len as usize);
+        // SAFETY: 呼び出し側が `index < self.len` を保証する。
+        unsafe { std::ptr::replace(self.ptr.as_ptr().add(index), value) }
     }
 
     #[inline(always)]

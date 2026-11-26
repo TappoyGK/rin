@@ -58,19 +58,21 @@ pub(super) struct RinFrame<'a> {
     pub(super) cleanup_stack_to: u32,
     origin_line: u32,
     origin_col: u32,
-    caller_module: u16,
-    prev_active_module: u16,
+    caller_module: u32,
+    prev_active_module: u32,
     origin_kind: u8,
     origin_builtin: u8,
     pub(super) counted_depth: bool,
     _marker: PhantomData<&'a Chunk>,
 }
 
-const NO_MODULE: u16 = u16::MAX;
+const NO_MODULE: u32 = u32::MAX;
 const ORIGIN_NONE: u8 = 0;
 const ORIGIN_RIN: u8 = 1;
 const ORIGIN_HOST: u8 = 2;
 const ORIGIN_BUILTIN: u8 = 3;
+
+const _: () = assert!(BuiltinId::ALL.len() <= u8::MAX as usize);
 
 impl<'a> RinFrame<'a> {
     #[inline(always)]
@@ -86,13 +88,26 @@ impl<'a> RinFrame<'a> {
         cleanup_stack_to: usize,
         counted_depth: bool,
     ) -> Self {
+        debug_assert!(base <= u32::MAX as usize);
+        debug_assert!(frame_stack_start <= u32::MAX as usize);
+        debug_assert!(cleanup_stack_to <= u32::MAX as usize);
+        debug_assert!(caller_module != Some(NO_MODULE));
+        debug_assert!(prev_active_module != Some(NO_MODULE));
         let (origin_kind, origin_line, origin_col, origin_builtin) = match origin {
             None => (ORIGIN_NONE, 0, 0, 0),
-            Some(CallOrigin::Rin(s)) => (ORIGIN_RIN, s.line as u32, s.col as u32, 0),
+            Some(CallOrigin::Rin(s)) => (
+                ORIGIN_RIN,
+                s.line.min(u32::MAX as usize) as u32,
+                s.col.min(u32::MAX as usize) as u32,
+                0,
+            ),
             Some(CallOrigin::Host) => (ORIGIN_HOST, 0, 0, 0),
-            Some(CallOrigin::Builtin { id, at }) => {
-                (ORIGIN_BUILTIN, at.line as u32, at.col as u32, id as u8)
-            }
+            Some(CallOrigin::Builtin { id, at }) => (
+                ORIGIN_BUILTIN,
+                at.line.min(u32::MAX as usize) as u32,
+                at.col.min(u32::MAX as usize) as u32,
+                id as u8,
+            ),
         };
         Self {
             entry: encode_source(entry),
@@ -105,8 +120,8 @@ impl<'a> RinFrame<'a> {
             cleanup_stack_to: cleanup_stack_to as u32,
             origin_line,
             origin_col,
-            caller_module: caller_module.map_or(NO_MODULE, |m| m as u16),
-            prev_active_module: prev_active_module.map_or(NO_MODULE, |m| m as u16),
+            caller_module: caller_module.unwrap_or(NO_MODULE),
+            prev_active_module: prev_active_module.unwrap_or(NO_MODULE),
             origin_kind,
             origin_builtin,
             counted_depth,
@@ -169,12 +184,12 @@ impl<'a> RinFrame<'a> {
 
     #[inline(always)]
     pub(super) fn prev_mod(&self) -> Option<u32> {
-        (self.prev_active_module != NO_MODULE).then_some(self.prev_active_module as u32)
+        (self.prev_active_module != NO_MODULE).then_some(self.prev_active_module)
     }
 
     #[inline(always)]
     pub(super) fn caller_mod(&self) -> Option<u32> {
-        (self.caller_module != NO_MODULE).then_some(self.caller_module as u32)
+        (self.caller_module != NO_MODULE).then_some(self.caller_module)
     }
 
     #[inline(always)]

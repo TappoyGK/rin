@@ -403,7 +403,7 @@ impl Runner<'_, '_> {
         Ok(CallbackStep::Done(final_val))
     }
 
-    /// システムヒープを使わない自然ラン検出付き安定マージソート（`WorkArena` を一時バッファに使う）。
+    /// システムヒープを使わない自然ラン検出＋挿入ソート拡張＋ピンポン安定マージソート（`WorkArena` 使用）。
     ///
     /// 比較は常にリスト上で左の要素を第 1 引数、右の要素を第 2 引数として行う。
     /// 整列済みまたは厳密逆順の入力は O(n) の 1 パスで完了し、作業バッファ確保も不要。
@@ -412,6 +412,7 @@ impl Runner<'_, '_> {
         slice: &mut [(RVal, RVal)],
         span: Span,
     ) -> Result<(), ErrRecorded> {
+        const MIN_RUN: usize = 32;
         let n = slice.len();
         if n < 2 {
             return Ok(());
@@ -467,6 +468,31 @@ impl Runner<'_, '_> {
                     }
                 }
             }
+            // 短いランは挿入ソートで MIN_RUN まで伸ばしてマージ段数を削減する
+            let target = (start + MIN_RUN).min(n);
+            if end < target {
+                for cur in end..target {
+                    let item = slice[cur];
+                    let mut j = cur;
+                    while j > start {
+                        let ord = match self.compare_vals(slice[j - 1].0, item.0, span) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                self.pool.work.rewind(&mut self.pool.core, mark);
+                                return Err(e);
+                            }
+                        };
+                        if ord == std::cmp::Ordering::Greater {
+                            slice[j] = slice[j - 1];
+                            j -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    slice[j] = item;
+                }
+                end = target;
+            }
             if start == 0 && end == n {
                 self.pool.work.rewind(&mut self.pool.core, mark);
                 return Ok(());
@@ -495,33 +521,41 @@ impl Runner<'_, '_> {
             return Err(self.work_oom(span));
         }
         let buf = scratch.as_mut_slice();
+        let mut from_slice = true;
         while runs.len() > 1 {
+            let (src, dst): (&[_], &mut [_]) = if from_slice {
+                (&*slice, &mut *buf)
+            } else {
+                (&*buf, &mut *slice)
+            };
             let mut out_len = 0usize;
             let run_count = runs.len();
             let mut r = 0usize;
             while r < run_count {
                 if r + 1 >= run_count {
-                    let keep = runs.as_slice()[r];
-                    runs.as_mut_slice()[out_len] = keep;
+                    let (left, right) = runs.get_copy(r);
+                    dst[left..right].copy_from_slice(&src[left..right]);
+                    runs.set_at(out_len, (left, right));
                     out_len += 1;
                     break;
                 }
-                let (left, mid) = runs.as_slice()[r];
-                let (_, right) = runs.as_slice()[r + 1];
-                // 境界が既に整列済みならマージを省略できる
-                let boundary = match self.compare_vals(slice[mid - 1].0, slice[mid].0, span) {
+                let (left, mid) = runs.get_copy(r);
+                let (_, right) = runs.get_copy(r + 1);
+                let boundary = match self.compare_vals(src[mid - 1].0, src[mid].0, span) {
                     Ok(o) => o,
                     Err(e) => {
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         return Err(e);
                     }
                 };
-                if boundary == std::cmp::Ordering::Greater {
+                if boundary != std::cmp::Ordering::Greater {
+                    dst[left..right].copy_from_slice(&src[left..right]);
+                } else {
                     let mut i = left;
                     let mut j = mid;
                     let mut k = left;
                     while i < mid && j < right {
-                        let ord = match self.compare_vals(slice[i].0, slice[j].0, span) {
+                        let ord = match self.compare_vals(src[i].0, src[j].0, span) {
                             Ok(o) => o,
                             Err(e) => {
                                 self.pool.work.rewind(&mut self.pool.core, mark);
@@ -529,30 +563,33 @@ impl Runner<'_, '_> {
                             }
                         };
                         if ord != std::cmp::Ordering::Greater {
-                            buf[k] = slice[i];
+                            dst[k] = src[i];
                             i += 1;
                         } else {
-                            buf[k] = slice[j];
+                            dst[k] = src[j];
                             j += 1;
                         }
                         k += 1;
                     }
                     if i < mid {
                         let rem = mid - i;
-                        buf[k..k + rem].copy_from_slice(&slice[i..mid]);
+                        dst[k..k + rem].copy_from_slice(&src[i..mid]);
                         k += rem;
                     }
                     if j < right {
                         let rem = right - j;
-                        buf[k..k + rem].copy_from_slice(&slice[j..right]);
+                        dst[k..k + rem].copy_from_slice(&src[j..right]);
                     }
-                    slice[left..right].copy_from_slice(&buf[left..right]);
                 }
-                runs.as_mut_slice()[out_len] = (left, right);
+                runs.set_at(out_len, (left, right));
                 out_len += 1;
                 r += 2;
             }
             runs.truncate(out_len);
+            from_slice = !from_slice;
+        }
+        if !from_slice {
+            slice.copy_from_slice(buf);
         }
         self.pool.work.rewind(&mut self.pool.core, mark);
         Ok(())

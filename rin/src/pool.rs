@@ -421,13 +421,20 @@ impl ChunkTable {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [AllocBuf<Slot>] {
-        if self.len == 0 {
-            return &mut [];
+    #[inline(always)]
+    fn chunk_slot_ptr(&self, chunk_idx: usize) -> *mut Slot {
+        debug_assert!(chunk_idx < self.len);
+        // SAFETY: `chunk_idx < self.len` は初期化済みの `AllocBuf<Slot>`。
+        unsafe { (*self.ptr.as_ptr().add(chunk_idx)).as_ptr() as *mut Slot }
+    }
+
+    #[inline(always)]
+    fn write_slot(&mut self, chunk_idx: usize, in_chunk: usize, slot: Slot) {
+        debug_assert!(chunk_idx < self.len);
+        // SAFETY: `chunk_idx < self.len` かつ `in_chunk < CHUNK_SLOTS`。
+        unsafe {
+            (*self.ptr.as_ptr().add(chunk_idx)).write_at(in_chunk, slot);
         }
-        // SAFETY: `0..self.len` は初期化済み。
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
     fn push(&mut self, core: &mut AllocCore<'_>, buf: AllocBuf<Slot>) -> Option<()> {
@@ -557,14 +564,7 @@ impl<'a> Pool<'a> {
         let in_chunk = idx & (CHUNK_SLOTS - 1);
         debug_assert!(chunk_idx < self.chunks.len());
         // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
-        unsafe {
-            &*self
-                .chunks
-                .as_slice()
-                .get_unchecked(chunk_idx)
-                .as_ptr()
-                .add(in_chunk)
-        }
+        unsafe { &*self.chunks.chunk_slot_ptr(chunk_idx).add(in_chunk) }
     }
 
     #[inline(always)]
@@ -574,14 +574,7 @@ impl<'a> Pool<'a> {
         let in_chunk = idx & (CHUNK_SLOTS - 1);
         debug_assert!(chunk_idx < self.chunks.len());
         // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
-        unsafe {
-            &mut *self
-                .chunks
-                .as_mut_slice()
-                .get_unchecked_mut(chunk_idx)
-                .as_mut_ptr()
-                .add(in_chunk)
-        }
+        unsafe { &mut *self.chunks.chunk_slot_ptr(chunk_idx).add(in_chunk) }
     }
 
     #[inline(always)]
@@ -842,9 +835,8 @@ impl<'a> Pool<'a> {
             let chunk_idx = self.chunks.len() - 1;
             let in_chunk = self.last_chunk_len;
             let global_idx = (chunk_idx * CHUNK_SLOTS + in_chunk) as u32;
-            let slot = Slot::Live { rc: 1, obj };
-            // SAFETY: `in_chunk < CHUNK_SLOTS` かつ未初期化。
-            unsafe { self.chunks.as_mut_slice()[chunk_idx].write_at(in_chunk, slot) };
+            self.chunks
+                .write_slot(chunk_idx, in_chunk, Slot::Live { rc: 1, obj });
             self.last_chunk_len += 1;
             return Ok(ObjId(global_idx));
         }
@@ -882,9 +874,8 @@ impl<'a> Pool<'a> {
         }
         let chunk_idx = self.chunks.len() - 1;
         let global_idx = (chunk_idx * CHUNK_SLOTS) as u32;
-        let slot = Slot::Live { rc: 1, obj };
-        // SAFETY: 新規チャンクの 0 番目は未初期化。
-        unsafe { self.chunks.as_mut_slice()[chunk_idx].write_at(0, slot) };
+        self.chunks
+            .write_slot(chunk_idx, 0, Slot::Live { rc: 1, obj });
         self.last_chunk_len = 1;
         Ok(ObjId(global_idx))
     }

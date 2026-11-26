@@ -126,7 +126,9 @@ RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, c
 /* 直近の対象操作のエラー。エラーなし、または rin == NULL なら NULL。
  * ポインタと文字列は同じ rin の次の評価・呼び出し・状態変更操作（rin_build / rin_eval /
  * rin_eval_with / rin_load / rin_call / rin_call_in / rin_bind / rin_freeze /
- * rin_set_math_fma）、値構築失敗（rin_int 等 / rin_struct_set）、または rin_free まで有効。
+ * rin_set_math_fma）、値構築失敗（rin_int 等 / rin_struct_set）、
+ * 所有ハンドルを返す読み取り 5 関数（rin_car / rin_cdr / rin_field / rin_unwrap /
+ * rin_tuple_get）のハンドル確保失敗、または rin_free まで有効。
  * 状態変更・評価操作は冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。
  * 値構築関数（rin_int 等）および rin_struct_set は失敗時（OOM・NULL 引数・不正 UTF-8 等）に
  * NULL / false を返してエラーを記録する。
