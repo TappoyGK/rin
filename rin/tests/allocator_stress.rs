@@ -111,7 +111,9 @@ fn oom_sweep_every_byte_across_phases() {
                     .val_struct("Box", &[("head", s), ("rest", lst)])
                     .map_err(|e| e.kind())?;
                 owned.push(st);
-                let var = b.val_variant("Tag", "Full", Some(st)).map_err(|e| e.kind())?;
+                let var = b
+                    .val_variant("Tag", "Full", Some(st))
+                    .map_err(|e| e.kind())?;
                 owned.push(var);
                 Ok(())
             })();

@@ -233,11 +233,13 @@ impl<'a> Runner<'a, '_> {
             match action {
                 FrameAction::Done(val) => return Ok(val),
                 FrameAction::FailUnwound(err) => return Err(self.unwind_frames(frames, err)),
-                FrameAction::ReturnToBuiltin(val) => match self.deliver_to_builtin(&mut frames, val)? {
-                    DeliverAction::Done(done) => return Ok(done),
-                    DeliverAction::ResumeTopRin => {}
-                    DeliverAction::EnterRin(child) => current = Some(child),
-                },
+                FrameAction::ReturnToBuiltin(val) => {
+                    match self.deliver_to_builtin(&mut frames, val)? {
+                        DeliverAction::Done(done) => return Ok(done),
+                        DeliverAction::ResumeTopRin => {}
+                        DeliverAction::EnterRin(child) => current = Some(child),
+                    }
+                }
                 FrameAction::CallCallbackBuiltin {
                     builtin,
                     arg_start,
@@ -257,7 +259,13 @@ impl<'a> Runner<'a, '_> {
                         &mut self.pool.core,
                         FrameEntry::Rin(frame),
                     );
-                    match self.start_callback_from_stack(&mut frames, builtin, arg_start, argc, span) {
+                    match self.start_callback_from_stack(
+                        &mut frames,
+                        builtin,
+                        arg_start,
+                        argc,
+                        span,
+                    ) {
                         Ok(Some(child)) => current = Some(child),
                         Ok(None) => {}
                         Err(err) => return Err(self.unwind_frames(frames, err)),

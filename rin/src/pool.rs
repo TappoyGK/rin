@@ -557,7 +557,14 @@ impl<'a> Pool<'a> {
         let in_chunk = idx & (CHUNK_SLOTS - 1);
         debug_assert!(chunk_idx < self.chunks.len());
         // SAFETY: 有効な `ObjId` であり、`in_chunk < CHUNK_SLOTS`。
-        unsafe { &*self.chunks.as_slice().get_unchecked(chunk_idx).as_ptr().add(in_chunk) }
+        unsafe {
+            &*self
+                .chunks
+                .as_slice()
+                .get_unchecked(chunk_idx)
+                .as_ptr()
+                .add(in_chunk)
+        }
     }
 
     #[inline(always)]

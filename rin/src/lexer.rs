@@ -140,7 +140,6 @@ impl<'a> Lexer<'a> {
         }
         skipped
     }
-
 }
 
 #[cfg(feature = "std-value")]

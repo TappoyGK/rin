@@ -84,9 +84,12 @@ pub(in crate::eval) enum CallbackStep {
 
 impl Runner<'_, '_> {
     pub(in crate::eval) fn cleanup_builtin_frame(&mut self, frame: &mut BuiltinFrame) {
-        self.pool.release_val(std::mem::replace(&mut frame.callback, RVal::Void));
-        self.pool.release_val(std::mem::replace(&mut frame.items_owner, RVal::Void));
-        self.pool.release_val(std::mem::replace(&mut frame.acc, RVal::Void));
+        self.pool
+            .release_val(std::mem::replace(&mut frame.callback, RVal::Void));
+        self.pool
+            .release_val(std::mem::replace(&mut frame.items_owner, RVal::Void));
+        self.pool
+            .release_val(std::mem::replace(&mut frame.acc, RVal::Void));
         self.release_slice(frame.out.as_slice());
         frame.out.clear();
         for &(k, _) in frame.keyed.as_slice() {

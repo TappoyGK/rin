@@ -823,14 +823,12 @@ impl Runner<'_, '_> {
                 };
                 match step {
                     CallbackStep::Invoke {
-                        callee,
-                        args,
-                        argc,
-                        ..
+                        callee, args, argc, ..
                     } if matches!(
                         (callee, bframe.callback),
                         (RVal::Obj(a), RVal::Obj(b)) if a == b
-                    ) => {
+                    ) =>
+                    {
                         // 同じクロージャへの次要素呼び出し：
                         // スタック長を変えず、引数・ローカルスロットをその場で入れ替えて `ip = 0` へ戻る。
                         let local_count = proto.local_count as usize;
@@ -841,8 +839,10 @@ impl Runner<'_, '_> {
                             self.pool.release_val(old_v);
                         }
                         for i in argc..local_count {
-                            let old_v =
-                                std::mem::replace(&mut self.stack.as_mut_slice()[base + i], RVal::Void);
+                            let old_v = std::mem::replace(
+                                &mut self.stack.as_mut_slice()[base + i],
+                                RVal::Void,
+                            );
                             self.pool.release_val(old_v);
                         }
                         ip = 0;
