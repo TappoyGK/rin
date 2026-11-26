@@ -13,12 +13,12 @@ impl Counts {
         self.fields += match obj {
             Obj::Cons { .. } => 2,
             Obj::Array(xs) | Obj::Tuple(xs) => xs.len(),
-            Obj::Struct { fields, .. } => fields.len(),
+            Obj::Struct { values, .. } => values.len(),
             Obj::Module { exports, .. } => exports.len(),
             Obj::Closure { captures, .. } => captures.len(),
             Obj::Some(_) | Obj::Ok(_) | Obj::Err(_) => 1,
             Obj::Variant { data, .. } => usize::from(data.is_some()),
-            Obj::Str(_) => 0,
+            Obj::Str(_) | Obj::StructDesc { .. } => 0,
         };
     }
 }
@@ -28,9 +28,7 @@ fn release_walks_only_freed_objects_and_their_edges() {
     for n in [0, 1, 1000, 10_000] {
         let mut alloc = HeapAllocator;
         let mut pool = Pool::new(&mut alloc, usize::MAX);
-        let unrelated = pool
-            .alloc_obj(Obj::Str(Rc::from("keep")), Span::default())
-            .unwrap();
+        let unrelated = pool.alloc_str("keep", Span::default()).unwrap();
         let baseline = pool.live_bytes();
         let mut tail = RVal::EmptyList;
         // 所有権を次の節へ移し、参照数1の鎖を組み立てる。
@@ -68,16 +66,14 @@ fn shared_children_are_scanned_only_on_the_last_reference() {
     for n in [1, 1000, 10_000] {
         let mut alloc = HeapAllocator;
         let mut pool = Pool::new(&mut alloc, usize::MAX);
-        let shared = pool
-            .alloc_obj(Obj::Array(vec![RVal::Int(1); n]), Span::default())
-            .unwrap();
+        let items = vec![RVal::Int(1); n];
+        let shared = pool.alloc_array_owned(&items, Span::default()).unwrap();
         let baseline = pool.live_bytes();
         for _ in 0..n {
             pool.retain(shared);
         }
-        let root = pool
-            .alloc_obj(Obj::Tuple(vec![RVal::Obj(shared); n]), Span::default())
-            .unwrap();
+        let tuple_items = vec![RVal::Obj(shared); n];
+        let root = pool.alloc_tuple_owned(&tuple_items, Span::default()).unwrap();
         pool.release(root);
         assert_eq!(
             pool.release_counts,

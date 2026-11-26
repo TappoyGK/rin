@@ -30,22 +30,40 @@ impl EnvState<'_> {
         {
             self.pool.release_val(v);
         }
-        let mut runner = self.runner(Some(mod_id), false);
-        let v = runner.run_top_chunk(&chunk).map_err(with_mod)?;
+        let mod_id_u32 = mod_id;
+        let mut runner = self.runner(Some(mod_id_u32), false);
+        let v = match runner.run_top_chunk(&chunk) {
+            Ok(v) => v,
+            Err(e) => {
+                for old in std::mem::take(&mut self.module_envs[mod_id_u32 as usize])
+                    .into_iter()
+                    .flatten()
+                {
+                    self.pool.release_val(old);
+                }
+                return Err(with_mod(e));
+            }
+        };
         runner.pool.release_val(v);
         let export_filter = runner.export_list.take();
-        let mod_env = &self.module_envs[mod_id as usize];
-        let mut exports = BTreeMap::new();
-        match export_filter {
+        let mod_env = &self.module_envs[mod_id_u32 as usize];
+        let mut exports: Vec<(&str, RVal)> = Vec::new();
+        match &export_filter {
             Some(names) => {
                 for sym in names {
                     let Some(val) = self
                         .syms
-                        .get(&sym)
+                        .get(sym)
                         .and_then(|id| mod_env.get(id as usize).copied().flatten())
                     else {
-                        for v in exports.into_values() {
+                        for (_, v) in exports {
                             self.pool.release_val(v);
+                        }
+                        for old in std::mem::take(&mut self.module_envs[mod_id_u32 as usize])
+                            .into_iter()
+                            .flatten()
+                        {
+                            self.pool.release_val(old);
                         }
                         return Err(Error::runtime(
                             "expr.module",
@@ -54,7 +72,12 @@ impl EnvState<'_> {
                         ));
                     };
                     self.pool.retain_val(val);
-                    exports.insert(Rc::from(sym.as_str()), val);
+                    if let Some(pos) = exports.iter().position(|(k, _)| *k == sym.as_str()) {
+                        let prev = std::mem::replace(&mut exports[pos].1, val);
+                        self.pool.release_val(prev);
+                    } else {
+                        exports.push((sym.as_str(), val));
+                    }
                 }
             }
             None => {
@@ -63,19 +86,25 @@ impl EnvState<'_> {
                     let is_module = matches!(val, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Module { .. }));
                     if !is_module {
                         self.pool.retain_val(val);
-                        exports.insert(Rc::clone(&self.syms.names[id]), val);
+                        exports.push((self.syms.names[id].as_ref(), val));
                     }
                 }
             }
         }
-        let mod_id = self.pool.alloc_obj(
-            Obj::Module {
-                name: Rc::from(name),
-                exports,
-            },
-            Span::default(),
-        )?;
-        if let Some(prev) = self.modules.insert(name.to_string(), RVal::Obj(mod_id)) {
+        exports.sort_by_key(|(a, _)| *a);
+        let mod_obj_id = match self.pool.alloc_module_owned(name, &exports, Span::default()) {
+            Ok(id) => id,
+            Err(e) => {
+                for old in std::mem::take(&mut self.module_envs[mod_id_u32 as usize])
+                    .into_iter()
+                    .flatten()
+                {
+                    self.pool.release_val(old);
+                }
+                return Err(with_mod(e));
+            }
+        };
+        if let Some(prev) = self.modules.insert(name.to_string(), RVal::Obj(mod_obj_id)) {
             self.pool.release_val(prev);
         }
         Ok(())
@@ -103,14 +132,14 @@ impl EnvState<'_> {
         let Obj::Module { exports, .. } = self.pool.get(mod_id) else {
             unreachable!();
         };
-        let Some(&callee) = exports.get(fn_name) else {
+        let Some(callee) = Pool::find_module_export(*exports, fn_name) else {
             return Err(Error::runtime(
                 "expr.module",
                 Span::default(),
                 available(
                     format!("module '{mod_name}' has no export '{fn_name}'"),
                     "exports",
-                    exports.keys().map(|name| name.as_ref()),
+                    exports.iter().map(|e| e.name.as_str()),
                 ),
             ));
         };

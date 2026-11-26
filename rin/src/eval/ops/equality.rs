@@ -102,7 +102,7 @@ fn objects_equal(
                         if !try_charge_steps(remaining, s1.len().min(s2.len())) {
                             return None;
                         }
-                        s1 == s2
+                        s1.as_str() == s2.as_str()
                     }
                     (Obj::Array(xs1), Obj::Array(xs2)) | (Obj::Tuple(xs1), Obj::Tuple(xs2)) => {
                         if xs1.len() != xs2.len() {
@@ -116,34 +116,41 @@ fn objects_equal(
                     }
                     (
                         Obj::Struct {
-                            name: n1,
-                            fields: f1,
+                            desc: d1,
+                            values: v1,
                         },
                         Obj::Struct {
-                            name: n2,
-                            fields: f2,
+                            desc: d2,
+                            values: v2,
                         },
                     ) => {
+                        let d1 = *d1;
+                        let d2 = *d2;
+                        let n1 = pool.struct_desc_name(d1);
+                        let n2 = pool.struct_desc_name(d2);
                         if !try_charge_steps(remaining, n1.len().min(n2.len())) {
                             return None;
                         }
-                        if n1 != n2 || f1.len() != f2.len() {
+                        if n1 != n2 || v1.len() != v2.len() {
                             return Some(false);
                         }
-                        match scalar_fields_equal(remaining, f1, f2) {
+                        match scalar_fields_equal(pool, remaining, d1, v1.as_slice(), d2, v2.as_slice()) {
                             ScalarFields::Equal => continue,
                             ScalarFields::Different => return Some(false),
                             ScalarFields::OutOfSteps => return None,
                             ScalarFields::NeedsObjects => {}
                         }
-                        for ((k1, v1), (k2, v2)) in f1.iter().zip(f2.iter()).rev() {
+                        let len = v1.len();
+                        for idx in (0..len).rev() {
+                            let k1 = pool.struct_desc_field_name(d1, idx);
+                            let k2 = pool.struct_desc_field_name(d2, idx);
                             if !try_charge_steps(remaining, 1 + k1.len().min(k2.len())) {
                                 return None;
                             }
                             if k1 != k2 {
                                 return Some(false);
                             }
-                            work.push((*v1, *v2));
+                            work.push((v1[idx], v2[idx]));
                         }
                         true
                     }
@@ -165,8 +172,8 @@ fn objects_equal(
                         if !try_charge_steps(remaining, v1.len().min(v2.len())) {
                             return None;
                         }
-                        t1 == t2
-                            && v1 == v2
+                        t1.as_str() == t2.as_str()
+                            && v1.as_str() == v2.as_str()
                             && match (d1, d2) {
                                 (None, None) => true,
                                 (Some(x), Some(y)) => {
@@ -206,13 +213,18 @@ enum ScalarFields {
 
 #[inline(never)]
 fn scalar_fields_equal(
+    pool: &crate::pool::Pool<'_>,
     remaining: &mut usize,
-    a: &std::collections::BTreeMap<std::rc::Rc<str>, RVal>,
-    b: &std::collections::BTreeMap<std::rc::Rc<str>, RVal>,
+    d1: crate::pool::StructDescRef,
+    v1: &[RVal],
+    d2: crate::pool::StructDescRef,
+    v2: &[RVal],
 ) -> ScalarFields {
     let mut left = *remaining;
     let mut mismatch = None;
-    for (index, ((ka, va), (kb, vb))) in a.iter().zip(b.iter()).enumerate().rev() {
+    for index in (0..v1.len()).rev() {
+        let ka = pool.struct_desc_field_name(d1, index);
+        let kb = pool.struct_desc_field_name(d2, index);
         if !try_charge_steps(&mut left, 1 + ka.len().min(kb.len())) {
             return ScalarFields::OutOfSteps;
         }
@@ -220,14 +232,16 @@ fn scalar_fields_equal(
             *remaining = left;
             return ScalarFields::Different;
         }
-        if matches!((*va, *vb), (RVal::Obj(x), RVal::Obj(y)) if x != y) {
+        let va = v1[index];
+        let vb = v2[index];
+        if matches!((va, vb), (RVal::Obj(x), RVal::Obj(y)) if x != y) {
             return ScalarFields::NeedsObjects;
         }
-        if !Runner::scalars_equal(*va, *vb) {
+        if !Runner::scalars_equal(va, vb) {
             mismatch = Some(index + 1);
         }
     }
-    if !try_charge_steps(&mut left, mismatch.unwrap_or(a.len())) {
+    if !try_charge_steps(&mut left, mismatch.unwrap_or(v1.len())) {
         return ScalarFields::OutOfSteps;
     }
     *remaining = left;

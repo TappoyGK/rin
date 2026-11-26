@@ -10,7 +10,7 @@ impl Runner<'_, '_> {
         entry: &FrameSource<'_>,
         tail_source: &mut Option<FrameSource<'_>>,
         tail_calls: &mut usize,
-        #[cfg(not(debug_assertions))] mut captures: Rc<[RVal]>,
+        #[cfg(not(debug_assertions))] mut captures: ObjSlice<RVal>,
         base: usize,
         #[cfg(not(debug_assertions))] local_count: usize,
         #[cfg(debug_assertions)] resume: &mut Resume,
@@ -65,9 +65,9 @@ impl Runner<'_, '_> {
                     Op::Bool(b) => self.stack.push(RVal::Bool(b)),
                     Op::Char(c) => self.stack.push(RVal::Char(c)),
                     Op::Str(idx) => {
-                        let s = Rc::clone(&chunk.strings[idx as usize]);
+                        let s = &chunk.strings[idx as usize];
                         let span = chunk.spans[ip - 1];
-                        let id = self.pool.alloc_obj(Obj::Str(s), span)?;
+                        let id = self.pool.alloc_str(s.as_ref(), span)?;
                         self.stack.push(RVal::Obj(id));
                     }
                     Op::None => self.stack.push(RVal::None),
@@ -116,14 +116,16 @@ impl Runner<'_, '_> {
                             ));
                         }
                         let proto = &chunk.protos[proto_idx as usize];
-                        let closure = self.build_closure(proto, captures.as_ref(), base, span)?;
+                        let closure =
+                            self.build_closure(proto, captures.as_slice(), base, span)?;
                         self.define_top(name_id, closure);
                         self.stack.push(RVal::Void);
                     }
                     Op::MakeClosure(proto_idx) => {
                         let span = chunk.spans[ip - 1];
                         let proto = &chunk.protos[proto_idx as usize];
-                        let closure = self.build_closure(proto, captures.as_ref(), base, span)?;
+                        let closure =
+                            self.build_closure(proto, captures.as_slice(), base, span)?;
                         self.stack.push(closure);
                     }
                     Op::MakeList(n) => {
@@ -136,28 +138,45 @@ impl Runner<'_, '_> {
                         let span = chunk.spans[ip - 1];
                         let start = self.stack.len() - n as usize;
                         let items: Vec<RVal> = self.stack.drain(start..).collect();
-                        let id = self.pool.alloc_obj(Obj::Tuple(items), span)?;
+                        let id = self.pool.alloc_tuple_owned(&items, span)?;
                         self.stack.push(RVal::Obj(id));
                     }
                     Op::MakeStruct(s_idx) => {
                         let span = chunk.spans[ip - 1];
                         let desc = &chunk.structs[s_idx as usize];
                         let start = self.stack.len() - desc.fields.len();
-                        let mut map = BTreeMap::new();
+                        let mut pairs: Vec<(&str, RVal)> = Vec::with_capacity(desc.fields.len());
                         for (idx, fname) in desc.fields.iter().enumerate() {
                             let val = self.stack[start + idx];
-                            if let Some(prev) = map.insert(Rc::clone(fname), val) {
+                            if let Some(pos) =
+                                pairs.iter().position(|(k, _)| *k == fname.as_ref())
+                            {
+                                let prev = std::mem::replace(&mut pairs[pos].1, val);
                                 self.pool.release_val(prev);
+                            } else {
+                                pairs.push((fname.as_ref(), val));
                             }
                         }
                         self.stack.truncate(start);
-                        let id = self.pool.alloc_obj(
-                            Obj::Struct {
-                                name: Rc::clone(&desc.name),
-                                fields: map,
-                            },
+                        pairs.sort_by_key(|(a, _)| *a);
+                        let field_names: Vec<&str> = pairs.iter().map(|(k, _)| *k).collect();
+                        let field_vals: Vec<RVal> = pairs.iter().map(|(_, v)| *v).collect();
+                        let desc_ref = match self.pool.intern_struct_desc(
+                            desc.name.as_ref(),
+                            &field_names,
                             span,
-                        )?;
+                        ) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                for v in field_vals {
+                                    self.pool.release_val(v);
+                                }
+                                return Err(e);
+                            }
+                        };
+                        let id = self
+                            .pool
+                            .alloc_struct_owned(desc_ref, &field_vals, span)?;
                         self.stack.push(RVal::Obj(id));
                     }
                     Op::WithCheckStruct => {
@@ -186,59 +205,58 @@ impl Runner<'_, '_> {
                         let RVal::Obj(id) = base_val else {
                             unreachable!();
                         };
-                        let Obj::Struct { name, fields } = self.pool.get(id) else {
+                        let Obj::Struct { desc, .. } = *self.pool.get(id) else {
                             unreachable!();
                         };
-                        if !fields.contains_key(fname.as_ref()) {
+                        if self.pool.struct_desc_find_field(desc, fname.as_ref()).is_none() {
+                            let name = self.pool.struct_desc_name(desc);
+                            let count = self.pool.struct_desc_field_count(desc);
                             return Err(Error::runtime(
                                 "expr.with",
                                 span,
                                 available(
                                     format!("{name} has no field '{fname}'"),
                                     "fields",
-                                    fields.keys().map(|name| name.as_ref()),
+                                    (0..count).map(|i| self.pool.struct_desc_field_name(desc, i)),
                                 ),
                             ));
                         }
                     }
                     Op::WithFinish(s_idx) => {
                         let span = chunk.spans[ip - 1];
-                        let desc = &chunk.structs[s_idx as usize];
-                        let n = desc.fields.len();
+                        let patch_desc = &chunk.structs[s_idx as usize];
+                        let n = patch_desc.fields.len();
                         let val_start = self.stack.len() - n;
                         let base_val = self.stack[val_start - 1];
                         let RVal::Obj(id) = base_val else {
                             unreachable!();
                         };
-                        let Obj::Struct { name, fields } = self.pool.get(id) else {
+                        let Obj::Struct { desc, values } = *self.pool.get(id) else {
                             unreachable!();
                         };
                         if !super::super::runner::try_charge_steps(
                             &mut self.steps_left,
-                            fields.len(),
+                            values.len(),
                         ) {
                             return self.step_limit_result(span);
                         }
-                        let name = name.clone();
-                        let mut updated = fields.clone();
-                        for &v in updated.values() {
+                        let mut updated: Vec<RVal> = values.as_slice().to_vec();
+                        for &v in &updated {
                             self.pool.retain_val(v);
                         }
-                        for (idx, fname) in desc.fields.iter().enumerate() {
+                        for (idx, fname) in patch_desc.fields.iter().enumerate() {
                             let val = self.stack[val_start + idx];
-                            if let Some(prev) = updated.insert(Rc::clone(fname), val) {
-                                self.pool.release_val(prev);
-                            }
+                            let fpos = self
+                                .pool
+                                .struct_desc_find_field(desc, fname.as_ref())
+                                .expect("WithCheckField already verified field");
+                            let prev = std::mem::replace(&mut updated[fpos], val);
+                            self.pool.release_val(prev);
                         }
                         self.stack.truncate(val_start - 1);
+                        self.pool.struct_desc_retain(desc);
                         self.pool.release_val(base_val);
-                        let new_id = self.pool.alloc_obj(
-                            Obj::Struct {
-                                name,
-                                fields: updated,
-                            },
-                            span,
-                        )?;
+                        let new_id = self.pool.alloc_struct_owned(desc, &updated, span)?;
                         self.stack.push(RVal::Obj(new_id));
                     }
                     Op::MakeVariant {
@@ -252,12 +270,10 @@ impl Runner<'_, '_> {
                         } else {
                             None
                         };
-                        let id = self.pool.alloc_obj(
-                            Obj::Variant {
-                                type_name: Rc::clone(&chunk.strings[type_name as usize]),
-                                variant: Rc::clone(&chunk.strings[variant as usize]),
-                                data,
-                            },
+                        let id = self.pool.alloc_variant_owned(
+                            chunk.strings[type_name as usize].as_ref(),
+                            chunk.strings[variant as usize].as_ref(),
+                            data,
                             span,
                         )?;
                         self.stack.push(RVal::Obj(id));
@@ -285,26 +301,36 @@ impl Runner<'_, '_> {
                         let field = &chunk.strings[f_idx as usize];
                         let val = self.stack.pop().expect("stack underflow on GetField");
                         let res = match val {
-                            RVal::Obj(id) => match self.pool.get(id) {
-                                Obj::Struct { name, fields } => {
-                                    match fields.get(field.as_ref()).copied() {
-                                        Some(fv) => {
+                            RVal::Obj(id) => match *self.pool.get(id) {
+                                Obj::Struct { desc, values } => {
+                                    match self.pool.struct_desc_find_field(desc, field.as_ref()) {
+                                        Some(fpos) => {
+                                            let fv = values[fpos];
                                             self.pool.retain_val(fv);
                                             Ok(fv)
                                         }
-                                        None => Err(Error::runtime(
-                                            "expr.field",
-                                            span,
-                                            available(
-                                                format!("{name} has no field '{field}'"),
-                                                "fields",
-                                                fields.keys().map(|name| name.as_ref()),
-                                            ),
-                                        )),
+                                        None => {
+                                            let name = self.pool.struct_desc_name(desc);
+                                            let count = self.pool.struct_desc_field_count(desc);
+                                            Err(Error::runtime(
+                                                "expr.field",
+                                                span,
+                                                available(
+                                                    format!("{name} has no field '{field}'"),
+                                                    "fields",
+                                                    (0..count).map(|i| {
+                                                        self.pool.struct_desc_field_name(desc, i)
+                                                    }),
+                                                ),
+                                            ))
+                                        }
                                     }
                                 }
                                 Obj::Module { name, exports } => {
-                                    match exports.get(field.as_ref()).copied() {
+                                    match crate::pool::Pool::find_module_export(
+                                        exports,
+                                        field.as_ref(),
+                                    ) {
                                         Some(fv) => {
                                             self.pool.retain_val(fv);
                                             Ok(fv)
@@ -313,9 +339,12 @@ impl Runner<'_, '_> {
                                             "expr.module",
                                             span,
                                             available(
-                                                format!("module '{name}' has no export '{field}'"),
+                                                format!(
+                                                    "module '{}' has no export '{field}'",
+                                                    name.as_str()
+                                                ),
                                                 "exports",
-                                                exports.keys().map(|name| name.as_ref()),
+                                                exports.iter().map(|e| e.name.as_str()),
                                             ),
                                         )),
                                     }
@@ -481,7 +510,7 @@ impl Runner<'_, '_> {
                             {
                                 let (proto, cap) = match self.pool.get(id) {
                                     Obj::Closure { proto, captures } => {
-                                        (Rc::clone(proto), Rc::clone(captures))
+                                        (std::rc::Rc::clone(proto), *captures)
                                     }
                                     _ => {
                                         return Err(Error::runtime(

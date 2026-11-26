@@ -40,8 +40,9 @@ impl<'a> Builder<'a> {
     }
 
     /// 大域環境と読み込み済みモジュールを凍結し、実行段階の [`Machine`] へ移行する。
-    pub fn freeze(self) -> Result<Machine<'a>, Error> {
+    pub fn freeze(mut self) -> Result<Machine<'a>, Error> {
         self.check_freeze()?;
+        self.inner.pool.freeze_perm();
         Ok(Machine { inner: self.inner })
     }
 

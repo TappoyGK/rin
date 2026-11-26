@@ -157,25 +157,18 @@ impl<'a, 'p> Runner<'a, 'p> {
         base: usize,
         span: Span,
     ) -> Result<RVal, Error> {
-        let cap_vals: Rc<[RVal]> = proto
-            .captures
-            .iter()
-            .map(|cap| {
-                let v = match cap {
-                    Capture::Local(slot) => self.stack[base + *slot as usize],
-                    Capture::Upvalue(idx) => captures[*idx as usize],
-                };
-                self.pool.retain_val(v);
-                v
-            })
-            .collect();
-        let id = self.pool.alloc_obj(
-            Obj::Closure {
-                proto: Rc::clone(proto),
-                captures: cap_vals,
-            },
-            span,
-        )?;
+        let mut cap_vals = Vec::with_capacity(proto.captures.len());
+        for cap in &proto.captures {
+            let v = match cap {
+                Capture::Local(slot) => self.stack[base + *slot as usize],
+                Capture::Upvalue(idx) => captures[*idx as usize],
+            };
+            self.pool.retain_val(v);
+            cap_vals.push(v);
+        }
+        let id = self
+            .pool
+            .alloc_closure_owned(Rc::clone(proto), &cap_vals, span)?;
         Ok(RVal::Obj(id))
     }
 
@@ -185,7 +178,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             .resize(base + chunk.local_count as usize, RVal::Void);
         let res = self.exec_frame(
             FrameSource::Top(chunk),
-            Rc::from([]),
+            crate::pool::ObjSlice::empty(),
             base,
             chunk.local_count as usize,
             None,
@@ -236,7 +229,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         match callee {
             RVal::Obj(id) => {
                 let (proto, captures) = match self.pool.get(id) {
-                    Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
+                    Obj::Closure { proto, captures } => (Rc::clone(proto), *captures),
                     _ => {
                         #[cfg(debug_assertions)]
                         return Err(self.call_type_error(callee, span));

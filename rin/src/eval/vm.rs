@@ -1,13 +1,10 @@
 //! バイトコード命令の実行ループとスタックフレーム巻き戻し処理を実装する。
 
-use std::collections::BTreeMap;
-use std::rc::Rc;
-
 use crate::ast::Pattern;
 use crate::bytecode::{BuiltinId, Op};
 use crate::diagnostic::{available, suggest};
 use crate::error::{Error, Span, StackFrame};
-use crate::pool::{Obj, RVal};
+use crate::pool::{Obj, ObjSlice, RVal};
 
 use super::{CallOrigin, FrameSource, Runner};
 
@@ -15,7 +12,7 @@ use super::{CallOrigin, FrameSource, Runner};
 struct Resume {
     ip: usize,
     stack_start: usize,
-    captures: Rc<[RVal]>,
+    captures: ObjSlice<RVal>,
 }
 
 // Release の戻り値は従来どおり RVal。Debug だけ呼び出し前に命令ループを抜ける。
@@ -36,7 +33,7 @@ enum FrameExit {
 macro_rules! call_closure {
     ($runner:ident, $id:ident, $callee:ident, $arg_start:ident, $argc:ident, $span:ident, $result:ident => $finish:expr) => {{
         let (proto, cap) = match $runner.pool.get($id) {
-            Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
+            Obj::Closure { proto, captures } => (std::rc::Rc::clone(proto), *captures),
             _ => {
                 #[cfg(debug_assertions)]
                 return Err($runner.call_type_error($callee, $span));
@@ -91,7 +88,7 @@ impl Runner<'_, '_> {
     pub(super) fn exec_frame(
         &mut self,
         entry: FrameSource<'_>,
-        captures: Rc<[RVal]>,
+        captures: ObjSlice<RVal>,
         base: usize,
         local_count: usize,
         origin: Option<CallOrigin<'_>>,

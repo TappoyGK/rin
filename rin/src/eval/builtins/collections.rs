@@ -16,7 +16,7 @@ impl Runner<'_, '_> {
                     if !super::super::runner::try_charge_steps(&mut self.steps_left, s.len()) {
                         return self.step_limit_result(span);
                     }
-                    return Ok(RVal::Int(s.chars().count() as i64));
+                    return Ok(RVal::Int(s.as_str().chars().count() as i64));
                 }
                 _ => {}
             }
@@ -348,7 +348,7 @@ impl Runner<'_, '_> {
         for (x, y) in a.into_iter().zip(b) {
             self.pool.retain_val(x);
             self.pool.retain_val(y);
-            match self.pool.alloc_obj(Obj::Tuple(vec![x, y]), span) {
+            match self.pool.alloc_tuple_owned(&[x, y], span) {
                 Ok(id) => out.push(RVal::Obj(id)),
                 Err(e) => {
                     self.release_all(out);
@@ -369,7 +369,7 @@ impl Runner<'_, '_> {
             self.pool.retain_val(x);
             match self
                 .pool
-                .alloc_obj(Obj::Tuple(vec![RVal::Int(i as i64), x]), span)
+                .alloc_tuple_owned(&[RVal::Int(i as i64), x], span)
             {
                 Ok(id) => out.push(RVal::Obj(id)),
                 Err(e) => {
@@ -458,7 +458,7 @@ impl Runner<'_, '_> {
         for &item in &items {
             self.pool.retain_val(item);
         }
-        Ok(RVal::Obj(self.pool.alloc_obj(Obj::Array(items), span)?))
+        Ok(RVal::Obj(self.pool.alloc_array_owned(&items, span)?))
     }
 
     pub(super) fn builtin_array_to_list(
@@ -479,7 +479,7 @@ impl Runner<'_, '_> {
                     if !super::super::runner::try_charge_steps(&mut self.steps_left, arr.len()) {
                         return self.step_limit_result(span);
                     }
-                    arr.clone()
+                    arr.as_slice().to_vec()
                 }
                 _ => {
                     return Err(Error::runtime(

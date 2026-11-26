@@ -235,7 +235,7 @@ impl Runner<'_, '_> {
                 .ok_or_else(|| Error::runtime("fn.list", span, "cannot order NaN values")),
             (RVal::Char(x), RVal::Char(y)) => Ok(x.cmp(&y)),
             (RVal::Obj(id1), RVal::Obj(id2)) => match (self.pool.get(id1), self.pool.get(id2)) {
-                (Obj::Str(s1), Obj::Str(s2)) => Ok(s1.cmp(s2)),
+                (Obj::Str(s1), Obj::Str(s2)) => Ok(s1.as_str().cmp(s2.as_str())),
                 _ => Err(Error::runtime(
                     "fn.list",
                     span,
