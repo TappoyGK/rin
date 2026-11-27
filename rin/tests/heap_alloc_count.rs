@@ -279,6 +279,13 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             out.clear();
             write!(out, "{fv}").unwrap();
             assert_eq!(out.as_str(), "1.0");
+
+            // 複数行文字列リテラル・埋め込みのゼロヒープ評価
+            let ml = machine
+                .eval_ref("(let (x 7) \"\"\"\n  a=${x}\n    b=${(+ x\n1)}\n  \"\"\")")
+                .unwrap();
+            assert_eq!(ml.tag(), ValueTag::Text);
+            assert_eq!(ml.as_text(), Some("a=7\n  b=8"));
         }
 
         // Error paths + backtrace + suggestions + Display into FixedWriter

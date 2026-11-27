@@ -6,9 +6,13 @@ use std::fmt::{self, Write as _};
 use crate::error::Error;
 use crate::error::Span;
 
+mod multiline;
 mod unicode;
 mod work;
 
+use multiline::BraceEntry;
+#[cfg(feature = "std-value")]
+use multiline::{MultilineCtx, MultilineScanErr};
 pub(crate) use work::{WorkLexer, WorkToken, WorkTokenKind};
 
 #[cfg(feature = "std-value")]
@@ -116,7 +120,7 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
-    work_braces: crate::mem::RawVec<u16>,
+    work_braces: crate::mem::RawVec<BraceEntry>,
 }
 
 impl<'a> Lexer<'a> {
@@ -206,7 +210,7 @@ impl<'a> Lexer<'a> {
 
 #[cfg(feature = "std-value")]
 impl<'a> Lexer<'a> {
-    fn next_token(&mut self, braces: &mut Vec<u16>) -> Result<Token, Error> {
+    fn next_token(&mut self, braces: &mut Vec<BraceEntry>) -> Result<Token, Error> {
         let skipped = self.skip_ws_and_comments();
         let attached = !skipped && self.pos > 0;
         let span = self.span();
@@ -239,16 +243,18 @@ impl<'a> Lexer<'a> {
             b'{' => {
                 self.bump();
                 if let Some(top) = braces.last_mut() {
-                    *top = top.saturating_add(1);
+                    top.braces = top.braces.saturating_add(1);
                 }
                 TokenKind::LBrace
             }
             b'}' => {
                 if let Some(top) = braces.last_mut() {
-                    if *top > 0 {
-                        *top -= 1;
+                    if top.braces > 0 {
+                        top.braces -= 1;
                         self.bump();
                         TokenKind::RBrace
+                    } else if let Some(ctx) = top.multiline {
+                        self.lex_multiline_segment(span, true, ctx, braces)?
                     } else {
                         self.lex_string_segment(span, true, braces)?
                     }
@@ -278,7 +284,13 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 TokenKind::Quasiquote
             }
-            b'"' => self.lex_string_segment(span, false, braces)?,
+            b'"' => {
+                if self.peek_at(1) == Some(b'"') && self.peek_at(2) == Some(b'"') {
+                    self.lex_multiline_start(span, braces)?
+                } else {
+                    self.lex_string_segment(span, false, braces)?
+                }
+            }
             b'\'' => {
                 self.bump();
                 TokenKind::Quote
@@ -398,7 +410,7 @@ impl<'a> Lexer<'a> {
         &mut self,
         span: Span,
         resuming: bool,
-        braces: &mut Vec<u16>,
+        braces: &mut Vec<BraceEntry>,
     ) -> Result<TokenKind, Error> {
         self.bump(); // 開始の '"' または再開の '}'
         let mut out = String::new();
@@ -437,7 +449,200 @@ impl<'a> Lexer<'a> {
                             "syntax nesting limit exceeded (256)",
                         ));
                     }
-                    braces.push(0);
+                    braces.push(BraceEntry::single());
+                    return Ok(TokenKind::TemplateStart(out));
+                }
+                b'\\' => out.push(self.lex_escape(span)?),
+                _ if b < 0x80 => out.push(b as char),
+                _ => {
+                    let start = self.pos - 1;
+                    while let Some(next) = self.peek() {
+                        if (next & 0xC0) != 0x80 {
+                            break;
+                        }
+                        self.bump();
+                    }
+                    let s = std::str::from_utf8(&self.src[start..self.pos]).map_err(|_| {
+                        Error::lex("src.encoding", span, "invalid UTF-8 in string literal")
+                    })?;
+                    out.push_str(s);
+                }
+            }
+        }
+    }
+
+    fn lex_multiline_start(
+        &mut self,
+        span: Span,
+        braces: &mut Vec<BraceEntry>,
+    ) -> Result<TokenKind, Error> {
+        self.bump();
+        self.bump();
+        self.bump();
+        if self.consume_multiline_open_newline(span).is_err() {
+            return Err(Error::lex(
+                "src.string",
+                span,
+                "opening '\"\"\"' must be immediately followed by a newline",
+            ));
+        }
+        let ctx = self.scan_multiline_closing(span).map_err(|e| match e {
+            MultilineScanErr::Unterminated(sp) => {
+                Error::lex("src.string", sp, "unterminated multiline string literal")
+            }
+            MultilineScanErr::LoneCr(sp) => {
+                Error::lex("src.string", sp, "lone CR is not allowed in string literal")
+            }
+            MultilineScanErr::MisplacedClosing(sp) => Error::lex(
+                "src.string",
+                sp,
+                "unescaped '\"\"\"' is not allowed inside multiline string content",
+            ),
+            MultilineScanErr::MissingNewlineAfterOpen(sp) => Error::lex(
+                "src.string",
+                sp,
+                "opening '\"\"\"' must be immediately followed by a newline",
+            ),
+            MultilineScanErr::RawNewlineInInnerString(sp) => Error::lex(
+                "src.string",
+                sp,
+                "raw newline is not allowed in string literal",
+            ),
+            MultilineScanErr::NestingLimit(sp) => Error::parse(
+                "src.nesting-limit",
+                sp,
+                "syntax nesting limit exceeded (256)",
+            ),
+        })?;
+        self.lex_multiline_segment(span, false, ctx, braces)
+    }
+
+    fn lex_multiline_segment(
+        &mut self,
+        span: Span,
+        resuming: bool,
+        ctx: MultilineCtx,
+        braces: &mut Vec<BraceEntry>,
+    ) -> Result<TokenKind, Error> {
+        let mut at_line_start = !resuming;
+        if resuming {
+            self.bump(); // '}'
+        }
+        let mut out = String::new();
+        let indent = &self.src[ctx.indent_start..ctx.indent_start + ctx.indent_len];
+
+        loop {
+            if at_line_start {
+                if self.pos == ctx.closing_line_start {
+                    self.pos += ctx.indent_len;
+                    self.col += ctx.indent_len;
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    if resuming {
+                        braces.pop();
+                        return Ok(TokenKind::TemplateEnd(out));
+                    }
+                    return Ok(TokenKind::Str(out));
+                }
+                let mut ws_end = self.pos;
+                while let Some(&b) = self.src.get(ws_end) {
+                    if b == b' ' || b == b'\t' {
+                        ws_end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                match self.src.get(ws_end).copied() {
+                    Some(b'\n') => {
+                        self.pos = ws_end + 1;
+                        self.line += 1;
+                        self.col = 1;
+                        if self.pos != ctx.closing_line_start {
+                            out.push('\n');
+                        }
+                        continue;
+                    }
+                    Some(b'\r') => {
+                        if self.src.get(ws_end + 1) == Some(&b'\n') {
+                            self.pos = ws_end + 2;
+                            self.line += 1;
+                            self.col = 1;
+                            if self.pos != ctx.closing_line_start {
+                                out.push('\n');
+                            }
+                            continue;
+                        }
+                        return Err(Error::lex(
+                            "src.string",
+                            Span::new(self.line, self.col + (ws_end - self.pos)),
+                            "lone CR is not allowed in string literal",
+                        ));
+                    }
+                    _ => {
+                        if !self.src[self.pos..].starts_with(indent) {
+                            return Err(Error::lex(
+                                "src.string",
+                                self.span(),
+                                "multiline string line indentation does not match closing delimiter",
+                            ));
+                        }
+                        self.pos += ctx.indent_len;
+                        self.col += ctx.indent_len;
+                        at_line_start = false;
+                    }
+                }
+            }
+
+            let Some(b) = self.bump() else {
+                return Err(Error::lex(
+                    "src.string",
+                    span,
+                    "unterminated multiline string literal",
+                ));
+            };
+            match b {
+                b'\n' => {
+                    if self.pos != ctx.closing_line_start {
+                        out.push('\n');
+                    }
+                    at_line_start = true;
+                }
+                b'\r' => {
+                    if self.peek() == Some(b'\n') {
+                        self.bump();
+                        if self.pos != ctx.closing_line_start {
+                            out.push('\n');
+                        }
+                        at_line_start = true;
+                    } else {
+                        return Err(Error::lex(
+                            "src.string",
+                            Span::new(self.line, self.col - 1),
+                            "lone CR is not allowed in string literal",
+                        ));
+                    }
+                }
+                b'"' if self.peek() == Some(b'"') && self.peek_at(1) == Some(b'"') => {
+                    return Err(Error::lex(
+                        "src.string",
+                        Span::new(self.line, self.col - 1),
+                        "unescaped '\"\"\"' is not allowed inside multiline string content",
+                    ));
+                }
+                b'$' if self.peek() == Some(b'{') => {
+                    self.bump(); // '{'
+                    if resuming {
+                        return Ok(TokenKind::TemplateMid(out));
+                    }
+                    if braces.len() >= MAX_TEMPLATE_NESTING {
+                        return Err(Error::parse(
+                            "src.nesting-limit",
+                            span,
+                            "syntax nesting limit exceeded (256)",
+                        ));
+                    }
+                    braces.push(BraceEntry::multiline(ctx));
                     return Ok(TokenKind::TemplateStart(out));
                 }
                 b'\\' => out.push(self.lex_escape(span)?),

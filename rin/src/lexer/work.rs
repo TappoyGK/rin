@@ -3,6 +3,7 @@
 use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{AllocCore, RawStr, RawVec, WorkArena};
 
+use super::multiline::{BraceEntry, MultilineCtx, MultilineScanErr};
 use super::{Lexer, MAX_TEMPLATE_NESTING, is_ident_continue, is_ident_start, named_char, unicode};
 
 /// 作業領域 (`WorkArena`) 上に構築する字句トークン種別（`Copy`・システムヒープ不使用）。
@@ -97,16 +98,18 @@ impl Lexer<'_> {
             b'{' => {
                 self.bump();
                 if let Some(top) = self.work_braces.last_mut() {
-                    *top = top.saturating_add(1);
+                    top.braces = top.braces.saturating_add(1);
                 }
                 WorkTokenKind::LBrace
             }
             b'}' => {
                 if let Some(top) = self.work_braces.last_mut() {
-                    if *top > 0 {
-                        *top -= 1;
+                    if top.braces > 0 {
+                        top.braces -= 1;
                         self.bump();
                         WorkTokenKind::RBrace
+                    } else if let Some(ctx) = top.multiline {
+                        self.lex_work_multiline_segment(span, true, ctx, work, core)?
                     } else {
                         self.lex_work_string_segment(span, true, work, core)?
                     }
@@ -136,7 +139,13 @@ impl Lexer<'_> {
                 self.bump();
                 WorkTokenKind::Quasiquote
             }
-            b'"' => self.lex_work_string_segment(span, false, work, core)?,
+            b'"' => {
+                if self.peek_at(1) == Some(b'"') && self.peek_at(2) == Some(b'"') {
+                    self.lex_work_multiline_start(span, work, core)?
+                } else {
+                    self.lex_work_string_segment(span, false, work, core)?
+                }
+            }
             b'\'' => {
                 self.bump();
                 WorkTokenKind::Quote
@@ -478,7 +487,11 @@ impl Lexer<'_> {
                             "syntax nesting limit exceeded (256)",
                         ));
                     }
-                    if self.work_braces.push_work(work, core, 0).is_none() {
+                    if self
+                        .work_braces
+                        .push_work(work, core, BraceEntry::single())
+                        .is_none()
+                    {
                         return Err(core.err_oom(span));
                     }
                     return Ok(WorkTokenKind::TemplateStart(s));
@@ -511,6 +524,278 @@ impl Lexer<'_> {
                     {
                         return Err(core.err_oom(span));
                     }
+                    let ch = self.lex_work_escape(span, core)?;
+                    let mut enc = [0u8; 4];
+                    let bytes = ch.encode_utf8(&mut enc).as_bytes();
+                    if buf.extend_from_slice_work(work, core, bytes).is_none() {
+                        return Err(core.err_oom(span));
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn lex_work_multiline_start(
+        &mut self,
+        span: Span,
+        work: &mut WorkArena,
+        core: &mut AllocCore<'_>,
+    ) -> Result<WorkTokenKind, ErrRecorded> {
+        self.bump();
+        self.bump();
+        self.bump();
+        if self.consume_multiline_open_newline(span).is_err() {
+            return Err(core.err_str(
+                "src.string",
+                ErrorKind::Lex,
+                span,
+                "opening '\"\"\"' must be immediately followed by a newline",
+            ));
+        }
+        let ctx = match self.scan_multiline_closing(span) {
+            Ok(ctx) => ctx,
+            Err(MultilineScanErr::Unterminated(sp)) => {
+                return Err(core.err_str(
+                    "src.string",
+                    ErrorKind::Lex,
+                    sp,
+                    "unterminated multiline string literal",
+                ));
+            }
+            Err(MultilineScanErr::LoneCr(sp)) => {
+                return Err(core.err_str(
+                    "src.string",
+                    ErrorKind::Lex,
+                    sp,
+                    "lone CR is not allowed in string literal",
+                ));
+            }
+            Err(MultilineScanErr::MisplacedClosing(sp)) => {
+                return Err(core.err_str(
+                    "src.string",
+                    ErrorKind::Lex,
+                    sp,
+                    "unescaped '\"\"\"' is not allowed inside multiline string content",
+                ));
+            }
+            Err(MultilineScanErr::MissingNewlineAfterOpen(sp)) => {
+                return Err(core.err_str(
+                    "src.string",
+                    ErrorKind::Lex,
+                    sp,
+                    "opening '\"\"\"' must be immediately followed by a newline",
+                ));
+            }
+            Err(MultilineScanErr::RawNewlineInInnerString(sp)) => {
+                return Err(core.err_str(
+                    "src.string",
+                    ErrorKind::Lex,
+                    sp,
+                    "raw newline is not allowed in string literal",
+                ));
+            }
+            Err(MultilineScanErr::NestingLimit(sp)) => {
+                return Err(core.err_str(
+                    "src.nesting-limit",
+                    ErrorKind::Parse,
+                    sp,
+                    "syntax nesting limit exceeded (256)",
+                ));
+            }
+        };
+        self.lex_work_multiline_segment(span, false, ctx, work, core)
+    }
+
+    fn lex_work_multiline_segment(
+        &mut self,
+        span: Span,
+        resuming: bool,
+        ctx: MultilineCtx,
+        work: &mut WorkArena,
+        core: &mut AllocCore<'_>,
+    ) -> Result<WorkTokenKind, ErrRecorded> {
+        let mut at_line_start = !resuming;
+        if resuming {
+            self.bump(); // '}'
+        }
+        let mut buf = RawVec::<u8>::new();
+        let finish_str = |buf: &RawVec<u8>| -> RawStr {
+            if buf.is_empty() {
+                return RawStr::empty();
+            }
+            let slice = buf.as_slice();
+            // SAFETY: すべてのバイトは有効な UTF-8 として追加済み。
+            let ptr = std::ptr::NonNull::new(slice.as_ptr() as *mut u8).unwrap();
+            unsafe { RawStr::from_raw_utf8(ptr, slice.len()) }
+        };
+        let indent = &self.src[ctx.indent_start..ctx.indent_start + ctx.indent_len];
+
+        loop {
+            if at_line_start {
+                if self.pos == ctx.closing_line_start {
+                    self.pos += ctx.indent_len;
+                    self.col += ctx.indent_len;
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    let s = finish_str(&buf);
+                    if resuming {
+                        self.work_braces.pop();
+                        return Ok(WorkTokenKind::TemplateEnd(s));
+                    }
+                    return Ok(WorkTokenKind::Str(s));
+                }
+                let mut ws_end = self.pos;
+                while let Some(&b) = self.src.get(ws_end) {
+                    if b == b' ' || b == b'\t' {
+                        ws_end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                match self.src.get(ws_end).copied() {
+                    Some(b'\n') => {
+                        self.pos = ws_end + 1;
+                        self.line += 1;
+                        self.col = 1;
+                        if self.pos != ctx.closing_line_start
+                            && buf.push_work(work, core, b'\n').is_none()
+                        {
+                            return Err(core.err_oom(span));
+                        }
+                        continue;
+                    }
+                    Some(b'\r') => {
+                        if self.src.get(ws_end + 1) == Some(&b'\n') {
+                            self.pos = ws_end + 2;
+                            self.line += 1;
+                            self.col = 1;
+                            if self.pos != ctx.closing_line_start
+                                && buf.push_work(work, core, b'\n').is_none()
+                            {
+                                return Err(core.err_oom(span));
+                            }
+                            continue;
+                        }
+                        return Err(core.err_str(
+                            "src.string",
+                            ErrorKind::Lex,
+                            Span::new(self.line, self.col + (ws_end - self.pos)),
+                            "lone CR is not allowed in string literal",
+                        ));
+                    }
+                    _ => {
+                        if !self.src[self.pos..].starts_with(indent) {
+                            return Err(core.err_str(
+                                "src.string",
+                                ErrorKind::Lex,
+                                self.span(),
+                                "multiline string line indentation does not match closing delimiter",
+                            ));
+                        }
+                        self.pos += ctx.indent_len;
+                        self.col += ctx.indent_len;
+                        at_line_start = false;
+                    }
+                }
+            }
+
+            let run_start = self.pos;
+            while self.pos < self.src.len() {
+                let b = self.src[self.pos];
+                if b == b'"' || b == b'\\' || b == b'\n' || b == b'\r' || b == b'$' {
+                    break;
+                }
+                self.pos += 1;
+            }
+            let run_len = self.pos - run_start;
+            self.col += run_len;
+            if run_len > 0
+                && buf
+                    .extend_from_slice_work(work, core, &self.src[run_start..run_start + run_len])
+                    .is_none()
+            {
+                return Err(core.err_oom(span));
+            }
+
+            let Some(b) = self.bump() else {
+                return Err(core.err_str(
+                    "src.string",
+                    ErrorKind::Lex,
+                    span,
+                    "unterminated multiline string literal",
+                ));
+            };
+            match b {
+                b'\n' => {
+                    if self.pos != ctx.closing_line_start
+                        && buf.push_work(work, core, b'\n').is_none()
+                    {
+                        return Err(core.err_oom(span));
+                    }
+                    at_line_start = true;
+                }
+                b'\r' => {
+                    if self.peek() == Some(b'\n') {
+                        self.bump();
+                        if self.pos != ctx.closing_line_start
+                            && buf.push_work(work, core, b'\n').is_none()
+                        {
+                            return Err(core.err_oom(span));
+                        }
+                        at_line_start = true;
+                    } else {
+                        return Err(core.err_str(
+                            "src.string",
+                            ErrorKind::Lex,
+                            Span::new(self.line, self.col - 1),
+                            "lone CR is not allowed in string literal",
+                        ));
+                    }
+                }
+                b'"' => {
+                    if self.peek() == Some(b'"') && self.peek_at(1) == Some(b'"') {
+                        return Err(core.err_str(
+                            "src.string",
+                            ErrorKind::Lex,
+                            Span::new(self.line, self.col - 1),
+                            "unescaped '\"\"\"' is not allowed inside multiline string content",
+                        ));
+                    }
+                    if buf.push_work(work, core, b'"').is_none() {
+                        return Err(core.err_oom(span));
+                    }
+                }
+                b'$' if self.peek() == Some(b'{') => {
+                    self.bump(); // '{'
+                    let s = finish_str(&buf);
+                    if resuming {
+                        return Ok(WorkTokenKind::TemplateMid(s));
+                    }
+                    if self.work_braces.len() >= MAX_TEMPLATE_NESTING {
+                        return Err(core.err_str(
+                            "src.nesting-limit",
+                            ErrorKind::Parse,
+                            span,
+                            "syntax nesting limit exceeded (256)",
+                        ));
+                    }
+                    if self
+                        .work_braces
+                        .push_work(work, core, BraceEntry::multiline(ctx))
+                        .is_none()
+                    {
+                        return Err(core.err_oom(span));
+                    }
+                    return Ok(WorkTokenKind::TemplateStart(s));
+                }
+                b'$' => {
+                    if buf.push_work(work, core, b'$').is_none() {
+                        return Err(core.err_oom(span));
+                    }
+                }
+                b'\\' => {
                     let ch = self.lex_work_escape(span, core)?;
                     let mut enc = [0u8; 4];
                     let bytes = ch.encode_utf8(&mut enc).as_bytes();
