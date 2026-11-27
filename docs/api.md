@@ -64,13 +64,13 @@ impl<'a> Machine<'a> {
 ```
 
 - `Builder::new` / `Builder::with_memory_config`：読み込み段階の環境を生成する。`with_memory_config` で 3 領域（永続・オブジェクト・作業）のチャンクサイズ設定 `MemoryConfig` を指定できる。
-- `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する（同名があれば上書きし、旧値を解放する）。
-- `Builder::load_module`：名前付きモジュールを読み込んで評価する。
-- `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。
-- **永続領域の追記特性**：読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（古い値スロットは解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
+- `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する。既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は実行時エラー（`[expr.def]`、位置 `0:0`）を返す。
+- `Builder::load_module`：名前付きモジュールを読み込んで評価する。読み込み済みのモジュール名、または既存の大域束縛・組み込み名と衝突する場合は実行時エラー（`[expr.module]`、位置 `0:0`）を返す。読み込みに失敗したモジュールは登録されず、同じ名前で再試行できる。
+- `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。途中でエラーになった場合、その評価中に追加した大域束縛・`import` は追加のメモリ確保なしですべて取り消される。
+- **永続領域の追記特性**：読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（失敗した評価で追加された大域束縛の値スロットはロールバック時に解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
 - `Builder::into_machine` / `Builder::freeze`：大域環境と読み込み済みモジュール、および永続領域（`PermArena`）を凍結し、実行段階の `Machine` を返す。`into_machine` は失敗しないゼロヒープ API、`freeze` は `std-value` フィーチャ有効時の `Result` ラッパー（現行実装では常に `Ok` を返す）。
 - 凍結後の `Machine` から読み込みの段階には戻れない。Mod を読み直す場合は、新しい `Builder` を作って読み込み・凍結し、ホスト側で `Machine` を差し替える（ホットリロードは組み込む側が担う）。
-- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効で、評価するソースとそこから呼ばれるモジュール外の関数から参照でき（モジュール内の関数からは参照されない）、評価終了時に解放する。`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。名前解決の優先順位は、局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛 → 読み込み済みモジュール名とする。
+- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効な最外側のレキシカル束縛であり、評価するソースおよびそのソース内で生成されたクロージャからのみ参照できる（すでに凍結済みの大域関数・モジュール内関数やそれらが返すクロージャからは参照されない）。初期束縛は評価終了時に解放され、`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。評価するソース内の名前解決の優先順位は、内側の局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛（組み込みを含む） → 読み込み済みモジュール名とする。
 - Rust API では `call` / `call_in` は凍結後の `Machine` のみ提供する（C FFI では同一ハンドル上で `rin_call` / `rin_call_in` を凍結前・凍結後のどちらでも呼び出せる）。
 - `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
 - `live_bytes`：現在オブジェクト領域上で生存している論理使用バイト数を返す。
@@ -281,7 +281,7 @@ impl Error {
 
 コールバックは表示する位置ごとに 1 回呼ばれるため、同じモジュール名を複数回受け取ることがある。
 
-渡すソースコードは、エラーが発生したときに実行していたものと一致させる。たとえば、エラー発生後にモジュールを読み込み直した場合、更新後のコードでは行番号が合わないことがある。実行時のソースコードを特定できなければ、コールバックから `None` を返す。
+渡すソースコードは、エラーが発生したときに実行していたものと一致させる。たとえば、別の環境や更新後のソースコードを渡すと行番号が合わないことがある。実行時のソースコードを特定できなければ、コールバックから `None` を返す。
 
 `render_to` / `render_with_to` は同じ表示を `fmt::Write` へ追記し、書き込みが失敗した時点で `fmt::Error` を返す。末尾の改行は付けない。表示幅・無効な位置の扱いは言語仕様の `[eval.snippet]` に従う。
 
@@ -367,11 +367,11 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `bool rin_freeze(Rin *rin)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`rin == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(Rin *rin, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
 | `RinMathFma rin_math_fma(const Rin *rin)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
-| `bool rin_bind(Rin *rin, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して `false`） |
-| `RinEvalResult rin_build(Rin *rin, const char *source)` | 読み込み段階でソースを評価し大域定義を構築する（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
+| `bool rin_bind(Rin *rin, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、既存の大域束縛・組み込み名・読み込み済みモジュール名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.def`・位置 `0:0` を記録して `false`） |
+| `RinEvalResult rin_build(Rin *rin, const char *source)` | 読み込み段階でソースを評価し大域定義を構築する（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗。評価が途中で失敗した場合は追加した大域束縛・`import` をすべて取り消す） |
 | `RinEvalResult rin_eval(Rin *rin, const char *source)` | 凍結後の環境でソースを評価し結果を借用ポインタで返す（`[env.frozen]`・`[env.modules]` を適用。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
-| `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する（前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は同じ `Rin` で生成した有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
-| `RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な最外側のレキシカル初期束縛 `bindings` を与えてソースを評価する（評価するソースおよびその中で生成されたクロージャからのみ参照でき、既存の凍結済み関数からは参照されない。前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は同じ `Rin` で生成した有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、読み込み済みモジュール名や既存の大域束縛・組み込み名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.module`・位置 `0:0` を記録して失敗。失敗した読み込みは登録されず再試行可能） |
 | `RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `const RinError *rin_last_error(const Rin *rin)` | 直近の対象操作のエラーを借用する（エラーなし・NULL は NULL） |
