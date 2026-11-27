@@ -161,6 +161,28 @@ fn template_interpolation_escapes_and_errors() {
     assert_eq!(err.kind, ErrorKind::Parse);
     assert!(err.message.contains("text"), "got: {}", err.message);
 
+    // テンプレート入れ子上限超過のメッセージは深さによらず統一される
+    for depth in [256usize, 257, 300] {
+        let deep = format!("{}1{}", "\"${".repeat(depth), "}\"".repeat(depth));
+        let err = eval(&deep).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "depth={depth}: {err}");
+        assert_eq!(err.rule(), "src.nesting-limit", "depth={depth}: {err}");
+        assert_eq!(
+            err.message, "syntax nesting limit exceeded (256)",
+            "depth={depth}: {err}"
+        );
+        let ferr = rin::fmt::format(&deep).unwrap_err();
+        assert_eq!(
+            ferr.rule(),
+            "src.nesting-limit",
+            "fmt depth={depth}: {ferr}"
+        );
+        assert_eq!(
+            ferr.message, "syntax nesting limit exceeded (256)",
+            "fmt depth={depth}: {ferr}"
+        );
+    }
+
     // フォーマッタはテンプレート全体を原文のまま保つ
     let src = "\"a=${(+ 1   2)} b=${Point { x: 1 }.x}\"";
     assert_eq!(rin::fmt::format(src).unwrap().trim_end(), src);

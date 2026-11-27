@@ -134,8 +134,8 @@ impl<T: Copy> std::ops::Index<usize> for ObjSlice<T> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ObjStr {
     pub(super) ptr: NonNull<u8>,
-    pub(super) len: usize,
-    pub(super) char_len: usize,
+    pub(super) len: u32,
+    pub(super) char_len: u32,
     pub(super) block_size: usize,
 }
 
@@ -151,12 +151,12 @@ impl ObjStr {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     #[inline]
     pub fn char_len(&self) -> usize {
-        self.char_len
+        self.char_len as usize
     }
 
     #[inline]
@@ -171,7 +171,7 @@ impl ObjStr {
         }
         // SAFETY: 構築時に有効な UTF-8 文字列からコピーしている。
         unsafe {
-            let bytes = std::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
+            let bytes = std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize);
             std::str::from_utf8_unchecked(bytes)
         }
     }
@@ -179,20 +179,20 @@ impl ObjStr {
     /// スカラー値単位の添字で `char` を取得する。
     /// 返り値の 2 要素目は非 ASCII 時の走査スカラー値数（ASCII 時は 0）。
     pub fn char_at(&self, index: usize) -> Option<(char, usize)> {
-        if index >= self.char_len {
+        if index >= self.char_len() {
             return None;
         }
         let s = self.as_str();
         if self.is_ascii() {
             return Some((s.as_bytes()[index] as char, 0));
         }
-        let off = nth_char_byte_offset(s.as_bytes(), index);
-        s[off..].chars().next().map(|c| (c, index + 1))
+        s.chars().nth(index).map(|c| (c, index + 1))
     }
 
     /// スカラー値単位の範囲 `start..end` に対応する部分文字列スライスを返す。
     pub fn slice_range(&self, start: usize, end: usize) -> Option<&str> {
-        if start > end || end > self.char_len {
+        let char_len = self.char_len();
+        if start > end || end > char_len {
             return None;
         }
         if start == end {
@@ -202,12 +202,15 @@ impl ObjStr {
         if self.is_ascii() {
             return Some(&s[start..end]);
         }
-        let bytes = s.as_bytes();
-        let byte_start = nth_char_byte_offset(bytes, start);
-        let byte_end = if end == self.char_len {
-            bytes.len()
+        let byte_start = if start == 0 {
+            0
         } else {
-            byte_start + nth_char_byte_offset(&bytes[byte_start..], end - start)
+            s.char_indices().nth(start)?.0
+        };
+        let byte_end = if end == char_len {
+            s.len()
+        } else {
+            byte_start + s[byte_start..].char_indices().nth(end - start)?.0
         };
         Some(&s[byte_start..byte_end])
     }
@@ -219,25 +222,6 @@ impl ObjStr {
             actual_size: self.block_size,
         }
     }
-}
-
-/// 有効な UTF-8 バイト列の先頭から `n` 番目の Unicode スカラー値のバイト位置を返す。
-#[inline]
-fn nth_char_byte_offset(bytes: &[u8], n: usize) -> usize {
-    if n == 0 {
-        return 0;
-    }
-    let mut count = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        // UTF-8 の先頭バイトは `0b10xxxxxx` 以外（符号付きで -64 以上）。
-        if (b as i8) >= -64 {
-            if count == n {
-                return i;
-            }
-            count += 1;
-        }
-    }
-    bytes.len()
 }
 
 /// モジュールの公開要素（名前辞書順ソート済み配列で保持する）。

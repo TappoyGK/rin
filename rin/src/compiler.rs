@@ -101,7 +101,13 @@ pub(crate) fn compile_program_parts<'a, 'p>(
                 return Err(pool.core.err_oom(Span::default()));
             }
         }
-        finished.chunk.str_objs = objs;
+        if finished
+            .chunk
+            .set_str_objs(pool, CodeRegion::Work, objs)
+            .is_none()
+        {
+            return Err(pool.core.err_oom(Span::default()));
+        }
     }
     Ok(finished.chunk)
 }

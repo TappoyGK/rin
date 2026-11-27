@@ -389,6 +389,17 @@ impl Lexer<'_> {
             unsafe { RawStr::from_raw_utf8(ptr, slice.len()) }
         };
         loop {
+            let run_start = self.pos;
+            while self.pos < self.src.len() {
+                let b = self.src[self.pos];
+                if b == b'"' || b == b'\\' || b == b'\n' || b == b'\r' || b == b'$' {
+                    break;
+                }
+                self.pos += 1;
+            }
+            let run_len = self.pos - run_start;
+            self.col += run_len;
+
             let Some(b) = self.bump() else {
                 return Err(core.err_str(
                     "src.string",
@@ -399,7 +410,35 @@ impl Lexer<'_> {
             };
             match b {
                 b'"' => {
-                    let s = finish_str(&buf);
+                    let s = if buf.is_empty() {
+                        if run_len == 0 {
+                            RawStr::empty()
+                        } else {
+                            // SAFETY: 入力ソースは有効な UTF-8 で、ASCII 特殊文字までを切り出している。
+                            let raw = unsafe {
+                                std::str::from_utf8_unchecked(
+                                    &self.src[run_start..run_start + run_len],
+                                )
+                            };
+                            let Some(r) = RawStr::from_work(work, core, raw) else {
+                                return Err(core.err_oom(span));
+                            };
+                            r
+                        }
+                    } else {
+                        if run_len > 0
+                            && buf
+                                .extend_from_slice_work(
+                                    work,
+                                    core,
+                                    &self.src[run_start..run_start + run_len],
+                                )
+                                .is_none()
+                        {
+                            return Err(core.err_oom(span));
+                        }
+                        finish_str(&buf)
+                    };
                     if resuming {
                         self.work_braces.pop();
                         return Ok(WorkTokenKind::TemplateEnd(s));
@@ -416,6 +455,17 @@ impl Lexer<'_> {
                 }
                 b'$' if self.peek() == Some(b'{') => {
                     self.bump(); // '{'
+                    if run_len > 0
+                        && buf
+                            .extend_from_slice_work(
+                                work,
+                                core,
+                                &self.src[run_start..run_start + run_len],
+                            )
+                            .is_none()
+                    {
+                        return Err(core.err_oom(span));
+                    }
                     let s = finish_str(&buf);
                     if resuming {
                         return Ok(WorkTokenKind::TemplateMid(s));
@@ -425,7 +475,7 @@ impl Lexer<'_> {
                             "src.nesting-limit",
                             ErrorKind::Parse,
                             span,
-                            "template nesting too deep",
+                            "syntax nesting limit exceeded (256)",
                         ));
                     }
                     if self.work_braces.push_work(work, core, 0).is_none() {
@@ -433,7 +483,34 @@ impl Lexer<'_> {
                     }
                     return Ok(WorkTokenKind::TemplateStart(s));
                 }
+                b'$' => {
+                    if run_len > 0
+                        && buf
+                            .extend_from_slice_work(
+                                work,
+                                core,
+                                &self.src[run_start..run_start + run_len],
+                            )
+                            .is_none()
+                    {
+                        return Err(core.err_oom(span));
+                    }
+                    if buf.push_work(work, core, b'$').is_none() {
+                        return Err(core.err_oom(span));
+                    }
+                }
                 b'\\' => {
+                    if run_len > 0
+                        && buf
+                            .extend_from_slice_work(
+                                work,
+                                core,
+                                &self.src[run_start..run_start + run_len],
+                            )
+                            .is_none()
+                    {
+                        return Err(core.err_oom(span));
+                    }
                     let ch = self.lex_work_escape(span, core)?;
                     let mut enc = [0u8; 4];
                     let bytes = ch.encode_utf8(&mut enc).as_bytes();
@@ -441,34 +518,7 @@ impl Lexer<'_> {
                         return Err(core.err_oom(span));
                     }
                 }
-                _ if b < 0x80 => {
-                    if buf.push_work(work, core, b).is_none() {
-                        return Err(core.err_oom(span));
-                    }
-                }
-                _ => {
-                    let start = self.pos - 1;
-                    while let Some(next) = self.peek() {
-                        if (next & 0xC0) != 0x80 {
-                            break;
-                        }
-                        self.bump();
-                    }
-                    let Ok(s) = std::str::from_utf8(&self.src[start..self.pos]) else {
-                        return Err(core.err_str(
-                            "src.encoding",
-                            ErrorKind::Lex,
-                            span,
-                            "invalid UTF-8 in string literal",
-                        ));
-                    };
-                    if buf
-                        .extend_from_slice_work(work, core, s.as_bytes())
-                        .is_none()
-                    {
-                        return Err(core.err_oom(span));
-                    }
-                }
+                _ => unreachable!(),
             }
         }
     }

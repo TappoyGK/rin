@@ -41,7 +41,7 @@ impl Runner<'_, '_> {
         tmpl_idx: u32,
         span: Span,
     ) -> Result<(), ErrRecorded> {
-        let part_spans = chunk.template_spans[tmpl_idx as usize].as_slice();
+        let part_spans = chunk.template_spans_at(tmpl_idx as usize);
         let count = part_spans.len();
         let start = self.stack.len() - count;
         let mark = self.pool.work.mark(&self.pool.core);

@@ -485,17 +485,18 @@ impl<'a> Pool<'a> {
         if let Some(id) = self.perm_strs.get_by(hash, |k| k.as_str() == s) {
             return Some(id);
         }
+        let len_u32 = u32::try_from(s.len()).ok()?;
         let char_len = if s.is_ascii() {
-            s.len()
+            len_u32
         } else {
-            s.chars().count()
+            s.chars().count() as u32
         };
         let obj_str = if s.is_empty() {
             ObjStr::empty()
         } else {
             ObjStr {
                 ptr: std::ptr::NonNull::new(s.as_ptr() as *mut u8).unwrap(),
-                len: s.len(),
+                len: len_u32,
                 char_len,
                 block_size: 0,
             }

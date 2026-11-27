@@ -34,8 +34,7 @@ impl Runner<'_, '_> {
                     Op::Char(c) => self.stack_push_at(RVal::Char(c), chunk, ip - 1)?,
                     Op::Str(idx) => {
                         let i = idx as usize;
-                        if i < chunk.str_objs.len() {
-                            let id = chunk.str_objs[i];
+                        if let Some(id) = chunk.str_obj(i) {
                             self.stack_push_at(RVal::Obj(id), chunk, ip - 1)?;
                         } else {
                             let s = &chunk.strings[i];

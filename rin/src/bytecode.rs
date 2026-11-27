@@ -129,20 +129,25 @@ impl<'a> Iterator for VisibleNames<'a> {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ChunkExtra {
+    pub str_objs: RawVec<crate::pool::ObjId>,
+    pub template_spans: RawVec<RawVec<Span>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Chunk {
     pub local_count: u32,
     pub code: RawVec<Op>,
     pub spans: RawVec<Span>,
     pub tick_spans: RawVec<Span>,
     pub strings: RawVec<RawStr>,
-    pub str_objs: RawVec<crate::pool::ObjId>,
     pub floats: RawVec<f64>,
     pub structs: RawVec<StructDesc>,
     pub patterns: RawVec<Pattern>,
     pub protos: RawVec<FnProtoPtr>,
     pub export_lists: RawVec<RawVec<RawStr>>,
     pub splice_masks: RawVec<RawVec<u8>>,
-    pub template_spans: RawVec<RawVec<Span>>,
+    pub extra: Option<NonNull<ChunkExtra>>,
     pub names: Option<NameInfo>,
 }
 
@@ -284,14 +289,61 @@ impl Chunk {
         Some(idx)
     }
 
+    #[inline(always)]
+    pub fn str_obj(&self, idx: usize) -> Option<crate::pool::ObjId> {
+        let extra = self.extra?;
+        // SAFETY: `ChunkExtra` は `Chunk` と同じアリーナ上にあり生存中は有効。
+        unsafe { extra.as_ref() }
+            .str_objs
+            .as_slice()
+            .get(idx)
+            .copied()
+    }
+
+    #[inline(always)]
+    pub fn template_spans_at(&self, idx: usize) -> &[Span] {
+        let extra = self.extra.expect("template_spans missing");
+        // SAFETY: `ChunkExtra` は `Chunk` と同じアリーナ上にあり生存中は有効。
+        unsafe { extra.as_ref() }.template_spans[idx].as_slice()
+    }
+
+    pub fn set_str_objs(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        objs: RawVec<crate::pool::ObjId>,
+    ) -> Option<()> {
+        let mut extra_ptr = match self.extra {
+            Some(p) => p,
+            None => {
+                let p = pool.alloc_code_val(region, ChunkExtra::default())?;
+                self.extra = Some(p);
+                p
+            }
+        };
+        // SAFETY: コンパイル中の `Chunk` は排他所有している。
+        unsafe { extra_ptr.as_mut() }.str_objs = objs;
+        Some(())
+    }
+
     pub fn add_template_spans(
         &mut self,
         pool: &mut Pool<'_>,
         region: CodeRegion,
         spans: RawVec<Span>,
     ) -> Option<u32> {
-        let idx = self.template_spans.len() as u32;
-        pool.push_code(region, &mut self.template_spans, spans)?;
+        let mut extra_ptr = match self.extra {
+            Some(p) => p,
+            None => {
+                let p = pool.alloc_code_val(region, ChunkExtra::default())?;
+                self.extra = Some(p);
+                p
+            }
+        };
+        // SAFETY: コンパイル中の `Chunk` は排他所有している。
+        let extra = unsafe { extra_ptr.as_mut() };
+        let idx = extra.template_spans.len() as u32;
+        pool.push_code(region, &mut extra.template_spans, spans)?;
         Some(idx)
     }
 
@@ -392,20 +444,38 @@ impl Chunk {
             v
         };
 
-        let template_spans = if self.template_spans.is_empty() {
-            RawVec::new()
-        } else {
-            let mut v = RawVec::new();
-            v.reserve_perm(&mut pool.perm, &mut pool.core, self.template_spans.len())?;
-            for &spans in self.template_spans.as_slice() {
-                let inner = RawVec::from_slice_exact_perm(
-                    &mut pool.perm,
-                    &mut pool.core,
-                    spans.as_slice(),
-                )?;
-                v.push_perm(&mut pool.perm, &mut pool.core, inner)?;
+        let template_spans = if let Some(extra_ptr) = self.extra {
+            // SAFETY: `ChunkExtra` はコピー元の `WorkArena` 上で有効。
+            let src_spans = unsafe { extra_ptr.as_ref() }.template_spans.as_slice();
+            if src_spans.is_empty() {
+                RawVec::new()
+            } else {
+                let mut v = RawVec::new();
+                v.reserve_perm(&mut pool.perm, &mut pool.core, src_spans.len())?;
+                for &spans in src_spans {
+                    let inner = RawVec::from_slice_exact_perm(
+                        &mut pool.perm,
+                        &mut pool.core,
+                        spans.as_slice(),
+                    )?;
+                    v.push_perm(&mut pool.perm, &mut pool.core, inner)?;
+                }
+                v
             }
-            v
+        } else {
+            RawVec::new()
+        };
+
+        let extra = if str_objs.is_empty() && template_spans.is_empty() {
+            None
+        } else {
+            Some(pool.perm.alloc_val(
+                &mut pool.core,
+                ChunkExtra {
+                    str_objs,
+                    template_spans,
+                },
+            )?)
         };
 
         Some(Self {
@@ -414,14 +484,13 @@ impl Chunk {
             spans,
             tick_spans,
             strings,
-            str_objs,
             floats,
             structs,
             patterns,
             protos,
             export_lists,
             splice_masks,
-            template_spans,
+            extra,
             names: self.names,
         })
     }

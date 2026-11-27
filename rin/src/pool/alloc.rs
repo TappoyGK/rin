@@ -53,19 +53,22 @@ impl Pool<'_> {
         if s.is_empty() {
             return Ok(ObjStr::empty());
         }
+        let Ok(len_u32) = u32::try_from(s.len()) else {
+            return Err(self.oom_error(span, "memory limit exceeded"));
+        };
         let Some(block) = self.obj_heap.alloc(&mut self.core, s.len(), 1) else {
             return Err(self.oom_limit_error(span));
         };
         // SAFETY: `block.actual_size >= s.len()`。
         unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), block.ptr.as_ptr(), s.len()) };
         let char_len = if s.is_ascii() {
-            s.len()
+            len_u32
         } else {
-            s.chars().count()
+            s.chars().count() as u32
         };
         Ok(ObjStr {
             ptr: block.ptr,
-            len: s.len(),
+            len: len_u32,
             char_len,
             block_size: block.actual_size,
         })
@@ -146,11 +149,12 @@ impl Pool<'_> {
         let os = if src.len == 0 {
             ObjStr::empty()
         } else {
-            let Some(block) = self.obj_heap.alloc(&mut self.core, src.len, 1) else {
+            let n = src.len();
+            let Some(block) = self.obj_heap.alloc(&mut self.core, n, 1) else {
                 return Err(self.oom_limit_error(span));
             };
             // SAFETY: `src` は既存の `ObjHeap` ブロックで `block` と非重複。
-            unsafe { std::ptr::copy_nonoverlapping(src.ptr.as_ptr(), block.ptr.as_ptr(), src.len) };
+            unsafe { std::ptr::copy_nonoverlapping(src.ptr.as_ptr(), block.ptr.as_ptr(), n) };
             ObjStr {
                 ptr: block.ptr,
                 len: src.len,
@@ -170,11 +174,12 @@ impl Pool<'_> {
         let os = if src.len == 0 {
             ObjStr::empty()
         } else {
-            let Some(block) = self.obj_heap.alloc(&mut self.core, src.len, 1) else {
+            let n = src.len();
+            let Some(block) = self.obj_heap.alloc(&mut self.core, n, 1) else {
                 return Err(self.oom_limit_error(span));
             };
             // SAFETY: `src` は既存の `ObjHeap` ブロックで `block` と非重複。
-            unsafe { std::ptr::copy_nonoverlapping(src.ptr.as_ptr(), block.ptr.as_ptr(), src.len) };
+            unsafe { std::ptr::copy_nonoverlapping(src.ptr.as_ptr(), block.ptr.as_ptr(), n) };
             ObjStr {
                 ptr: block.ptr,
                 len: src.len,
