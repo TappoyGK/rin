@@ -2,7 +2,7 @@
 use super::*;
 
 // 少数の束縛ではハッシュ表の確保を避ける。線形走査は常にこの定数以内に限る。
-pub(super) const INLINE_NAMES: usize = 8;
+const INLINE_NAMES: usize = 8;
 const REMOVED_LOCAL: u32 = u32::MAX;
 
 pub(super) struct Scope {

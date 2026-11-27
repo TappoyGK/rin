@@ -143,13 +143,100 @@ fn rule_references_require_code_and_brackets() {
     }
 }
 
+#[test]
+fn parse_single_case_rejects_malformed_headings_and_preserves_commas_in_bindings() {
+    // 初期束縛の値にカンマを含む文字列を書いても 1 件のまま保持する
+    let valid = [
+        "主根拠：`[env.isolation]`",
+        "初期束縛：`s = \"a,b\"`",
+        "初期束縛：`x = 1`",
+        "**入力：**",
+        "```rin",
+        "s",
+        "```",
+        "**期待結果：**",
+        "| 上限 | 結果 | 値 |",
+        "|---|---|---|",
+        "| 既定 | 値 | `\"a,b\"` |",
+    ];
+    let parsed = parse_single_case("eval-999".to_string(), &valid, "test");
+    assert_eq!(
+        parsed.initial_bindings,
+        vec![
+            ("s".to_string(), "\"a,b\"".to_string()),
+            ("x".to_string(), "1".to_string()),
+        ]
+    );
+
+    // 1. 見出しのあとにコードブロックがない
+    let missing_block = [
+        "主根拠：`[expr.def]`",
+        "**読み込み：**",
+        "**入力：**",
+        "```rin",
+        "1",
+        "```",
+        "**期待結果：**",
+        "| 上限 | 結果 | 値 |",
+        "|---|---|---|",
+        "| 既定 | 値 | `1` |",
+    ];
+    assert!(
+        std::panic::catch_unwind(|| parse_single_case("t-1".to_string(), &missing_block, "test"))
+            .is_err()
+    );
+
+    // 2. 入力コードブロックが 2 つある
+    let dup_input = [
+        "主根拠：`[expr.def]`",
+        "**入力：**",
+        "```rin",
+        "1",
+        "```",
+        "**入力：**",
+        "```rin",
+        "2",
+        "```",
+        "**期待結果：**",
+        "| 上限 | 結果 | 値 |",
+        "|---|---|---|",
+        "| 既定 | 値 | `1` |",
+    ];
+    assert!(
+        std::panic::catch_unwind(|| parse_single_case("t-2".to_string(), &dup_input, "test"))
+            .is_err()
+    );
+
+    // 3. 未知の **...** 見出し（全角/半角コロンの書き間違い等）
+    let unknown_heading = [
+        "主根拠：`[expr.def]`",
+        "**読み込み:**",
+        "```rin",
+        "(def x 1)",
+        "```",
+        "**入力：**",
+        "```rin",
+        "x",
+        "```",
+        "**期待結果：**",
+        "| 上限 | 結果 | 値 |",
+        "|---|---|---|",
+        "| 既定 | 値 | `1` |",
+    ];
+    assert!(
+        std::panic::catch_unwind(|| parse_single_case("t-3".to_string(), &unknown_heading, "test"))
+            .is_err()
+    );
+}
+
 fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
-    #[derive(Clone, PartialEq, Eq)]
-    enum RinSection {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum PendingBlock {
         Input,
         Setup,
         FailingSetup,
         Module(String),
+        ExpectedRender,
     }
 
     let mut rule_id = None;
@@ -162,7 +249,7 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
     let mut initial_bindings = Vec::new();
     let mut source = None;
     let mut table_row = None;
-    let mut next_rin = RinSection::Input;
+    let mut pending: Option<PendingBlock> = None;
 
     let mut idx = 0;
     while idx < lines.len() {
@@ -191,23 +278,48 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                 .strip_prefix('`')
                 .and_then(|s| s.strip_suffix('`'))
                 .unwrap_or_else(|| panic!("{file_label} ({id}): 初期束縛 must use backticks"));
-            for part in raw.split(',') {
-                let (name, expr) = part.split_once('=').unwrap_or_else(|| {
-                    panic!("{file_label} ({id}): 初期束縛 entry must be `name = expr`")
-                });
-                initial_bindings.push((name.trim().to_string(), expr.trim().to_string()));
+            let (name, expr) = raw.split_once('=').unwrap_or_else(|| {
+                panic!("{file_label} ({id}): 初期束縛 entry must be `name = expr`")
+            });
+            let name = name.trim();
+            assert!(
+                !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c == ','),
+                "{file_label} ({id}): invalid binding name '{name}' in 初期束縛 (use one `初期束縛：` line per binding)"
+            );
+            initial_bindings.push((name.to_string(), expr.trim().to_string()));
+        } else if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
+            assert!(
+                pending.is_none(),
+                "{file_label} ({id}): missing code block after heading {:?} before '{trimmed}'",
+                pending.unwrap()
+            );
+            if trimmed == "**入力：**" {
+                pending = Some(PendingBlock::Input);
+            } else if trimmed == "**読み込み：**" {
+                pending = Some(PendingBlock::Setup);
+            } else if trimmed == "**失敗する読み込み：**" {
+                pending = Some(PendingBlock::FailingSetup);
+            } else if let Some(rest) = trimmed.strip_prefix("**モジュール `")
+                && let Some(mod_name) = rest.strip_suffix("`：**")
+            {
+                assert!(
+                    !mod_name.is_empty(),
+                    "{file_label} ({id}): empty module name in heading"
+                );
+                pending = Some(PendingBlock::Module(mod_name.to_string()));
+            } else if trimmed == "**期待表示：**" {
+                pending = Some(PendingBlock::ExpectedRender);
+            } else if trimmed == "**期待結果：**" {
+                // 直後に Markdown 表が続く（コードブロックは不要）。
+            } else {
+                panic!("{file_label} ({id}): unknown section heading '{trimmed}'");
             }
-        } else if trimmed == "**入力：**" {
-            next_rin = RinSection::Input;
-        } else if trimmed == "**読み込み：**" {
-            next_rin = RinSection::Setup;
-        } else if trimmed == "**失敗する読み込み：**" {
-            next_rin = RinSection::FailingSetup;
-        } else if let Some(rest) = trimmed.strip_prefix("**モジュール `")
-            && let Some(mod_name) = rest.strip_suffix("`：**")
-        {
-            next_rin = RinSection::Module(mod_name.to_string());
         } else if trimmed == "```text" {
+            assert_eq!(
+                pending.take(),
+                Some(PendingBlock::ExpectedRender),
+                "{file_label} ({id}): ```text block must follow **期待表示：**"
+            );
             assert!(
                 rendered.is_none(),
                 "{file_label} ({id}): duplicate expected rendering"
@@ -224,6 +336,9 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
             );
             rendered = Some(buf.join("\n"));
         } else if trimmed == "```rin" {
+            let section = pending.take().unwrap_or_else(|| {
+                panic!("{file_label} ({id}): ```rin block without preceding section heading")
+            });
             idx += 1;
             let mut buf = Vec::new();
             while idx < lines.len() && lines[idx].trim() != "```" {
@@ -235,11 +350,34 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                 "{file_label} ({id}): unclosed ```rin block"
             );
             let block = buf.join("\n");
-            match std::mem::replace(&mut next_rin, RinSection::Input) {
-                RinSection::Input => source = Some(block),
-                RinSection::Setup => setup = Some(block),
-                RinSection::FailingSetup => failing_setup = Some(block),
-                RinSection::Module(name) => modules.push((name, block)),
+            match section {
+                PendingBlock::Input => {
+                    assert!(
+                        source.is_none(),
+                        "{file_label} ({id}): duplicate **入力：** block"
+                    );
+                    source = Some(block);
+                }
+                PendingBlock::Setup => {
+                    assert!(
+                        setup.is_none(),
+                        "{file_label} ({id}): duplicate **読み込み：** block"
+                    );
+                    setup = Some(block);
+                }
+                PendingBlock::FailingSetup => {
+                    assert!(
+                        failing_setup.is_none(),
+                        "{file_label} ({id}): duplicate **失敗する読み込み：** block"
+                    );
+                    failing_setup = Some(block);
+                }
+                PendingBlock::Module(name) => modules.push((name, block)),
+                PendingBlock::ExpectedRender => {
+                    panic!(
+                        "{file_label} ({id}): **期待表示：** must be followed by ```text, not ```rin"
+                    )
+                }
             }
         } else if trimmed.starts_with("|") && !trimmed.contains("---") && !trimmed.contains("上限")
         {
@@ -258,6 +396,12 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
         }
         idx += 1;
     }
+
+    assert!(
+        pending.is_none(),
+        "{file_label} ({id}): missing code block after heading {:?}",
+        pending.unwrap()
+    );
 
     let (limit_spec, expected_kind, expected_value) =
         table_row.unwrap_or_else(|| panic!("{file_label} ({id}): missing expectation table row"));

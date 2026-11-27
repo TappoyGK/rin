@@ -90,8 +90,7 @@ pub(crate) fn compile_program(
 /// 初期レキシカル束縛名付きで AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
 ///
 /// 返り値の `RawVec<u32>` は各初期ローカルスロットに対応する `initial` の添字である。
-/// `initial.len() <= scope::INLINE_NAMES` のときは `0..len`（昇順）、
-/// それより多いときは参照された束縛のみを後ろ勝ちで抽出した添字列（厳密降順）になる。
+/// 参照された束縛のみを後ろ勝ちで抽出した添字列（厳密降順）を返す。
 pub(crate) fn compile_program_with_bindings(
     exprs: &[Expr],
     module: Option<u32>,
@@ -308,26 +307,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     let mut deferred_initial = InitialBindingNames::Empty;
 
     let initial_len = initial.len();
-    if initial_len > 0 && initial_len <= scope::INLINE_NAMES {
-        if used_indices
-            .reserve_work(&mut pool.work, &mut pool.core, initial_len)
-            .is_none()
-        {
-            return Err(pool.core.err_oom(Span::default()));
-        }
-        for idx in 0..initial_len {
-            let name = initial.get(idx);
-            // SAFETY: `initial` の `&str` はこのコンパイル呼び出し全体を通して有効。
-            let raw = unsafe {
-                RawStr::from_raw_utf8(
-                    NonNull::new(name.as_ptr().cast_mut()).unwrap_or(NonNull::dangling()),
-                    name.len(),
-                )
-            };
-            root_scope.alloc_slot(pool, raw, Span::default())?;
-            let _ = used_indices.push_work(&mut pool.work, &mut pool.core, idx as u32);
-        }
-    } else if initial_len > scope::INLINE_NAMES {
+    if initial_len > 0 {
         deferred_initial = initial;
         let mut idents = collect_expr_idents(exprs, body, pool)?;
         if !idents.is_empty() {

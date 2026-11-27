@@ -289,17 +289,12 @@ impl<'a> EnvState<'a> {
             return Err(self.pool.core.error.to_owned_error());
         }
 
-        // `bindings.len() <= 8` のとき `used_slice` は `0..len`（昇順）、
-        // `bindings.len() > 8` のとき `used_slice` は厳密降順。
-        let ascending = used_slice.len() == bindings.len() && bindings.len() <= 8;
-        let mut next_slot = if ascending { 0 } else { used_slice.len() };
+        // `used_slice` は参照された束縛の添字列（厳密降順）。
+        let mut next_slot = used_slice.len();
         for (idx, (_, value)) in bindings.iter().enumerate() {
             match self.pool.import(value, Span::default()) {
                 Ok(rval) => {
-                    if ascending {
-                        used_vals.as_mut_slice()[next_slot] = rval;
-                        next_slot += 1;
-                    } else if next_slot > 0 && used_slice[next_slot - 1] as usize == idx {
+                    if next_slot > 0 && used_slice[next_slot - 1] as usize == idx {
                         next_slot -= 1;
                         used_vals.as_mut_slice()[next_slot] = rval;
                     } else if matches!(rval, RVal::Obj(_))
