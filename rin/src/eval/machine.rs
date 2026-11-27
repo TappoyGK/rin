@@ -31,7 +31,7 @@ impl<'a> Builder<'a> {
         self.inner.math_fma
     }
 
-    /// ホストの値を大域変数として束縛する（同名があれば上書きし、旧値を解放する）。
+    /// ホストの値を大域変数として束縛する（既存名・組み込み名・読み込み済みモジュール名との衝突はエラー）。
     #[cfg(feature = "std-value")]
     pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
         self.inner.bind(name, value)
@@ -162,12 +162,15 @@ impl<'a> EnvState<'a> {
 
     #[cfg(feature = "std-value")]
     pub(super) fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
-        let rval = self
-            .pool
-            .import(value, Span::default())
-            .map_err(|_| self.pool.core.error.to_owned_error())?;
+        if self.modules.get_val(name).is_some() {
+            return Err(Error::new(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format!("cannot bind '{name}': conflicts with loaded module '{name}'"),
+            ));
+        }
         let Some(id) = self.syms.intern(&mut self.pool, name) else {
-            self.pool.release_val(rval);
             return Err(Error::new(
                 "eval.limits",
                 ErrorKind::TooMuchMemory,
@@ -175,13 +178,33 @@ impl<'a> EnvState<'a> {
                 "memory limit exceeded",
             ));
         };
-        match self.globals.set(&mut self.pool, id, rval, Span::default()) {
-            Ok(Some(prev)) => self.pool.release_val(prev),
-            Ok(None) => {}
-            Err(_) => {
-                self.pool.release_val(rval);
-                return Err(self.pool.core.error.to_owned_error());
-            }
+        if id < STATIC_SYM_COUNT {
+            return Err(Error::new(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format!("cannot redefine builtin '{name}'"),
+            ));
+        }
+        if self.globals.get(id).is_some() {
+            return Err(Error::new(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format!("'{name}' is already defined"),
+            ));
+        }
+        let rval = self
+            .pool
+            .import(value, Span::default())
+            .map_err(|_| self.pool.core.error.to_owned_error())?;
+        if self
+            .globals
+            .set(&mut self.pool, id, rval, Span::default())
+            .is_err()
+        {
+            self.pool.release_val(rval);
+            return Err(self.pool.core.error.to_owned_error());
         }
         Ok(())
     }
@@ -232,78 +255,67 @@ impl<'a> EnvState<'a> {
         source: &str,
         bindings: &[(&str, Value)],
     ) -> Result<Value, Error> {
+        let mut names = RawVec::<&str>::new();
+        if !bindings.is_empty() {
+            if names
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, bindings.len())
+                .is_none()
+            {
+                let _ = self.pool.core.err_oom(Span::default());
+                return Err(self.pool.core.error.to_owned_error());
+            }
+            for (name, _) in bindings {
+                let _ = names.push_work(&mut self.pool.work, &mut self.pool.core, *name);
+            }
+        }
         let chunk = match (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
-            compile_program(
+            compile_program_with_bindings(
                 exprs.as_slice(),
                 None,
                 &mut self.syms,
                 &mut self.pool,
                 &self.globals,
                 true,
+                names.as_slice(),
             )
         })() {
             Ok(c) => c,
             Err(_) => return Err(self.pool.core.error.to_owned_error()),
         };
 
-        if bindings.is_empty() {
-            let res = {
-                let mut runner = self.runner(None, true);
-                runner.run_top_chunk(&chunk)
-            };
-            let last = match res {
-                Ok(v) => v,
-                Err(_) => return Err(self.pool.core.error.to_owned_error()),
-            };
-            let exported = self.pool.export(last);
-            self.pool.release_val(last);
-            return Ok(exported);
-        }
-
-        // 一時束縛を取り込み、失敗時は取り込み済みをすべて解放する。
-        // 少数の束縛はスタック配列に格納し、多数は WorkArena 上の RawMap を使う。
-        let mut values = EvalBindingValues::new(bindings.len());
-        for (name, value) in bindings {
-            if let Some(id) = self.syms.get(name) {
+        let mut vals = RawVec::<RVal>::new();
+        if !bindings.is_empty() {
+            if vals
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, bindings.len())
+                .is_none()
+            {
+                let _ = self.pool.core.err_oom(Span::default());
+                return Err(self.pool.core.error.to_owned_error());
+            }
+            for (_, value) in bindings {
                 match self.pool.import(value, Span::default()) {
-                    Ok(rval) => match values.insert(&mut self.pool, id, rval) {
-                        Ok(Some(prev)) => self.pool.release_val(prev),
-                        Ok(None) => {}
-                        Err(_) => {
-                            self.pool.release_val(rval);
-                            values.release_all(&mut self.pool);
-                            return Err(self.pool.core.error.to_owned_error());
-                        }
-                    },
-                    Err(_) => {
-                        values.release_all(&mut self.pool);
-                        return Err(self.pool.core.error.to_owned_error());
+                    Ok(rval) => {
+                        let _ = vals.push_work(&mut self.pool.work, &mut self.pool.core, rval);
                     }
-                }
-            } else {
-                // ソース中で参照されない束縛もメモリ上限検査だけは行うため、取り込んで即解放する。
-                match self.pool.import(value, Span::default()) {
-                    Ok(rval) => self.pool.release_val(rval),
                     Err(_) => {
-                        values.release_all(&mut self.pool);
+                        for &v in vals.as_slice() {
+                            self.pool.release_val(v);
+                        }
                         return Err(self.pool.core.error.to_owned_error());
                     }
                 }
             }
         }
 
-        let eval_bindings = EvalBindings {
-            values,
-            names: EvalBindingNames::Values(bindings),
-        };
         let res = {
             let mut runner = self.runner(None, true);
-            runner.eval_bindings = Some(&eval_bindings);
-            runner.run_top_chunk(&chunk)
+            runner.run_top_chunk_with_locals(&chunk, vals.as_slice())
         };
-        eval_bindings.values.release_all(&mut self.pool);
+        for &v in vals.as_slice() {
+            self.pool.release_val(v);
+        }
         let last = match res {
             Ok(v) => v,
             Err(_) => return Err(self.pool.core.error.to_owned_error()),
@@ -328,6 +340,7 @@ impl<'a> EnvState<'a> {
             &mut self.pool,
             &self.globals,
             false,
+            &[],
         ) {
             Ok(chunk) => chunk,
             Err(_) => {
@@ -470,13 +483,13 @@ impl<'a> EnvState<'a> {
             steps_left: self.limits.steps,
             depth: 0,
             frozen,
-            eval_bindings: None,
             pool: &mut self.pool,
             syms: &self.syms,
             globals: &mut self.globals,
             modules: &mut self.modules,
             active_module,
             export_list: None,
+            added_globals: RawVec::new(),
             #[cfg(feature = "std-value")]
             check_failures: Vec::new(),
             stack: ValueStack::new(),

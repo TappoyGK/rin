@@ -76,13 +76,14 @@ fn many_globals_and_repeated_string_constants_keep_their_numbers() {
         expected
     );
     assert_eq!(
-        m.eval("(def global0 999) (+ global0 global99)").unwrap(),
+        m.eval("(def global100 999) (+ global100 global99)")
+            .unwrap(),
         Value::Int(1098)
     );
 }
 
 #[test]
-fn cached_symbol_numbers_follow_redefinitions_and_new_names() {
+fn cached_symbol_numbers_reject_redefinitions_and_allow_new_names() {
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(defn first () 1) (defn second () 2)").unwrap();
@@ -90,8 +91,9 @@ fn cached_symbol_numbers_follow_redefinitions_and_new_names() {
         assert_eq!(m.eval("(first)").unwrap(), Value::Int(1));
         assert_eq!(m.eval("(second)").unwrap(), Value::Int(2));
     }
-    m.eval("(defn second () 3)").unwrap();
-    assert_eq!(m.eval("(second)").unwrap(), Value::Int(3));
+    let err = m.eval("(defn second () 3)").unwrap_err();
+    assert_eq!(err.rule(), "expr.defn");
+    assert_eq!(m.eval("(second)").unwrap(), Value::Int(2));
     assert!(m.eval("(later)").is_err());
     m.eval("(defn later () 4)").unwrap();
     assert_eq!(m.eval("(later)").unwrap(), Value::Int(4));

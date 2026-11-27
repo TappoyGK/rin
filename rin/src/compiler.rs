@@ -38,9 +38,32 @@ pub(crate) fn compile_program(
     globals: &EnvSlots,
     frozen: bool,
 ) -> Result<Chunk, ErrRecorded> {
-    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)
+    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen, &[])
 }
 
+/// 初期レキシカル束縛名付きで AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
+pub(crate) fn compile_program_with_bindings(
+    exprs: &[Expr],
+    module: Option<u32>,
+    syms: &mut SymTable,
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
+    frozen: bool,
+    initial_names: &[&str],
+) -> Result<Chunk, ErrRecorded> {
+    compile_program_parts(
+        exprs,
+        &[],
+        module,
+        syms,
+        pool,
+        globals,
+        frozen,
+        initial_names,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_program_parts<'a, 'p>(
     exprs: &'a [Expr],
     body: &'a [Expr],
@@ -49,6 +72,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     pool: &'a mut Pool<'p>,
     globals: &'a EnvSlots,
     frozen: bool,
+    initial_names: &[&str],
 ) -> Result<Chunk, ErrRecorded> {
     let region = if frozen {
         CodeRegion::Work
@@ -56,8 +80,15 @@ pub(crate) fn compile_program_parts<'a, 'p>(
         CodeRegion::Perm
     };
     let mut scopes = RawVec::new();
+    let mut root_scope = Scope::new(module);
+    for &name in initial_names {
+        let Some(raw) = RawStr::from_work(&mut pool.work, &mut pool.core, name) else {
+            return Err(pool.core.err_oom(Span::default()));
+        };
+        root_scope.alloc_slot(pool, raw, Span::default())?;
+    }
     if scopes
-        .push_work(&mut pool.work, &mut pool.core, Scope::new(module))
+        .push_work(&mut pool.work, &mut pool.core, root_scope)
         .is_none()
     {
         return Err(pool.core.err_oom(Span::default()));

@@ -668,8 +668,57 @@ impl Runner<'_, '_> {
             write_suggest(out, name, self.modules.loaded_names());
             return Err(ErrRecorded);
         };
-        self.pool.retain_val(mod_val);
-        self.define_top(id, mod_val, span)?;
+        if id < crate::bytecode::STATIC_SYM_COUNT {
+            return Err(self.err_runtime_fmt(
+                "expr.module",
+                span,
+                format_args!("cannot import module '{name}': conflicts with builtin"),
+            ));
+        }
+        if let Some(mod_id) = self.active_module {
+            if let Some(existing) = self.modules.env(mod_id).get(id) {
+                if matches!((existing, mod_val), (RVal::Obj(a), RVal::Obj(b)) if a == b) {
+                    return self.stack_push(RVal::Void, span);
+                }
+                return Err(self.err_runtime_fmt(
+                    "expr.module",
+                    span,
+                    format_args!("cannot import module '{name}': '{name}' is already defined"),
+                ));
+            }
+            self.pool.retain_val(mod_val);
+            if let Err(e) = self
+                .modules
+                .set_env_slot(self.pool, mod_id, id, mod_val, span)
+            {
+                self.pool.release_val(mod_val);
+                return Err(e);
+            }
+        } else {
+            if let Some(existing) = self.globals.get(id) {
+                if matches!((existing, mod_val), (RVal::Obj(a), RVal::Obj(b)) if a == b) {
+                    return self.stack_push(RVal::Void, span);
+                }
+                return Err(self.err_runtime_fmt(
+                    "expr.module",
+                    span,
+                    format_args!("cannot import module '{name}': '{name}' is already defined"),
+                ));
+            }
+            if self
+                .added_globals
+                .push_work(&mut self.pool.work, &mut self.pool.core, id)
+                .is_none()
+            {
+                return Err(self.work_oom(span));
+            }
+            self.pool.retain_val(mod_val);
+            if let Err(e) = self.globals.set(self.pool, id, mod_val, span) {
+                self.added_globals.pop();
+                self.pool.release_val(mod_val);
+                return Err(e);
+            }
+        }
         self.stack_push(RVal::Void, span)
     }
 

@@ -29,8 +29,8 @@ fn collects_checks_in_control_flow_and_continues_after_failure() {
 fn tests_get_fresh_environments_and_step_budgets() {
     let source = r#"
 (def x 1)
-(deftest "first" (def x 2) (check_eq x 2))
-(deftest "second" (check_eq x 1))
+(deftest "first" (def y 2) (check_eq (+ x y) 3))
+(deftest "second" (def y 10) (check_eq (+ x y) 11))
 "#;
     assert!(run(&[("fresh", source)], &[], Limits::default()).is_success());
     let source = "(deftest \"a\" (check true)) (deftest \"b\" (check true))";

@@ -199,19 +199,18 @@ fn stateful(out: &mut String) {
             frozen.eval("(def x 1)"),
         );
     }
-    machine
-        .load_module("base", "(export zeta) (def zeta 7)")
-        .unwrap();
     record(
         out,
-        "reload",
-        "(import base) base.zeta",
-        machine.eval("(import base) base.zeta"),
+        "reload-rejected",
+        "",
+        machine
+            .load_module("base", "(export zeta) (def zeta 7)")
+            .map(|()| Value::Void),
     );
     let mut machine = machine.freeze().unwrap();
     record(
         out,
-        "reload-error",
+        "frozen-call",
         "",
         machine.call_in("base", "alpha", &[]),
     );

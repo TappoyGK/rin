@@ -18,6 +18,24 @@ impl EnvState<'_> {
         name: &str,
         source: &str,
     ) -> Result<(), ErrRecorded> {
+        if self.modules.get_val(name).is_some() {
+            return Err(self.pool.core.err_fmt(
+                "expr.module",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("module '{name}' is already loaded"),
+            ));
+        }
+        if let Some(sym_id) = self.syms.get(name)
+            && (sym_id < STATIC_SYM_COUNT || self.globals.get(sym_id).is_some())
+        {
+            return Err(self.pool.core.err_fmt(
+                "expr.module",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("module name '{name}' conflicts with existing binding"),
+            ));
+        }
         let mod_id = match self.modules.ensure_module(&mut self.pool, name) {
             Ok(id) => id,
             Err(e) => {
