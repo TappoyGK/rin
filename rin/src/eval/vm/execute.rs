@@ -115,9 +115,9 @@ impl Runner<'_, '_> {
                         let span = chunk.spans[ip - 1];
                         self.exec_make_list_splice(chunk, mask_idx, span)?;
                     }
-                    Op::FormatTemplate(n) => {
+                    Op::FormatTemplate(tmpl_idx) => {
                         let span = chunk.spans[ip - 1];
-                        self.exec_format_template(n, span)?;
+                        self.exec_format_template(chunk, tmpl_idx, span)?;
                     }
                     Op::MakeTuple(n) => {
                         let span = chunk.spans[ip - 1];

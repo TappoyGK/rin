@@ -162,7 +162,7 @@ fn split_tests(ast: OwnedAst) -> Result<Program, Error> {
                 return Err(Error::parse(
                     "test.deftest",
                     expr.span,
-                    "deftest requires a string name",
+                    "deftest requires a text name",
                 ));
             };
             let name_str = name.as_str().to_owned();

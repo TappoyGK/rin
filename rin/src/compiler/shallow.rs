@@ -157,17 +157,30 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             ExprKind::Template(parts) => {
                 let parts = parts.as_slice();
-                let Ok(count) = u32::try_from(parts.len()) else {
+                if u32::try_from(parts.len()).is_err() {
                     return Err(self.fail_parse(
                         "compile.capacity",
                         span,
                         "template literal too large",
                     ));
-                };
+                }
+                let mut part_spans = RawVec::new();
                 for part in parts {
                     self.compile_expr_shallow(part, false, depth + 1)?;
+                    if part_spans
+                        .push_work(&mut self.pool.work, &mut self.pool.core, part.span)
+                        .is_none()
+                    {
+                        return Err(self.fail_oom(part.span));
+                    }
                 }
-                self.emit(Op::FormatTemplate(count), span)?;
+                let region = self.current_region();
+                let top = self.scopes.last_mut().unwrap();
+                let Some(tmpl_idx) = top.chunk.add_template_spans(self.pool, region, part_spans)
+                else {
+                    return Err(self.fail_oom(span));
+                };
+                self.emit(Op::FormatTemplate(tmpl_idx), span)?;
             }
             ExprKind::None => {
                 self.emit_raw(Op::None, span)?;

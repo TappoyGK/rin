@@ -57,8 +57,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
 pub(crate) fn tokenize_into(input: &str, tokens: &mut Vec<Token>) -> Result<(), Error> {
     tokens.clear();
     let mut lexer = Lexer::new(input);
+    let mut braces = Vec::new();
     loop {
-        let tok = lexer.next_token()?;
+        let tok = lexer.next_token(&mut braces)?;
         let is_eof = tok.kind == TokenKind::Eof;
         tokens.push(tok);
         if is_eof {
@@ -76,9 +77,10 @@ pub(crate) fn tokenize_lossless(
     let mut lines = vec![0];
     lines.extend(input.match_indices('\n').map(|(i, _)| i + 1));
     let mut lexer = Lexer::new(input);
+    let mut braces = Vec::new();
     let mut result = Vec::new();
     loop {
-        let token = lexer.next_token()?;
+        let token = lexer.next_token(&mut braces)?;
         if token.kind == TokenKind::Eof {
             break;
         }
@@ -86,7 +88,7 @@ pub(crate) fn tokenize_lossless(
         if matches!(token.kind, TokenKind::TemplateStart(_)) {
             let mut depth = 1usize;
             while depth > 0 {
-                let next = lexer.next_token()?;
+                let next = lexer.next_token(&mut braces)?;
                 match next.kind {
                     TokenKind::TemplateStart(_) => depth += 1,
                     TokenKind::TemplateEnd(_) => depth -= 1,
@@ -107,13 +109,14 @@ pub(crate) fn tokenize_lossless(
     Ok(result)
 }
 
+const MAX_TEMPLATE_NESTING: usize = 256;
+
 struct Lexer<'a> {
     src: &'a [u8],
     pos: usize,
     line: usize,
     col: usize,
-    template_braces: [u16; 256],
-    template_depth: usize,
+    work_braces: crate::mem::RawVec<u16>,
 }
 
 impl<'a> Lexer<'a> {
@@ -123,8 +126,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
-            template_braces: [0; 256],
-            template_depth: 0,
+            work_braces: crate::mem::RawVec::new(),
         }
     }
 
@@ -204,7 +206,7 @@ impl<'a> Lexer<'a> {
 
 #[cfg(feature = "std-value")]
 impl<'a> Lexer<'a> {
-    fn next_token(&mut self) -> Result<Token, Error> {
+    fn next_token(&mut self, braces: &mut Vec<u16>) -> Result<Token, Error> {
         let skipped = self.skip_ws_and_comments();
         let attached = !skipped && self.pos > 0;
         let span = self.span();
@@ -236,21 +238,19 @@ impl<'a> Lexer<'a> {
             }
             b'{' => {
                 self.bump();
-                if self.template_depth > 0 {
-                    let top = &mut self.template_braces[self.template_depth - 1];
+                if let Some(top) = braces.last_mut() {
                     *top = top.saturating_add(1);
                 }
                 TokenKind::LBrace
             }
             b'}' => {
-                if self.template_depth > 0 {
-                    let top = &mut self.template_braces[self.template_depth - 1];
+                if let Some(top) = braces.last_mut() {
                     if *top > 0 {
                         *top -= 1;
                         self.bump();
                         TokenKind::RBrace
                     } else {
-                        self.lex_string_segment(span, true)?
+                        self.lex_string_segment(span, true, braces)?
                     }
                 } else {
                     self.bump();
@@ -278,7 +278,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 TokenKind::Quasiquote
             }
-            b'"' => self.lex_string_segment(span, false)?,
+            b'"' => self.lex_string_segment(span, false, braces)?,
             b'\'' => {
                 self.bump();
                 TokenKind::Quote
@@ -394,7 +394,12 @@ impl<'a> Lexer<'a> {
         })
     }
 
-    fn lex_string_segment(&mut self, span: Span, resuming: bool) -> Result<TokenKind, Error> {
+    fn lex_string_segment(
+        &mut self,
+        span: Span,
+        resuming: bool,
+        braces: &mut Vec<u16>,
+    ) -> Result<TokenKind, Error> {
         self.bump(); // 開始の '"' または再開の '}'
         let mut out = String::new();
         loop {
@@ -408,7 +413,7 @@ impl<'a> Lexer<'a> {
             match b {
                 b'"' => {
                     if resuming {
-                        self.template_depth -= 1;
+                        braces.pop();
                         return Ok(TokenKind::TemplateEnd(out));
                     }
                     return Ok(TokenKind::Str(out));
@@ -425,15 +430,14 @@ impl<'a> Lexer<'a> {
                     if resuming {
                         return Ok(TokenKind::TemplateMid(out));
                     }
-                    if self.template_depth >= self.template_braces.len() {
+                    if braces.len() >= MAX_TEMPLATE_NESTING {
                         return Err(Error::parse(
                             "src.nesting-limit",
                             span,
                             "template nesting too deep",
                         ));
                     }
-                    self.template_braces[self.template_depth] = 0;
-                    self.template_depth += 1;
+                    braces.push(0);
                     return Ok(TokenKind::TemplateStart(out));
                 }
                 b'\\' => out.push(self.lex_escape(span)?),
@@ -669,21 +673,29 @@ pub(crate) fn write_rin_float(f: &mut fmt::Formatter<'_>, x: f64) -> fmt::Result
     if x == 0.0 {
         return f.write_str(if x.is_sign_negative() { "-0.0" } else { "0.0" });
     }
-    if x.is_sign_negative() {
-        f.write_char('-')?;
-    }
 
     struct StackBuf {
         buf: [u8; 48],
         len: usize,
     }
-    impl fmt::Write for StackBuf {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            let b = s.as_bytes();
+    impl StackBuf {
+        #[inline]
+        fn push_bytes(&mut self, b: &[u8]) {
             let avail = self.buf.len().saturating_sub(self.len);
             let n = b.len().min(avail);
             self.buf[self.len..self.len + n].copy_from_slice(&b[..n]);
             self.len += n;
+        }
+        #[inline]
+        fn as_str(&self) -> &str {
+            // SAFETY: ASCII バイトのみ書き込む。
+            unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len]) }
+        }
+    }
+    impl fmt::Write for StackBuf {
+        #[inline]
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.push_bytes(s.as_bytes());
             Ok(())
         }
     }
@@ -693,47 +705,34 @@ pub(crate) fn write_rin_float(f: &mut fmt::Formatter<'_>, x: f64) -> fmt::Result
         buf: [0; 48],
         len: 0,
     };
+    if x.is_sign_negative() {
+        sb.push_bytes(b"-");
+    }
+
+    if (1e-6..1e21).contains(&abs) {
+        let _ = write!(&mut sb, "{abs}");
+        if !sb.buf[..sb.len].contains(&b'.') {
+            sb.push_bytes(b".0");
+        }
+        return f.write_str(sb.as_str());
+    }
+
     let _ = write!(&mut sb, "{abs:e}");
-    let raw = std::str::from_utf8(&sb.buf[..sb.len]).unwrap_or("0e0");
-    let Some((mant, exp_str)) = raw.split_once('e') else {
-        return f.write_str(raw);
-    };
-    let exp: i32 = exp_str.parse().unwrap_or(0);
-
-    if !(-6..21).contains(&exp) {
-        return f.write_str(raw);
+    let slice = &sb.buf[..sb.len];
+    if let Some(e_pos) = slice.iter().position(|&b| b == b'e')
+        && !slice[..e_pos].contains(&b'.')
+    {
+        // `1e21` -> `1.0e21`（指数表記でも小数点の両側に数字を置く）
+        let mut out = StackBuf {
+            buf: [0; 48],
+            len: 0,
+        };
+        out.push_bytes(&slice[..e_pos]);
+        out.push_bytes(b".0");
+        out.push_bytes(&slice[e_pos..]);
+        return f.write_str(out.as_str());
     }
-
-    let mut digits = [0u8; 24];
-    let mut dlen = 0usize;
-    for b in mant.bytes() {
-        if b != b'.' && dlen < digits.len() {
-            digits[dlen] = b;
-            dlen += 1;
-        }
-    }
-    let digits_str = std::str::from_utf8(&digits[..dlen]).unwrap_or("0");
-
-    if exp >= 0 {
-        let int_digits = (exp as usize) + 1;
-        if int_digits >= dlen {
-            f.write_str(digits_str)?;
-            for _ in 0..(int_digits - dlen) {
-                f.write_char('0')?;
-            }
-            f.write_str(".0")
-        } else {
-            f.write_str(&digits_str[..int_digits])?;
-            f.write_char('.')?;
-            f.write_str(&digits_str[int_digits..])
-        }
-    } else {
-        f.write_str("0.")?;
-        for _ in 0..((-exp - 1) as usize) {
-            f.write_char('0')?;
-        }
-        f.write_str(digits_str)
-    }
+    f.write_str(sb.as_str())
 }
 
 /// `[value.display]` に従い `char` 値を Rin 文字リテラル形式で書き出す。

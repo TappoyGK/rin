@@ -100,6 +100,9 @@ impl Parser<'_, '_, '_> {
                 )?;
                 Ok(NextStep::StartExpr)
             }
+            WorkTokenKind::TemplateMid(_) | WorkTokenKind::TemplateEnd(_) => {
+                Err(self.parse_err("src.syntax", span, "empty template interpolation"))
+            }
             WorkTokenKind::LParen => self.start_paren(),
             WorkTokenKind::Ident(name) => self.start_ident(name, span),
             other => Err(self.parse_err_fmt(

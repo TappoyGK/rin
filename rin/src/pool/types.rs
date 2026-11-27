@@ -182,10 +182,12 @@ impl ObjStr {
         if index >= self.char_len {
             return None;
         }
+        let s = self.as_str();
         if self.is_ascii() {
-            return Some((self.as_str().as_bytes()[index] as char, 0));
+            return Some((s.as_bytes()[index] as char, 0));
         }
-        self.as_str().chars().nth(index).map(|c| (c, index + 1))
+        let off = nth_char_byte_offset(s.as_bytes(), index);
+        s[off..].chars().next().map(|c| (c, index + 1))
     }
 
     /// スカラー値単位の範囲 `start..end` に対応する部分文字列スライスを返す。
@@ -200,17 +202,13 @@ impl ObjStr {
         if self.is_ascii() {
             return Some(&s[start..end]);
         }
-        let mut byte_start = 0usize;
-        let mut byte_end = s.len();
-        for (ci, (bi, _)) in s.char_indices().enumerate() {
-            if ci == start {
-                byte_start = bi;
-            }
-            if ci == end {
-                byte_end = bi;
-                break;
-            }
-        }
+        let bytes = s.as_bytes();
+        let byte_start = nth_char_byte_offset(bytes, start);
+        let byte_end = if end == self.char_len {
+            bytes.len()
+        } else {
+            byte_start + nth_char_byte_offset(&bytes[byte_start..], end - start)
+        };
         Some(&s[byte_start..byte_end])
     }
 
@@ -221,6 +219,25 @@ impl ObjStr {
             actual_size: self.block_size,
         }
     }
+}
+
+/// 有効な UTF-8 バイト列の先頭から `n` 番目の Unicode スカラー値のバイト位置を返す。
+#[inline]
+fn nth_char_byte_offset(bytes: &[u8], n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let mut count = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        // UTF-8 の先頭バイトは `0b10xxxxxx` 以外（符号付きで -64 以上）。
+        if (b as i8) >= -64 {
+            if count == n {
+                return i;
+            }
+            count += 1;
+        }
+    }
+    bytes.len()
 }
 
 /// モジュールの公開要素（名前辞書順ソート済み配列で保持する）。

@@ -142,6 +142,7 @@ pub(crate) struct Chunk {
     pub protos: RawVec<FnProtoPtr>,
     pub export_lists: RawVec<RawVec<RawStr>>,
     pub splice_masks: RawVec<RawVec<u8>>,
+    pub template_spans: RawVec<RawVec<Span>>,
     pub names: Option<NameInfo>,
 }
 
@@ -283,6 +284,17 @@ impl Chunk {
         Some(idx)
     }
 
+    pub fn add_template_spans(
+        &mut self,
+        pool: &mut Pool<'_>,
+        region: CodeRegion,
+        spans: RawVec<Span>,
+    ) -> Option<u32> {
+        let idx = self.template_spans.len() as u32;
+        pool.push_code(region, &mut self.template_spans, spans)?;
+        Some(idx)
+    }
+
     /// `WorkArena` 上で構築したチャンクを、`PermArena` へ余剰容量ゼロの密なスライスとしてコピーする。
     #[inline(never)]
     pub fn copy_to_perm(&self, pool: &mut Pool<'_>) -> Option<Self> {
@@ -380,6 +392,22 @@ impl Chunk {
             v
         };
 
+        let template_spans = if self.template_spans.is_empty() {
+            RawVec::new()
+        } else {
+            let mut v = RawVec::new();
+            v.reserve_perm(&mut pool.perm, &mut pool.core, self.template_spans.len())?;
+            for &spans in self.template_spans.as_slice() {
+                let inner = RawVec::from_slice_exact_perm(
+                    &mut pool.perm,
+                    &mut pool.core,
+                    spans.as_slice(),
+                )?;
+                v.push_perm(&mut pool.perm, &mut pool.core, inner)?;
+            }
+            v
+        };
+
         Some(Self {
             local_count: self.local_count,
             code,
@@ -393,6 +421,7 @@ impl Chunk {
             protos,
             export_lists,
             splice_masks,
+            template_spans,
             names: self.names,
         })
     }

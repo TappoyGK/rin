@@ -32,6 +32,7 @@ const CHUNK_SLOTS: usize = 256;
 enum Slot {
     Free { next: Option<u32> },
     Live { rc: u32, obj: Obj },
+    Immortal(Obj),
     Dying { next: Option<u32>, obj: Obj },
 }
 
@@ -157,8 +158,6 @@ pub(crate) struct Pool<'a> {
     release_counts: release_tests::Counts,
 }
 
-const IMMORTAL_RC: u32 = u32::MAX;
-
 impl<'a> Pool<'a> {
     #[cfg(all(test, feature = "std-value"))]
     pub fn new(alloc: &'a mut dyn Allocator, max_bytes: usize) -> Self {
@@ -246,7 +245,7 @@ impl<'a> Pool<'a> {
     #[inline(always)]
     pub fn get(&self, id: ObjId) -> &Obj {
         match self.slot_ref(id) {
-            Slot::Live { obj, .. } => obj,
+            Slot::Live { obj, .. } | Slot::Immortal(obj) => obj,
             Slot::Free { .. } | Slot::Dying { .. } => panic!("dangling ObjId({})", id.0),
         }
     }
@@ -260,9 +259,7 @@ impl<'a> Pool<'a> {
 
     #[inline(always)]
     pub fn retain(&mut self, id: ObjId) {
-        if let Slot::Live { rc, .. } = self.slot_mut(id)
-            && *rc != IMMORTAL_RC
-        {
+        if let Slot::Live { rc, .. } = self.slot_mut(id) {
             *rc += 1;
         }
     }
@@ -270,14 +267,11 @@ impl<'a> Pool<'a> {
     #[inline(always)]
     pub fn release_val(&mut self, val: RVal) {
         if let RVal::Obj(id) = val {
-            if let Slot::Live { rc, .. } = self.slot_mut(id) {
-                if *rc == IMMORTAL_RC {
-                    return;
-                }
-                if *rc > 1 {
-                    *rc -= 1;
-                    return;
-                }
+            if let Slot::Live { rc, .. } = self.slot_mut(id)
+                && *rc > 1
+            {
+                *rc -= 1;
+                return;
             }
             self.release(id);
         }
@@ -299,7 +293,6 @@ impl<'a> Pool<'a> {
                 let next_free = self.free_head;
                 let slot = self.slot_mut(id);
                 match slot {
-                    Slot::Live { rc, .. } if *rc == IMMORTAL_RC => continue,
                     Slot::Live { rc, .. } if *rc > 1 => {
                         *rc -= 1;
                         continue;
@@ -313,7 +306,7 @@ impl<'a> Pool<'a> {
                         };
                         obj
                     }
-                    Slot::Free { .. } | Slot::Dying { .. } => continue,
+                    Slot::Immortal(_) | Slot::Free { .. } | Slot::Dying { .. } => continue,
                 }
             } else if let Some(id_u32) = pending {
                 let id = ObjId(id_u32);
@@ -358,12 +351,11 @@ impl<'a> Pool<'a> {
         }
         let slot = self.slot_mut(id);
         let became_zero = match slot {
-            Slot::Live { rc, .. } if *rc == IMMORTAL_RC => false,
             Slot::Live { rc, .. } => {
                 *rc -= 1;
                 *rc == 0
             }
-            Slot::Free { .. } | Slot::Dying { .. } => false,
+            Slot::Immortal(_) | Slot::Free { .. } | Slot::Dying { .. } => false,
         };
         if became_zero {
             let prev = std::mem::replace(slot, Slot::Free { next: None });
@@ -511,9 +503,7 @@ impl<'a> Pool<'a> {
         let id = self.alloc_obj(Obj::Str(obj_str), Span::default()).ok()?;
         self.core.uncharge_obj(SLOT_BYTES);
         let _ = self.core.charge_perm(SLOT_BYTES);
-        if let Slot::Live { rc, .. } = self.slot_mut(id) {
-            *rc = IMMORTAL_RC;
-        }
+        *self.slot_mut(id) = Slot::Immortal(Obj::Str(obj_str));
         self.perm_strs
             .insert_perm(&mut self.perm, &mut self.core, hash, raw, id, |a, b| {
                 a.as_str() == b.as_str()
@@ -532,7 +522,7 @@ impl<'a> Pool<'a> {
             let slot = self.slot_mut(id);
             let next = match *slot {
                 Slot::Free { next } => next,
-                Slot::Live { .. } | Slot::Dying { .. } => unreachable!(),
+                Slot::Live { .. } | Slot::Immortal(_) | Slot::Dying { .. } => unreachable!(),
             };
             *slot = Slot::Live { rc: 1, obj };
             self.free_head = next;

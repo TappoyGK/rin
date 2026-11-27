@@ -71,7 +71,7 @@ true false none some ok err inf nan
 
 **[src.float]** 浮動小数点リテラルは、小数点 `.`（前後に数字が必要）または指数部 `e` / `E` を持つ数値として表し、`f64` として解釈する。
 
-**[src.string]** 文字列リテラルは `"` で囲む。エスケープとして `\0`、`\n`、`\r`、`\t`、`\\`、`\"`、`\u{H}`（`H` は 1〜6 桁の 16 進数）、`\$` を認める（`\'` は認めない）。生の改行（LF・CR）は禁止し、字句エラーとする。`"..."` の中で `${式}` はテンプレート埋め込みとして扱い、リテラルとしての `${` は `\${` と書く。未閉鎖の文字列は字句エラーである。未知・未完・範囲外（サロゲートまたは `U+10FFFF` 超）のエスケープは `[src.escape]` に従う。
+**[src.string]** 文字列リテラルは `"` で囲む。エスケープとして `\0`、`\n`、`\r`、`\t`、`\\`、`\"`、`\u{H}`（`H` は 1〜6 桁の 16 進数）、`\$` を認める（`\'` は認めない）。生の改行（LF・CR）は禁止し、字句エラーとする。`"..."` の中で `${式}` はテンプレート埋め込みとして扱い、`${` と対応する `}` の間に 1 個の式を書く（空の `${}` は構文エラーとする）。埋め込み式の中では通常の文字列リテラルやテンプレートを入れ子にできる。`{` が続かない単独の `$` は文字 `$` として扱い、リテラルとしての `${` は `\${` と書く。未閉鎖の文字列は字句エラーである。未知・未完・範囲外（サロゲートまたは `U+10FFFF` 超）のエスケープは `[src.escape]` に従う。
 
 **[src.escape]** 文字列リテラルのエスケープ（未知・未完、および `\u{H}` の空・未閉鎖・7 桁以上・範囲外）および文字リテラルの `\u{H}`（空・未閉鎖・7 桁以上・範囲外）が不正な場合は字句エラーである。共通のエスケープ処理の診断にはこの規則名を付ける。
 
@@ -116,7 +116,7 @@ true false none some ok err inf nan
 
 - `void`：`void`
 - `i64`：10 進表記（例：`42`、`-5`）
-- `f64`：最短の往復表記。通常表記では必ず小数点の両側に数字を置く（例：`1.0`、`0.1`、`-0.0`）。絶対値が `1e21` 以上または `0` より大きく `1e-6` 未満のときは指数表記（例：`1e21`、`1.5e-8`、`1e-7`）とする。特殊値は `nan`・`inf`・`-inf` とする（`NaN` は `==` で自身と等しくならない）
+- `f64`：最短の往復表記。通常表記・指数表記とも仮数部には必ず小数点の両側に数字を置く（例：`1.0`、`0.1`、`-0.0`）。絶対値が `1e21` 以上または `0` より大きく `1e-6` 未満のときは指数表記（例：`1.0e21`、`1.5e-8`、`1.0e-7`、`-1.0e21`）とする。特殊値は `nan`・`inf`・`-inf` とする（`NaN` は `==` で自身と等しくならない）
 - `bool`：`true` または `false`
 - `char`：文字リテラル表記（`\nul`・`\tab`・`\newline`・`\return`・`\space`、それ以外の一般カテゴリ Z・Cc・Cf・M の文字は `\u{H}`（小文字 16 進数、先頭の 0 なし）、それ以外は `\` に続けてその文字）
 - `text`：`"hello"` 等の文字列リテラル表記（`\0`・`\n`・`\r`・`\t`・`\\`・`\"`・`\$`、およびその他の一般カテゴリ Cc・Zl・Zp と `U+200C`・`U+200D`・`U+E0020`–`U+E007F` を除く Cf の文字を `\u{H}` でエスケープし、`'`・M・Zs は生のまま表示する）
@@ -198,9 +198,9 @@ true false none some ok err inf nan
 
 **[expr.with]** `(with target { f1: e1 ... })` または正規 S 式形式 `(with target (f1 e1) ...)` は、構造体 `target` の指定フィールドのみを新しい値で置き換えた構造体の複製を返す。`target` が構造体でない場合、または存在しないフィールドを含む場合は実行時エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
 
-**[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードは `ident` 値、数値（`inf` / `nan` を含む）・`true` / `false` / `none`・文字・文字列はその値、`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。
+**[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードは `ident` 値、数値（`inf` / `nan` を含む）・`true` / `false` / `none`・文字・文字列はその値、`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。`datum` の中にテンプレート埋め込み（`"..."` 内の `${...}`）は書けず、構文エラーである。
 
-**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、深さに応じて `unquote` / `unquote_splicing` を評価する。深さは、その位置を囲む `quasiquote` の数から、囲む `unquote` / `unquote_splicing` の数を引いた値とする（どの `quasiquote` にも囲まれていない位置は深さ 0）。`quasiquote` の中の `quote` は深さを変えない（`` `(a '(b ,x)) `` の `,x` は評価される）。評価対象の `quasiquote` の中で、深さ 1 の位置に書いた `,expr` / `(unquote expr)` は `expr` を通常の式として評価して埋め込み、リスト要素位置の深さ 1 に書いた `,@expr` / `(unquote_splicing expr)` は `expr` をリストとして評価して展開する（評価される `expr` の中は深さ 0 になる）。深さ 2 以上の位置、または `quote` の中に書かれた `quasiquote` 内の深さ 1 以上の位置に書いた `unquote` / `unquote_splicing` は評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。深さ 0 の位置（どの `quasiquote` にも囲まれていない位置、および評価される `,expr` / `,@expr` の中を含む）に書いた `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外の深さ 1 で評価される `,@` / `(unquote_splicing ...)` は構文エラーである。リスト要素位置とは `(...)` または `[...]` の直接の要素位置を指し、`'`・`` ` ``・`,`・`,@`・`(unquote ...)`・`some(...)`・構造体フィールド値・添字などの単一オペランド位置は含めない（たとえば深さ 2 の `,,@xs` も構文エラーである）。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
+**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、深さに応じて `unquote` / `unquote_splicing` を評価する。`quote` と同じく、`datum` の位置にテンプレート埋め込み（`"..."` 内の `${...}`）は書けず構文エラーである（`,expr` / `,@expr` 内の式には書ける）。深さは、その位置を囲む `quasiquote` の数から、囲む `unquote` / `unquote_splicing` の数を引いた値とする（どの `quasiquote` にも囲まれていない位置は深さ 0）。`quasiquote` の中の `quote` は深さを変えない（`` `(a '(b ,x)) `` の `,x` は評価される）。評価対象の `quasiquote` の中で、深さ 1 の位置に書いた `,expr` / `(unquote expr)` は `expr` を通常の式として評価して埋め込み、リスト要素位置の深さ 1 に書いた `,@expr` / `(unquote_splicing expr)` は `expr` をリストとして評価して展開する（評価される `expr` の中は深さ 0 になる）。深さ 2 以上の位置、または `quote` の中に書かれた `quasiquote` 内の深さ 1 以上の位置に書いた `unquote` / `unquote_splicing` は評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。深さ 0 の位置（どの `quasiquote` にも囲まれていない位置、および評価される `,expr` / `,@expr` の中を含む）に書いた `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外の深さ 1 で評価される `,@` / `(unquote_splicing ...)` は構文エラーである。リスト要素位置とは `(...)` または `[...]` の直接の要素位置を指し、`'`・`` ` ``・`,`・`,@`・`(unquote ...)`・`some(...)`・構造体フィールド値・添字などの単一オペランド位置は含めない（たとえば深さ 2 の `,,@xs` も構文エラーである）。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
 
 **[expr.template]** `"..."` 内に `${expr}` を含む文字列リテラルはテンプレート式として評価され、各埋め込み式を左から右に 1 回ずつ評価して文字列化し、`text` を返す。埋め込める型は `i64`・`f64`・`bool`・`char`・`text`・`ident` とし、それ以外の型は実行時エラーである。`f64` は `[value.display]` と同じ表記、`char` はその 1 文字、`text` はその内容、`ident` は先頭の `'` を付けずに名前だけを挿入する。埋め込みのない文字列リテラルは `match` のパターンにも使える。
 
@@ -389,7 +389,7 @@ true false none some ok err inf nan
 この規則は実行時間の一致や、`steps` だけで全処理量を制限できることを意味しない。ソース付きエラー表示には、ホストが提供するソースとコールバックの返り値も同じであることが必要である。
 
 **[eval.limits]** 評価器は 1 回の評価ごとに上限値 `Limits`（`steps`、`depth`、`memory_bytes`）を監視する。
-- `steps`：式評価ごとに1と、`[eval.builtin-cost]` の内部処理を計上し、上限を超えると `TooManySteps` エラーを返す。`with` は置き換える値の評価後、複製前に元のフィールド数分の費用を計上する。リストリテラルは要素数分の生成費用、リストの添字参照は `get` と同じ走査費用、`check_eq` は同じ比較費用 `E` も計上する。それぞれ、追加費用が上限を超えた位置をエラー位置とする。
+- `steps`：式評価ごとに1と、`[eval.builtin-cost]` の内部処理を計上し、上限を超えると `TooManySteps` エラーを返す。`with` は置き換える値の評価後、複製前に元のフィールド数分の費用を計上する。リストリテラルは要素数分の生成費用、リスト・非 ASCII の `text` の添字参照は、`get` と同じ走査費用、`check_eq` は同じ比較費用 `E` も計上する。それぞれ、追加費用が上限を超えた位置をエラー位置とする。
 - `depth`：ユーザー定義関数の呼び出しネスト深さが上限を超えると `TooDeep` エラーを返す（末尾呼び出し最適化が適用された呼び出しはネスト深さに数えない）。組み込み関数が呼ぶユーザー定義関数も数える。呼び出しフレームは作業領域（`WorkArena`）上で非再帰に管理するため、ネイティブスタック容量に依存せず、`depth` 上限と利用可能なメモリ（`memory_bytes`）の範囲内で任意の深さまで安全に実行できる。
 - `memory_bytes`：3 領域（永続領域・オブジェクト領域・作業領域）の合計論理使用バイト数が上限を超えると `TooMuchMemory` エラーを返す。アロケータが要求された領域を確保できない場合も同じ種別・規則名で返す。`Allocator` から取得するチャンク総量はブロック単位の切り上げにより `memory_bytes` を超えうるため、固定容量アリーナ（`ArenaAllocator` 等）の容量は `MemoryConfig` のブロックサイズを踏まえて別に見積もる（参考：最小限の評価に必要な `memory_bytes` はリテラルで約 1 KiB、単純な算術式で約 1.6 KiB、関数定義を含む式で約 3.5 KiB 程度）。なお、読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` の破棄まで回収されない（再読み込み時は新しい `Builder` を作り直す。凍結後の `Machine` 評価では永続領域へ追記しない）。
 - 構文の入れ子上限（`[src.nesting-limit]`、`256` 段）は `Limits` とは独立した固定上限として構文解析時に検査する。
@@ -442,7 +442,7 @@ Decl       ::= "(" "def" IDENT Expr ")"
              | "(" "import" IDENT ")"
              | "(" "export" IDENT* ")"
 Expr       ::= Primary ( "." IDENT | "[" Expr "]" )*
-Primary    ::= INT | FLOAT | STRING | CHAR
+Primary    ::= INT | FLOAT | STRING | Template | CHAR
              | "true" | "false" | "none" | "inf" | "nan"
              | "'" Datum | "`" Datum
              | ( "some" | "ok" | "err" ) "(" Expr ")"
@@ -452,6 +452,7 @@ Primary    ::= INT | FLOAT | STRING | CHAR
              | SpecialForm
              | "(" Expr Expr* ")"
              | IDENT
+Template   ::= '"' TextPart ( "${" Expr "}" TextPart )+ '"'
 SpecialForm ::= "(" "fn" "(" IDENT* ")" Expr+ ")"
               | "(" "let" "(" ( IDENT Expr )* ")" Expr+ ")"
               | "(" "if" Expr Expr Expr ")"
@@ -469,6 +470,7 @@ Pattern    ::= "_" | INT | STRING | CHAR | "'" IDENT | "true" | "false" | "none"
              | ( "some" | "ok" | "err" ) "(" ( IDENT | "_" ) ")"
              | UpperIdent "." IDENT ( "(" ( IDENT | "_" ) ")" )?
              | IDENT
+(* STRING は埋め込みのない文字列リテラル。Pattern・DatumPrimary では Template を許さない *)
 Datum      ::= DatumPrimary ( "." IDENT | "[" Datum "]" )*
 DatumPrimary ::= INT | FLOAT | STRING | CHAR
                | "true" | "false" | "none" | "inf" | "nan"

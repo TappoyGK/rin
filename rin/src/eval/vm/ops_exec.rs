@@ -35,8 +35,14 @@ impl Runner<'_, '_> {
         self.stack_push(RVal::Void, span)
     }
 
-    pub(super) fn exec_format_template(&mut self, n: u32, span: Span) -> Result<(), ErrRecorded> {
-        let count = n as usize;
+    pub(super) fn exec_format_template(
+        &mut self,
+        chunk: &Chunk,
+        tmpl_idx: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let part_spans = chunk.template_spans[tmpl_idx as usize].as_slice();
+        let count = part_spans.len();
         let start = self.stack.len() - count;
         let mark = self.pool.work.mark(&self.pool.core);
         let mut buf = RawVec::<u8>::new();
@@ -64,9 +70,9 @@ impl Runner<'_, '_> {
             }
         }
 
-        let mut bad_type: Option<&'static str> = None;
+        let mut bad_type: Option<(&'static str, Span)> = None;
         let mut oom = false;
-        for i in 0..count {
+        for (i, &part_span) in part_spans.iter().enumerate() {
             let val = self.stack.as_slice()[start + i];
             match val {
                 RVal::Int(v) => {
@@ -138,23 +144,23 @@ impl Runner<'_, '_> {
                         }
                     }
                     _ => {
-                        bad_type = Some(val.type_name(self.pool));
+                        bad_type = Some((val.type_name(self.pool), part_span));
                         break;
                     }
                 },
                 _ => {
-                    bad_type = Some(val.type_name(self.pool));
+                    bad_type = Some((val.type_name(self.pool), part_span));
                     break;
                 }
             }
         }
 
-        if let Some(tname) = bad_type {
+        if let Some((tname, err_span)) = bad_type {
             self.pool.work.rewind(&mut self.pool.core, mark);
             self.release_stack_from(start);
             return Err(self.err_runtime_fmt(
                 "expr.template",
-                span,
+                err_span,
                 format_args!(
                     "cannot interpolate value of type '{tname}' in template (expected i64, f64, bool, char, text, or ident)"
                 ),

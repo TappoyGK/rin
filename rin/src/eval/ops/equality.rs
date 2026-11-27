@@ -9,6 +9,18 @@ impl Runner<'_, '_> {
         if let (RVal::Obj(aid), RVal::Obj(bid)) = (a, b)
             && aid != bid
         {
+            if let (Obj::Str(s1), Obj::Str(s2)) = (self.pool.get(aid), self.pool.get(bid)) {
+                if !try_charge_steps(&mut self.steps_left, 1) {
+                    return None;
+                }
+                if s1.len() != s2.len() {
+                    return Some(false);
+                }
+                if !try_charge_steps(&mut self.steps_left, s1.len()) {
+                    return None;
+                }
+                return Some(s1.as_str() == s2.as_str());
+            }
             return self.objects_equal(a, b);
         }
         if !self.try_charge(1) {

@@ -3,7 +3,7 @@
 use crate::error::{ErrRecorded, ErrorKind, Span};
 use crate::mem::{AllocCore, RawStr, RawVec, WorkArena};
 
-use super::{Lexer, is_ident_continue, is_ident_start, named_char, unicode};
+use super::{Lexer, MAX_TEMPLATE_NESTING, is_ident_continue, is_ident_start, named_char, unicode};
 
 /// 作業領域 (`WorkArena`) 上に構築する字句トークン種別（`Copy`・システムヒープ不使用）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,15 +96,13 @@ impl Lexer<'_> {
             }
             b'{' => {
                 self.bump();
-                if self.template_depth > 0 {
-                    let top = &mut self.template_braces[self.template_depth - 1];
+                if let Some(top) = self.work_braces.last_mut() {
                     *top = top.saturating_add(1);
                 }
                 WorkTokenKind::LBrace
             }
             b'}' => {
-                if self.template_depth > 0 {
-                    let top = &mut self.template_braces[self.template_depth - 1];
+                if let Some(top) = self.work_braces.last_mut() {
                     if *top > 0 {
                         *top -= 1;
                         self.bump();
@@ -403,7 +401,7 @@ impl Lexer<'_> {
                 b'"' => {
                     let s = finish_str(&buf);
                     if resuming {
-                        self.template_depth -= 1;
+                        self.work_braces.pop();
                         return Ok(WorkTokenKind::TemplateEnd(s));
                     }
                     return Ok(WorkTokenKind::Str(s));
@@ -422,7 +420,7 @@ impl Lexer<'_> {
                     if resuming {
                         return Ok(WorkTokenKind::TemplateMid(s));
                     }
-                    if self.template_depth >= self.template_braces.len() {
+                    if self.work_braces.len() >= MAX_TEMPLATE_NESTING {
                         return Err(core.err_str(
                             "src.nesting-limit",
                             ErrorKind::Parse,
@@ -430,8 +428,9 @@ impl Lexer<'_> {
                             "template nesting too deep",
                         ));
                     }
-                    self.template_braces[self.template_depth] = 0;
-                    self.template_depth += 1;
+                    if self.work_braces.push_work(work, core, 0).is_none() {
+                        return Err(core.err_oom(span));
+                    }
                     return Ok(WorkTokenKind::TemplateStart(s));
                 }
                 b'\\' => {

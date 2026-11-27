@@ -16,12 +16,12 @@ fn float_display_matches_suz_format() {
         (0.1_f64, "0.1"),
         (100.0_f64, "100.0"),
         (1.5e-8_f64, "1.5e-8"),
-        (1e-7_f64, "1e-7"),
+        (1e-7_f64, "1.0e-7"),
         (1e-6_f64, "0.000001"),
         (1.5e-6_f64, "0.0000015"),
         (1e20_f64, "100000000000000000000.0"),
-        (1e21_f64, "1e21"),
-        (-1e21_f64, "-1e21"),
+        (1e21_f64, "1.0e21"),
+        (-1e21_f64, "-1.0e21"),
         (f64::NAN, "nan"),
         (f64::INFINITY, "inf"),
         (f64::NEG_INFINITY, "-inf"),
@@ -122,6 +122,44 @@ fn template_interpolation_escapes_and_errors() {
     assert_eq!(err.kind, ErrorKind::Runtime);
     assert_eq!(err.at.line, 1);
     assert_eq!(err.at.col, 11);
+
+    // 埋め込めない型のエラー位置はその埋め込み式自体を指す
+    let err = eval("(def xs [1]) \"aaa ${1} ${xs}\"").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "expr.template");
+    assert_eq!(err.at.line, 1);
+    assert_eq!(err.at.col, 26);
+
+    // 空の `${}` はわかりやすい構文エラー
+    let err = eval("\"a${}b\"").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert!(
+        err.message.contains("empty template interpolation"),
+        "got: {}",
+        err.message
+    );
+
+    // quote / quasiquote 内のテンプレート文字列は構文エラー
+    for quoted in ["'\"a${1}\"", "`\"a${1}\""] {
+        let err = eval(quoted).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "{quoted}: {err}");
+        assert!(
+            err.message.contains("template interpolation"),
+            "{quoted}: {}",
+            err.message
+        );
+    }
+
+    // deftest のテスト名が text でないときのエラーに text が含まれる
+    let report = rin::test::run(
+        &[("test.rin", "(deftest 123 (check true))")],
+        &[],
+        Limits::default(),
+    );
+    assert_eq!(report.errors.len(), 1);
+    let err = &report.errors[0].error;
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert!(err.message.contains("text"), "got: {}", err.message);
 
     // フォーマッタはテンプレート全体を原文のまま保つ
     let src = "\"a=${(+ 1   2)} b=${Point { x: 1 }.x}\"";
