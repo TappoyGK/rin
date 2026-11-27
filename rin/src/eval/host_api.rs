@@ -106,24 +106,7 @@ impl EnvState<'_> {
         source: &str,
         bindings: &[(&str, Val)],
     ) -> Result<RVal, ErrRecorded> {
-        let mut names = RawVec::<&str>::new();
-        let mut vals = RawVec::<RVal>::new();
-        if !bindings.is_empty() {
-            if names
-                .reserve_work(&mut self.pool.work, &mut self.pool.core, bindings.len())
-                .is_none()
-                || vals
-                    .reserve_work(&mut self.pool.work, &mut self.pool.core, bindings.len())
-                    .is_none()
-            {
-                return Err(self.pool.core.err_oom(Span::default()));
-            }
-            for &(name, val) in bindings {
-                let _ = names.push_work(&mut self.pool.work, &mut self.pool.core, name);
-                let _ = vals.push_work(&mut self.pool.work, &mut self.pool.core, val.0);
-            }
-        }
-        let chunk = {
+        let (chunk, used_indices) = {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
             compile_program_with_bindings(
@@ -133,9 +116,25 @@ impl EnvState<'_> {
                 &mut self.pool,
                 &self.globals,
                 true,
-                names.as_slice(),
+                InitialBindingNames::Vals(bindings),
             )?
         };
+        let mut vals = RawVec::<RVal>::new();
+        if !used_indices.is_empty() {
+            if vals
+                .reserve_work(&mut self.pool.work, &mut self.pool.core, used_indices.len())
+                .is_none()
+            {
+                return Err(self.pool.core.err_oom(Span::default()));
+            }
+            for &idx in used_indices.as_slice() {
+                let _ = vals.push_work(
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    bindings[idx as usize].1.0,
+                );
+            }
+        }
         let mut runner = self.runner(None, true);
         runner.run_top_chunk_with_locals(&chunk, vals.as_slice())
     }

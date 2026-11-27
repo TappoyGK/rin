@@ -263,3 +263,66 @@ fn failed_builder_eval_rolls_back_all_added_bindings_without_alloc() {
     b3.eval("(def rolled_back 5)").unwrap();
     assert_eq!(b3.eval("rolled_back").unwrap(), Value::Int(5));
 }
+
+#[test]
+fn eval_with_many_bindings_last_wins_hints_and_no_leak() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.eval("(defn sq (n) (* n n)) (defn bad_fn () unknown_inner_xyz)")
+        .unwrap();
+    let mut m = b.freeze().unwrap();
+
+    // 9 個超（deferred_initial 経路）で重複後勝ち・クロージャ捕捉・未使用オブジェクト解放を確認
+    let mut owned_names: Vec<String> = (0..50).map(|i| format!("item_{i}")).collect();
+    owned_names.push("item_0".to_string()); // 重複（後ろ勝ち）
+    owned_names.push("damage".to_string());
+    let mut bindings: Vec<(&str, Value)> = Vec::new();
+    for (i, name) in owned_names.iter().enumerate() {
+        if i == 50 {
+            bindings.push((name.as_str(), Value::Int(7)));
+        } else if i == 51 {
+            bindings.push((name.as_str(), Value::text("unused_heap_str")));
+        } else if i % 5 == 0 {
+            bindings.push((name.as_str(), Value::text(format!("str_{i}"))));
+        } else {
+            bindings.push((name.as_str(), Value::Int(i as i64)));
+        }
+    }
+
+    let live_before = m.live_bytes();
+    let val = m
+        .eval_with("((fn () (+ (sq item_0) item_49)))", &bindings)
+        .unwrap();
+    assert_eq!(val, Value::Int(7 * 7 + 49));
+    assert_eq!(m.live_bytes(), live_before);
+
+    // 未参照の初期束縛も未定義名の候補ヒントに出る
+    let err = m.eval_with("damge", &bindings).unwrap_err();
+    assert_eq!(err.rule(), "expr.name");
+    assert!(
+        err.message.contains("did you mean 'damage'?"),
+        "unexpected message: {}",
+        err.message
+    );
+    assert_eq!(m.live_bytes(), live_before);
+
+    // 凍結済み関数内の未定義名では eval_with の初期束縛を候補に出さない
+    let extra = [
+        ("b0", Value::Int(0)),
+        ("b1", Value::Int(1)),
+        ("b2", Value::Int(2)),
+        ("b3", Value::Int(3)),
+        ("b4", Value::Int(4)),
+        ("b5", Value::Int(5)),
+        ("b6", Value::Int(6)),
+        ("b7", Value::Int(7)),
+        ("b8", Value::Int(8)),
+        ("unknown_inner_xy", Value::Int(9)),
+    ];
+    let err = m.eval_with("(bad_fn)", &extra).unwrap_err();
+    assert_eq!(err.rule(), "expr.name");
+    assert_eq!(
+        err.message, "unknown name 'unknown_inner_xyz'",
+        "frozen fn must not suggest eval_with binding"
+    );
+}

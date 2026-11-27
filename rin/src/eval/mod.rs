@@ -17,7 +17,7 @@ use crate::bytecode::{
 };
 #[cfg(feature = "std-value")]
 use crate::compiler::compile_program_parts;
-use crate::compiler::{compile_program, compile_program_with_bindings};
+use crate::compiler::{InitialBindingNames, compile_program, compile_program_with_bindings};
 use crate::diagnostic::{write_available, write_suggest};
 #[cfg(feature = "std-value")]
 use crate::error::Error;

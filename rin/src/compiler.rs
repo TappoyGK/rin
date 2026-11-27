@@ -29,6 +29,42 @@ use crate::pool::{CodeRegion, Pool};
 
 const SHALLOW_COMPILE_DEPTH: usize = 3;
 
+/// `eval_with` / `eval_with_vals` の初期束縛名ビュー（コピーや一時配列確保なし）。
+#[derive(Clone, Copy)]
+pub(crate) enum InitialBindingNames<'a> {
+    Empty,
+    #[cfg(feature = "std-value")]
+    Values(&'a [(&'a str, crate::Value)]),
+    Vals(&'a [(&'a str, crate::Val)]),
+}
+
+impl<'a> InitialBindingNames<'a> {
+    #[inline]
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Empty => 0,
+            #[cfg(feature = "std-value")]
+            Self::Values(slice) => slice.len(),
+            Self::Vals(slice) => slice.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub(crate) fn get(self, idx: usize) -> &'a str {
+        match self {
+            Self::Empty => unreachable!(),
+            #[cfg(feature = "std-value")]
+            Self::Values(slice) => slice[idx].0,
+            Self::Vals(slice) => slice[idx].0,
+        }
+    }
+}
+
 /// AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
 pub(crate) fn compile_program(
     exprs: &[Expr],
@@ -38,20 +74,7 @@ pub(crate) fn compile_program(
     globals: &EnvSlots,
     frozen: bool,
 ) -> Result<Chunk, ErrRecorded> {
-    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen, &[])
-}
-
-/// 初期レキシカル束縛名付きで AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
-pub(crate) fn compile_program_with_bindings(
-    exprs: &[Expr],
-    module: Option<u32>,
-    syms: &mut SymTable,
-    pool: &mut Pool<'_>,
-    globals: &EnvSlots,
-    frozen: bool,
-    initial_names: &[&str],
-) -> Result<Chunk, ErrRecorded> {
-    compile_program_parts(
+    let (chunk, _) = compile_program_parts(
         exprs,
         &[],
         module,
@@ -59,8 +82,208 @@ pub(crate) fn compile_program_with_bindings(
         pool,
         globals,
         frozen,
-        initial_names,
-    )
+        InitialBindingNames::Empty,
+    )?;
+    Ok(chunk)
+}
+
+/// 初期レキシカル束縛名付きで AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
+///
+/// 返り値の `RawVec<u32>` は各初期ローカルスロットに対応する `initial` の添字である。
+/// `initial.len() <= scope::INLINE_NAMES` のときは `0..len`（昇順）、
+/// それより多いときは参照された束縛のみを後ろ勝ちで抽出した添字列（厳密降順）になる。
+pub(crate) fn compile_program_with_bindings(
+    exprs: &[Expr],
+    module: Option<u32>,
+    syms: &mut SymTable,
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
+    frozen: bool,
+    initial: InitialBindingNames<'_>,
+) -> Result<(Chunk, RawVec<u32>), ErrRecorded> {
+    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen, initial)
+}
+
+/// ソース中に現れる識別子（`ExprKind::Ident`）を非再帰で収集する。
+fn collect_expr_idents(
+    exprs: &[Expr],
+    body: &[Expr],
+    pool: &mut Pool<'_>,
+) -> Result<RawMap<RawStr, u32>, ErrRecorded> {
+    let mut idents: RawMap<RawStr, u32> = RawMap::new();
+    let mut expr_stack: RawVec<&Expr> = RawVec::new();
+    let mut datum_stack: RawVec<&Datum> = RawVec::new();
+
+    for e in exprs.iter().chain(body.iter()) {
+        if expr_stack
+            .push_work(&mut pool.work, &mut pool.core, e)
+            .is_none()
+        {
+            return Err(pool.core.err_oom(Span::default()));
+        }
+    }
+
+    fn push_e<'a>(
+        stack: &mut RawVec<&'a Expr>,
+        pool: &mut Pool<'_>,
+        e: &'a Expr,
+    ) -> Result<(), ErrRecorded> {
+        if stack.push_work(&mut pool.work, &mut pool.core, e).is_none() {
+            return Err(pool.core.err_oom(Span::default()));
+        }
+        Ok(())
+    }
+
+    while !expr_stack.is_empty() || !datum_stack.is_empty() {
+        while let Some(expr) = expr_stack.pop() {
+            match &expr.kind {
+                ExprKind::Ident(raw) => {
+                    let hash = fnv1a_bytes(raw.as_str().as_bytes());
+                    if idents
+                        .insert_work(
+                            &mut pool.work,
+                            &mut pool.core,
+                            hash,
+                            *raw,
+                            u32::MAX,
+                            |a, b| a.as_str() == b.as_str(),
+                        )
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Char(_)
+                | ExprKind::Str(_)
+                | ExprKind::None
+                | ExprKind::Import { .. }
+                | ExprKind::Export { .. }
+                | ExprKind::Quote(_) => {}
+                ExprKind::Quasiquote(d) => {
+                    if datum_stack
+                        .push_work(&mut pool.work, &mut pool.core, d.as_ref())
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+                ExprKind::Template(items) | ExprKind::List(items) | ExprKind::Tuple(items) => {
+                    for item in items.as_slice() {
+                        push_e(&mut expr_stack, pool, item)?;
+                    }
+                }
+                ExprKind::Struct(s) => {
+                    for (_, val) in s.as_ref().fields.as_slice() {
+                        push_e(&mut expr_stack, pool, val)?;
+                    }
+                }
+                ExprKind::Variant(v) => {
+                    if let Some(data) = &v.as_ref().data {
+                        push_e(&mut expr_stack, pool, data.as_ref())?;
+                    }
+                }
+                ExprKind::Some(e)
+                | ExprKind::Ok(e)
+                | ExprKind::Err(e)
+                | ExprKind::Field { target: e, .. }
+                | ExprKind::Def { value: e, .. } => {
+                    push_e(&mut expr_stack, pool, e.as_ref())?;
+                }
+                ExprKind::Index { target, index } => {
+                    push_e(&mut expr_stack, pool, target.as_ref())?;
+                    push_e(&mut expr_stack, pool, index.as_ref())?;
+                }
+                ExprKind::With { target, fields } => {
+                    push_e(&mut expr_stack, pool, target.as_ref())?;
+                    for (_, val) in fields.as_slice() {
+                        push_e(&mut expr_stack, pool, val)?;
+                    }
+                }
+                ExprKind::Defn(d) => {
+                    for e in d.as_ref().body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::Fn(f) => {
+                    for e in f.as_ref().body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::Let(l) => {
+                    let l = l.as_ref();
+                    for (_, val) in l.bindings.as_slice() {
+                        push_e(&mut expr_stack, pool, val)?;
+                    }
+                    for e in l.body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => {
+                    push_e(&mut expr_stack, pool, cond.as_ref())?;
+                    push_e(&mut expr_stack, pool, then_branch.as_ref())?;
+                    push_e(&mut expr_stack, pool, else_branch.as_ref())?;
+                }
+                ExprKind::When { cond, body } => {
+                    push_e(&mut expr_stack, pool, cond.as_ref())?;
+                    for e in body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::Match { scrutinee, arms } => {
+                    push_e(&mut expr_stack, pool, scrutinee.as_ref())?;
+                    for arm in arms.as_slice() {
+                        for e in arm.body.as_slice() {
+                            push_e(&mut expr_stack, pool, e)?;
+                        }
+                    }
+                }
+                ExprKind::Call { callee, args } => {
+                    push_e(&mut expr_stack, pool, callee.as_ref())?;
+                    for arg in args.as_slice() {
+                        push_e(&mut expr_stack, pool, arg)?;
+                    }
+                }
+            }
+        }
+        while let Some(datum) = datum_stack.pop() {
+            match &datum.kind {
+                DatumKind::List(items) => {
+                    for item in items.as_slice() {
+                        if datum_stack
+                            .push_work(&mut pool.work, &mut pool.core, item)
+                            .is_none()
+                        {
+                            return Err(pool.core.err_oom(Span::default()));
+                        }
+                    }
+                }
+                DatumKind::Unquote(e) | DatumKind::UnquoteSplicing(e) => {
+                    if expr_stack
+                        .push_work(&mut pool.work, &mut pool.core, e.as_ref())
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+                DatumKind::Int(_)
+                | DatumKind::Float(_)
+                | DatumKind::Bool(_)
+                | DatumKind::Char(_)
+                | DatumKind::Str(_)
+                | DatumKind::None
+                | DatumKind::Ident(_) => {}
+            }
+        }
+    }
+
+    Ok(idents)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,8 +295,8 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     pool: &'a mut Pool<'p>,
     globals: &'a EnvSlots,
     frozen: bool,
-    initial_names: &[&str],
-) -> Result<Chunk, ErrRecorded> {
+    initial: InitialBindingNames<'a>,
+) -> Result<(Chunk, RawVec<u32>), ErrRecorded> {
     let region = if frozen {
         CodeRegion::Work
     } else {
@@ -81,11 +304,64 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     };
     let mut scopes = RawVec::new();
     let mut root_scope = Scope::new(module);
-    for &name in initial_names {
-        let Some(raw) = RawStr::from_work(&mut pool.work, &mut pool.core, name) else {
+    let mut used_indices = RawVec::<u32>::new();
+    let mut deferred_initial = InitialBindingNames::Empty;
+
+    let initial_len = initial.len();
+    if initial_len > 0 && initial_len <= scope::INLINE_NAMES {
+        if used_indices
+            .reserve_work(&mut pool.work, &mut pool.core, initial_len)
+            .is_none()
+        {
             return Err(pool.core.err_oom(Span::default()));
-        };
-        root_scope.alloc_slot(pool, raw, Span::default())?;
+        }
+        for idx in 0..initial_len {
+            let name = initial.get(idx);
+            // SAFETY: `initial` の `&str` はこのコンパイル呼び出し全体を通して有効。
+            let raw = unsafe {
+                RawStr::from_raw_utf8(
+                    NonNull::new(name.as_ptr().cast_mut()).unwrap_or(NonNull::dangling()),
+                    name.len(),
+                )
+            };
+            root_scope.alloc_slot(pool, raw, Span::default())?;
+            let _ = used_indices.push_work(&mut pool.work, &mut pool.core, idx as u32);
+        }
+    } else if initial_len > scope::INLINE_NAMES {
+        deferred_initial = initial;
+        let mut idents = collect_expr_idents(exprs, body, pool)?;
+        if !idents.is_empty() {
+            // 後ろから走査することで、同名重複の後勝ちと `used_indices` の厳密降順を同時に得る。
+            for idx in (0..initial_len).rev() {
+                let name = initial.get(idx);
+                let hash = fnv1a_bytes(name.as_bytes());
+                if let Some(u32::MAX) = idents.get_by(hash, |k| k.as_str() == name) {
+                    // SAFETY: `initial` の `&str` はこのコンパイル呼び出し全体を通して有効。
+                    let raw = unsafe {
+                        RawStr::from_raw_utf8(
+                            NonNull::new(name.as_ptr().cast_mut()).unwrap_or(NonNull::dangling()),
+                            name.len(),
+                        )
+                    };
+                    let slot = root_scope.alloc_slot(pool, raw, Span::default())?;
+                    // 既に存在するキーの更新なので確保は起きない。
+                    let _ = idents.insert_work(
+                        &mut pool.work,
+                        &mut pool.core,
+                        hash,
+                        raw,
+                        slot,
+                        |a, b| a.as_str() == b.as_str(),
+                    );
+                    if used_indices
+                        .push_work(&mut pool.work, &mut pool.core, idx as u32)
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+            }
+        }
     }
     if scopes
         .push_work(&mut pool.work, &mut pool.core, root_scope)
@@ -102,6 +378,8 @@ pub(crate) fn compile_program_parts<'a, 'p>(
         globals,
         frozen,
         name_table: None,
+        deferred_initial,
+        deferred_initial_head: None,
     };
     if exprs.is_empty() && body.is_empty() {
         compiler.emit_raw(Op::Void, Span::default())?;
@@ -140,7 +418,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
             return Err(pool.core.err_oom(Span::default()));
         }
     }
-    Ok(finished.chunk)
+    Ok((finished.chunk, used_indices))
 }
 
 #[cfg(all(test, feature = "std-value"))]
@@ -159,6 +437,8 @@ struct Compiler<'a, 'p> {
     globals: &'a EnvSlots,
     frozen: bool,
     name_table: Option<NonNull<NameTable>>,
+    deferred_initial: InitialBindingNames<'a>,
+    deferred_initial_head: Option<usize>,
 }
 
 impl<'a, 'p> Compiler<'a, 'p> {

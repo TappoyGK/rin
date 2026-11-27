@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rin::{ArenaAllocator, Error, ErrorKind, Limits, Value, eval, eval_with, eval_with_allocator};
+use rin::{
+    ArenaAllocator, Builder, Error, ErrorKind, HeapAllocator, Limits, Value, eval, eval_with,
+    eval_with_allocator,
+};
 
 #[path = "spec_cases/determinism.rs"]
 mod determinism;
@@ -14,6 +17,10 @@ struct SpecCase {
     error_rule: Option<String>,
     error_message: Option<String>,
     rendered: Option<String>,
+    modules: Vec<(String, String)>,
+    setup: Option<String>,
+    failing_setup: Option<String>,
+    initial_bindings: Vec<(String, String)>,
     source: String,
     limit_spec: String,
     expected_kind: String,
@@ -137,12 +144,25 @@ fn rule_references_require_code_and_brackets() {
 }
 
 fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
+    #[derive(Clone, PartialEq, Eq)]
+    enum RinSection {
+        Input,
+        Setup,
+        FailingSetup,
+        Module(String),
+    }
+
     let mut rule_id = None;
     let mut error_rule = None;
     let mut error_message = None;
     let mut rendered = None;
+    let mut modules = Vec::new();
+    let mut setup = None;
+    let mut failing_setup = None;
+    let mut initial_bindings = Vec::new();
     let mut source = None;
     let mut table_row = None;
+    let mut next_rin = RinSection::Input;
 
     let mut idx = 0;
     while idx < lines.len() {
@@ -165,6 +185,28 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                     })
                     .to_string(),
             );
+        } else if let Some(rest) = trimmed.strip_prefix("初期束縛：") {
+            let raw = rest
+                .trim()
+                .strip_prefix('`')
+                .and_then(|s| s.strip_suffix('`'))
+                .unwrap_or_else(|| panic!("{file_label} ({id}): 初期束縛 must use backticks"));
+            for part in raw.split(',') {
+                let (name, expr) = part.split_once('=').unwrap_or_else(|| {
+                    panic!("{file_label} ({id}): 初期束縛 entry must be `name = expr`")
+                });
+                initial_bindings.push((name.trim().to_string(), expr.trim().to_string()));
+            }
+        } else if trimmed == "**入力：**" {
+            next_rin = RinSection::Input;
+        } else if trimmed == "**読み込み：**" {
+            next_rin = RinSection::Setup;
+        } else if trimmed == "**失敗する読み込み：**" {
+            next_rin = RinSection::FailingSetup;
+        } else if let Some(rest) = trimmed.strip_prefix("**モジュール `")
+            && let Some(mod_name) = rest.strip_suffix("`：**")
+        {
+            next_rin = RinSection::Module(mod_name.to_string());
         } else if trimmed == "```text" {
             assert!(
                 rendered.is_none(),
@@ -192,7 +234,13 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                 idx < lines.len(),
                 "{file_label} ({id}): unclosed ```rin block"
             );
-            source = Some(buf.join("\n"));
+            let block = buf.join("\n");
+            match std::mem::replace(&mut next_rin, RinSection::Input) {
+                RinSection::Input => source = Some(block),
+                RinSection::Setup => setup = Some(block),
+                RinSection::FailingSetup => failing_setup = Some(block),
+                RinSection::Module(name) => modules.push((name, block)),
+            }
         } else if trimmed.starts_with("|") && !trimmed.contains("---") && !trimmed.contains("上限")
         {
             let cols: Vec<&str> = trimmed
@@ -220,6 +268,10 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
         error_rule,
         error_message,
         rendered,
+        modules,
+        setup,
+        failing_setup,
+        initial_bindings,
         source: source.unwrap_or_else(|| panic!("{file_label}: missing ```rin source block")),
         limit_spec,
         expected_kind,
@@ -243,7 +295,57 @@ fn evaluate_case(case: &SpecCase) -> Result<Value, Error> {
         }
     }
 
-    if let Some(cap) = arena_bytes {
+    let needs_builder = !case.modules.is_empty()
+        || case.setup.is_some()
+        || case.failing_setup.is_some()
+        || !case.initial_bindings.is_empty();
+
+    if needs_builder {
+        assert!(
+            arena_bytes.is_none(),
+            "{}: arena= is not supported with builder setup",
+            case.id
+        );
+        let mut alloc = HeapAllocator;
+        let mut builder = Builder::new(limits, &mut alloc);
+        for (mod_name, mod_src) in &case.modules {
+            builder
+                .load_module(mod_name, mod_src)
+                .unwrap_or_else(|e| panic!("{}: failed to load module '{mod_name}': {e}", case.id));
+        }
+        if let Some(setup) = &case.setup {
+            builder
+                .eval(setup)
+                .unwrap_or_else(|e| panic!("{}: setup eval failed: {e}", case.id));
+        }
+        if let Some(failing) = &case.failing_setup {
+            assert!(
+                builder.eval(failing).is_err(),
+                "{}: failing_setup unexpectedly succeeded",
+                case.id
+            );
+        }
+        if !case.initial_bindings.is_empty() {
+            let mut machine = builder.freeze().expect("freeze");
+            let evaluated: Vec<(String, Value)> = case
+                .initial_bindings
+                .iter()
+                .map(|(k, expr)| {
+                    let v = eval(expr).unwrap_or_else(|e| {
+                        panic!("{}: failed to eval binding '{k} = {expr}': {e}", case.id)
+                    });
+                    (k.clone(), v)
+                })
+                .collect();
+            let refs: Vec<(&str, Value)> = evaluated
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect();
+            machine.eval_with(&case.source, &refs)
+        } else {
+            builder.eval(&case.source)
+        }
+    } else if let Some(cap) = arena_bytes {
         let mut backing = vec![0u8; cap];
         let mut arena = ArenaAllocator::new(&mut backing);
         eval_with_allocator(&case.source, &[], limits, &mut arena)

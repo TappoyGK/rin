@@ -2,7 +2,7 @@
 use super::*;
 
 // 少数の束縛ではハッシュ表の確保を避ける。線形走査は常にこの定数以内に限る。
-const INLINE_NAMES: usize = 8;
+pub(super) const INLINE_NAMES: usize = 8;
 const REMOVED_LOCAL: u32 = u32::MAX;
 
 pub(super) struct Scope {
@@ -229,6 +229,46 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 pending_from = Some((scope_index, local_index));
             }
         }
+        if head.is_none() && !self.deferred_initial.is_empty() {
+            if let Some(saved_head) = self.deferred_initial_head {
+                head = Some(saved_head);
+            } else {
+                let mut table_ptr = self.name_table.expect("name table initialized");
+                let region = self.region;
+                for idx in 0..self.deferred_initial.len() {
+                    let name = self.deferred_initial.get(idx);
+                    // SAFETY: コンパイル中は `Compiler` が `table_ptr` を排他的に所有している。
+                    let table = unsafe { table_ptr.as_mut() };
+                    let node_index = table.nodes.len();
+                    let text_start = table.text.len();
+                    if self
+                        .pool
+                        .extend_code_slice(region, &mut table.text, name.as_bytes())
+                        .is_none()
+                    {
+                        return Err(self.fail_oom(span));
+                    }
+                    let text_end = table.text.len();
+                    if self
+                        .pool
+                        .push_code(
+                            region,
+                            &mut table.nodes,
+                            NameNode {
+                                start: text_start,
+                                end: text_end,
+                                parent: head,
+                            },
+                        )
+                        .is_none()
+                    {
+                        return Err(self.fail_oom(span));
+                    }
+                    head = Some(node_index);
+                }
+                self.deferred_initial_head = head;
+            }
+        }
         if let Some((first_scope, first_local)) = pending_from {
             let mut table_ptr = self.name_table.expect("name table initialized");
             let region = self.region;
@@ -277,8 +317,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         Ok(head)
     }
 
-    // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
-    // 再読込で消えるモジュールの束縛は、この判定に含めない。
+    // 大域の束縛は再定義されない。既存の値があれば未定義名にならない。
     #[cold]
     pub(super) fn record_name_site(
         &mut self,
@@ -287,8 +326,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
         span: Span,
     ) -> Result<(), Failed> {
         let scope = self.scopes.last().unwrap();
-        // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
-        if scope.outer_local_count == 0 && scope.locals.is_empty() {
+        // ローカルも遅延初期束縛も見えない場所では文字数も調べず、表の準備にも入らない。
+        if scope.outer_local_count == 0
+            && scope.locals.is_empty()
+            && self.deferred_initial.is_empty()
+        {
             return Ok(());
         }
         let Some(sym_name) = self.syms.name(id) else {

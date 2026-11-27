@@ -40,27 +40,22 @@ flowchart TD
 - **実行段階（`frozen = true`）**: トップレベル・入れ子を問わず宣言 4 形式をすべて `[env.frozen]` の構文エラーとし、評価を始める前に拒否する。
 - **VM の防御ガード**（`rin/src/eval/vm/execute.rs`、`rin/src/eval/vm/ops_exec.rs`）: 実行時の多重防御として `Op::DefGlobal`・`Op::DefFn`・`Op::Import`・`Op::Export` にも `if self.frozen` の実行時エラーを残している。
 
-## 3. 評価単位 `Runner` と `eval_with` の一時束縛
+## 3. 評価単位 `Runner` と `eval_with` の初期レキシカル束縛
 
-1 回の評価（`eval`・`eval_with`・`call`・`call_in`）ごとに `EnvState::runner` で一時的な `Runner` を生成し、ステップ残量・呼び出し深さ・評価スタックを独立に管理する。
+1 回の評価（`eval`・`eval_with`・`call`・`call_in`）ごとに `EnvState::runner` で一時的な `Runner` を生成し、ステップ残量・呼び出し深さ・評価スタックを独立に管理する。読み込み段階の評価（`Builder::eval` / `rin_build`）では、新しく追加した大域束縛・`import` のシンボル ID を `Runner.added_globals` に記録し、途中でエラーになった場合は `EnvSlots::unset_no_alloc` で追加のメモリ確保なしにすべて取り消す。
 
-`Machine::eval_with(source, bindings)` の一時束縛は大域環境 `globals` へ書き込まず、`Runner` が参照する `Option<&EvalBindings>` として評価中だけ保持し、評価終了時（エラー時・上限超過時を含む）に全解放する（`rin/src/eval/machine.rs`）。
+`Machine::eval_with` / `eval_with_vals` / `rin_eval_with` の初期束縛は大域環境 `globals` へ書き込まず、コンパイル時に評価対象ソースの最外側の局所スロット（`scopes[0]`）として割り当て、実行時に `Runner::run_top_chunk_with_locals` でトップレベルフレームのローカルスロットへ配置する（`rin/src/compiler.rs`、`rin/src/eval/machine.rs`、`rin/src/eval/host_api.rs`）。
 
-一時束縛の格納には `EvalBindingValues`（`rin/src/eval/mod.rs`）の 2 経路を使う。
-
-- **8 個以下（`Inline`）**: スタック上の固定長配列 `[(u32, RVal); 8]` に格納し、ヒープ確保を避ける。
-- **9 個以上（`Map`）**: 作業領域（`WorkArena`）上の `RawMap<u32, RVal>` に格納し、評価終了時に一括巻き戻しする。
-
-ソース中で参照されない束縛も `Pool::import` によるメモリ上限検査を行ってから即座に解放する。また、同名キーが重複した場合は後ろの束縛が有効になり、上書きされた旧値はその場で解放する。
+- **レキシカルスコープの徹底**: 初期束縛は評価するソース内では `Op::GetLocal`、そのソース内で生成されたクロージャからは `Op::GetCapture` で参照される。凍結済みの既存関数やそのクロージャには一切見えない（`[env.isolation]`）。
+- **多数の初期束縛に対する O(N + M) 割り当て**: 初期束縛が 8 個以下のときはそのまま最外側スロットへ割り当て、9 個以上のときは AST に現れる識別子だけを小さなハッシュ表へ集めてから初期束縛を後ろから走査し、実際に参照される束縛だけを後ろ勝ちでスロットへ割り当てる（未参照の束縛に対してハッシュ表やローカルスロットを確保しない）。未定義名エラー時の候補名ヒント（`[eval.hints]`）が必要なときだけ、遅延して全初期束縛名を `NameTable` へ記録する。
+- **値検証と解放**: `Machine::eval_with` ではソース中で参照されない束縛も `Pool::import` による検証・メモリ上限検査を行い、評価終了時（エラー時・上限超過時を含む）に全解放する。同名キーが重複した場合は後ろの束縛が有効になる。
 
 ## 4. 大域名の解決順（`Runner::lookup_global`）
 
-VM の `Op::GetGlobal(id)` は `Runner::lookup_global`（`rin/src/eval/runner.rs`）で次の順に名前を解決する。
+VM の `Op::GetGlobal(id)` は `Runner::lookup_global`（`rin/src/eval/runner.rs`）で次の順に名前を解決する（`eval_with` の初期束縛はコンパイル時に `Op::GetLocal` / `Op::GetCapture` へ解決済みのため、この経路には現れない）。
 
-1. **ローカルな最優先スコープ**:
-   - モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `modules.env(mod_id)`（`ModuleTable` 内）を参照する（ここでは `eval_with` の一時束縛や、未 `import` の他モジュールは参照しない：`[env.modules]`・`[env.isolation]`）。
-   - モジュール外（`active_module = None`）なら、`eval_with` の一時束縛（`EvalBindings`）があれば参照する。
-2. **大域環境**: `globals`（`EnvSlots`：組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。
+1. **モジュール環境**: モジュール関数内（`active_module = Some(mod_id)`）なら、そのモジュールの環境 `modules.env(mod_id)`（`ModuleTable` 内）を参照する（ここでは未 `import` の他モジュールは参照しない：`[env.modules]`）。
+2. **大域環境**: `globals`（`EnvSlots`：組み込み・`pi`・読み込み段階で定義した変数と関数）を参照する。読み込み段階での組み込み名の上書きや同名再定義は禁止されている。
 3. **凍結後のモジュール名**: 上記で見つからず、かつ `frozen && active_module.is_none()` のときは読み込み済みモジュール表 `modules` を参照し、`import` なしで `mod_name.symbol` を引けるようにする。
 4. **未定義エラー**: どれにも無ければ `unknown_name`（`[expr.name]`）を返し、その時点で可視な名前だけを候補として提示する。
 
@@ -68,9 +63,8 @@ VM の `Op::GetGlobal(id)` は `Runner::lookup_global`（`rin/src/eval/runner.rs
 flowchart TD
     A["GetGlobal"] --> B{"モジュール内?"}
     B -->|"Yes"| C["1. modules.env(mod_id)"]
-    B -->|"No"| D["1. EvalBindings"]
-    C --> E["2. globals"]
-    D --> E
+    B -->|"No"| E["2. globals"]
+    C --> E
     E -->|"未定義"| F{"凍結・外?"}
     F -->|"Yes"| G["3. modules"]
     F -->|"No"| H["4. unknown_name"]
