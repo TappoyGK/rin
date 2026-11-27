@@ -9,7 +9,7 @@ fn time_per_step_at_100_and_10000_elements() {
         let log = (usize::BITS - (n - 1).leading_zeros()) as usize;
         for (label, body, steps) in [
             ("len", "(len xs)", 4),
-            ("string-len", "(len text)", n + 4),
+            ("string-len", "(len text)", 4),
             ("contains", "(contains xs -1)", 2 * n + 5),
             ("reverse", "(len (reverse xs))", n + 7),
             ("append", "(len (append xs xs))", 4 * n + 10),
@@ -29,7 +29,7 @@ fn time_per_step_at_100_and_10000_elements() {
             let xs = Value::list((0..n).rev().map(|i| Value::Int(i as i64)).collect());
             m.bind("xs", &xs).unwrap();
             m.bind("ys", &xs).unwrap();
-            m.bind("text", &Value::str("x".repeat(n))).unwrap();
+            m.bind("text", &Value::text("x".repeat(n))).unwrap();
             m.eval(&format!("(defn run () {body})")).unwrap();
             let mut m = m.freeze().unwrap();
             m.call("run", &[]).unwrap();

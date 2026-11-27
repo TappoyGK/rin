@@ -33,10 +33,15 @@ impl Runner<'_, '_> {
                     Op::Bool(b) => self.stack_push_at(RVal::Bool(b), chunk, ip - 1)?,
                     Op::Char(c) => self.stack_push_at(RVal::Char(c), chunk, ip - 1)?,
                     Op::Str(idx) => {
-                        let s = &chunk.strings[idx as usize];
-                        let span = chunk.spans[ip - 1];
-                        let id = self.pool.alloc_str(s.as_ref(), span)?;
-                        self.stack_push(RVal::Obj(id), span)?;
+                        let i = idx as usize;
+                        if let Some(id) = chunk.str_obj(i) {
+                            self.stack_push_at(RVal::Obj(id), chunk, ip - 1)?;
+                        } else {
+                            let s = &chunk.strings[i];
+                            let span = chunk.spans[ip - 1];
+                            let id = self.pool.alloc_str(s.as_ref(), span)?;
+                            self.stack_push(RVal::Obj(id), span)?;
+                        }
                     }
                     Op::Ident(idx) => {
                         let s = &chunk.strings[idx as usize];
@@ -108,6 +113,10 @@ impl Runner<'_, '_> {
                     Op::MakeListSplice(mask_idx) => {
                         let span = chunk.spans[ip - 1];
                         self.exec_make_list_splice(chunk, mask_idx, span)?;
+                    }
+                    Op::FormatTemplate(tmpl_idx) => {
+                        let span = chunk.spans[ip - 1];
+                        self.exec_format_template(chunk, tmpl_idx, span)?;
                     }
                     Op::MakeTuple(n) => {
                         let span = chunk.spans[ip - 1];

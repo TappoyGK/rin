@@ -10,11 +10,11 @@ use std::fmt::{self, Write};
 
 use rin::ffi::{
     RinAllocator, RinBinding, RinErrorKind, RinTag, rin_as_bool, rin_as_float, rin_as_int,
-    rin_as_str, rin_bind, rin_bool, rin_build, rin_call, rin_call_in, rin_car, rin_cdr, rin_cons,
+    rin_as_text, rin_bind, rin_bool, rin_build, rin_call, rin_call_in, rin_car, rin_cdr, rin_cons,
     rin_copy_f64s, rin_copy_i64s, rin_drop, rin_eval, rin_eval_with, rin_f64s, rin_field,
     rin_float, rin_free, rin_freeze, rin_i64s, rin_int, rin_last_error, rin_len,
     rin_limits_default, rin_load, rin_memory_config_default, rin_new_with_config, rin_nil,
-    rin_none, rin_some, rin_str, rin_struct, rin_struct_set, rin_tag, rin_tuple_get, rin_unwrap,
+    rin_none, rin_some, rin_struct, rin_struct_set, rin_tag, rin_text, rin_tuple_get, rin_unwrap,
     rin_variant, rin_variant_name,
 };
 use rin::{
@@ -176,7 +176,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             )
             .unwrap();
 
-        let s = builder.val_str("fireball").unwrap();
+        let s = builder.val_text("fireball").unwrap();
         let i3 = builder.val_int(3);
         let opt = builder.val_some(i3).unwrap();
         let ok_v = builder.val_ok(opt).unwrap();
@@ -235,7 +235,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             assert_eq!(v.as_int(), Some(13));
             machine.release_val(a);
 
-            let cname = machine.val_str("ice").unwrap();
+            let cname = machine.val_text("ice").unwrap();
             let ccost = machine.val_int(4);
             let c1 = machine
                 .call_in_ref("cards", "make_card", &[cname, ccost])
@@ -265,6 +265,20 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             let idv = machine.eval_ref("'hello").unwrap();
             assert_eq!(idv.tag(), ValueTag::Ident);
             assert_eq!(idv.as_ident(), Some("hello"));
+
+            // テンプレート埋め込みと浮動小数点表示のゼロヒープ評価
+            let tmpl = machine
+                .eval_ref("(let (n 42 x 1.5e-8 id 'foo) \"n=${n} x=${x} id=${id} z=${-0.0}\")")
+                .unwrap();
+            assert_eq!(tmpl.tag(), ValueTag::Text);
+            assert_eq!(tmpl.as_text(), Some("n=42 x=1.5e-8 id=foo z=-0.0"));
+            out.clear();
+            write!(out, "{tmpl}").unwrap();
+            assert_eq!(out.as_str(), "\"n=42 x=1.5e-8 id=foo z=-0.0\"");
+            let fv = machine.eval_ref("1.0").unwrap();
+            out.clear();
+            write!(out, "{fv}").unwrap();
+            assert_eq!(out.as_str(), "1.0");
         }
 
         // Error paths + backtrace + suggestions + Display into FixedWriter
@@ -424,7 +438,7 @@ fn zero_heap_full_c_ffi_lifecycle() {
             let v_int = rin_int(m, 41);
             let v_flt = rin_float(m, 1.5);
             let v_bl = rin_bool(m, true);
-            let v_str = rin_str(m, c"hi".as_ptr());
+            let v_str = rin_text(m, c"hi".as_ptr());
             let v_i64s = rin_i64s(m, [1, 2, 3].as_ptr(), 3);
             let v_f64s = rin_f64s(m, [1.0, 2.0].as_ptr(), 2);
             let v_nil = rin_nil(m);
@@ -443,7 +457,7 @@ fn zero_heap_full_c_ffi_lifecycle() {
             let mut b = false;
             assert!(rin_as_bool(m, v_bl, &mut b) && b);
             let mut slen = 0;
-            let sptr = rin_as_str(m, v_str, &mut slen);
+            let sptr = rin_as_text(m, v_str, &mut slen);
             assert_eq!(std::slice::from_raw_parts(sptr, slen), b"hi");
             assert_eq!(rin_len(m, v_lst), 1);
             let h = rin_car(m, v_lst);
@@ -540,8 +554,8 @@ fn val_list_does_not_leak_objects() {
         assert_eq!(builder.live_bytes(), 0);
 
         // 文字列と入れ子リスト（参照カウント共有を含む）
-        let s1 = builder.val_str("alpha").unwrap();
-        let s2 = builder.val_str("beta").unwrap();
+        let s1 = builder.val_text("alpha").unwrap();
+        let s2 = builder.val_text("beta").unwrap();
         let inner = builder.val_list(&[s1, s2]).unwrap();
         let outer = builder.val_list(&[inner, s1, s2]).unwrap();
         assert_eq!(builder.value_ref(outer).list_len(), Some(3));
@@ -567,7 +581,7 @@ fn val_list_does_not_leak_objects() {
             },
             &mut small_arena,
         );
-        let item = small.val_str("payload").unwrap();
+        let item = small.val_text("payload").unwrap();
         let base_live = small.live_bytes();
         let items = [item; 512];
         let err = small.val_list(&items).unwrap_err();
@@ -627,7 +641,7 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
         assert_eq!(r.as_int(), Some(12));
         machine.release_val(a);
 
-        let s = machine.val_str("elem").unwrap();
+        let s = machine.val_text("elem").unwrap();
         let lst = machine.val_list(&[s, machine.val_int(i as i64)]).unwrap();
         let v = machine.eval_with_vals("(len xs)", &[("xs", lst)]).unwrap();
         assert_eq!(v.as_int(), Some(2));
@@ -654,7 +668,7 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
         assert_eq!(r.as_int(), Some(12));
         machine.release_val(a);
 
-        let s = machine.val_str("elem").unwrap();
+        let s = machine.val_text("elem").unwrap();
         let lst = machine.val_list(&[s, machine.val_int(i as i64)]).unwrap();
         let v = machine.eval_with_vals("(len xs)", &[("xs", lst)]).unwrap();
         assert_eq!(v.as_int(), Some(2));

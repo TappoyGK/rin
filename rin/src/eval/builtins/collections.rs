@@ -13,12 +13,7 @@ impl Runner<'_, '_> {
         if let RVal::Obj(id) = v {
             match self.pool.get(*id) {
                 Obj::Array(arr) => return Ok(RVal::Int(arr.len() as i64)),
-                Obj::Str(s) => {
-                    if !super::super::runner::try_charge_steps(&mut self.steps_left, s.len()) {
-                        return self.step_limit_result(span);
-                    }
-                    return Ok(RVal::Int(s.as_str().chars().count() as i64));
-                }
+                Obj::Str(s) => return Ok(RVal::Int(s.char_len() as i64)),
                 _ => {}
             }
         }
@@ -26,7 +21,7 @@ impl Runner<'_, '_> {
         Err(self.err_runtime_fmt(
             "fn.list",
             span,
-            format_args!("'len' expects list, array, or string, got {tname}"),
+            format_args!("'len' expects list, array, or text, got {tname}"),
         ))
     }
 
@@ -44,15 +39,33 @@ impl Runner<'_, '_> {
             return Err(self.err_runtime("fn.list", span, "'get' takes 2 arguments (seq, index)"));
         };
         let idx = self.expect_int("get", *idx_v, span)?;
-        if let RVal::Obj(id) = *list_v
-            && let Obj::Array(arr) = self.pool.get(id)
-        {
-            if idx < 0 || (idx as usize) >= arr.len() {
-                return Ok(RVal::None);
+        if let RVal::Obj(id) = *list_v {
+            match *self.pool.get(id) {
+                Obj::Array(arr) => {
+                    if idx < 0 || (idx as usize) >= arr.len() {
+                        return Ok(RVal::None);
+                    }
+                    let item = arr[idx as usize];
+                    self.pool.retain_val(item);
+                    return Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(item), span)?));
+                }
+                Obj::Str(s) => {
+                    if idx < 0 || (idx as usize) >= s.char_len() {
+                        return Ok(RVal::None);
+                    }
+                    let idx_u = idx as usize;
+                    if !s.is_ascii() && !self.try_charge(idx_u + 1) {
+                        return self.step_limit_result(span);
+                    }
+                    let Some((ch, _)) = s.char_at(idx_u) else {
+                        return Ok(RVal::None);
+                    };
+                    return Ok(RVal::Obj(
+                        self.pool.alloc_obj(Obj::Some(RVal::Char(ch)), span)?,
+                    ));
+                }
+                _ => {}
             }
-            let item = arr[idx as usize];
-            self.pool.retain_val(item);
-            return Ok(RVal::Obj(self.pool.alloc_obj(Obj::Some(item), span)?));
         }
         self.expect_list("get", *list_v, span)?;
         if idx < 0 {
@@ -203,9 +216,34 @@ impl Runner<'_, '_> {
             return Err(self.err_runtime(
                 "fn.list",
                 span,
-                "'slice' takes 3 arguments (list, start, end)",
+                "'slice' takes 3 arguments (seq, start, end)",
             ));
         };
+        if let RVal::Obj(id) = *list_v
+            && let Obj::Str(s) = *self.pool.get(id)
+        {
+            let start = self.expect_int("slice", *start_v, span)?;
+            let end = self.expect_int("slice", *end_v, span)?;
+            let len = s.char_len() as i64;
+            if start < 0 || end < start || end > len {
+                return Err(self.err_runtime_fmt(
+                    "fn.list",
+                    span,
+                    format_args!("slice range {start}..{end} out of range (length {len})"),
+                ));
+            }
+            let start_u = start as usize;
+            let end_u = end as usize;
+            let scan_cost = if s.is_ascii() { 0 } else { end_u };
+            if !self.try_charge(scan_cost) {
+                return self.step_limit_result(span);
+            }
+            let sub = s.slice_range(start_u, end_u).unwrap_or("");
+            if !self.try_charge(sub.len()) {
+                return self.step_limit_result(span);
+            }
+            return Ok(RVal::Obj(self.pool.alloc_str(sub, span)?));
+        }
         self.expect_list("slice", *list_v, span)?;
         let start = self.expect_int("slice", *start_v, span)?;
         let end = self.expect_int("slice", *end_v, span)?;

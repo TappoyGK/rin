@@ -37,7 +37,7 @@ fn modules_import_export_isolation_and_ffi_call_in() {
         .call_in("ember", "on_play", &[Value::Int(1)])
         .unwrap();
     let schema =
-        Schema::parse("(list (struct Action (kind string) (target i64) (amount i64)))").unwrap();
+        Schema::parse("(list (struct Action (kind text) (target i64) (amount i64)))").unwrap();
     assert!(schema.check(&res).is_ok());
 
     let m = ffi::rin_new(
@@ -95,7 +95,7 @@ fn duplicate_exports_do_not_leak_on_reload_or_unknown_symbol_error() {
             Some(expected) => assert_eq!(live, expected, "live_bytes differs from baseline: {src}"),
         }
         let val = builder.eval("(import m) m.x").unwrap();
-        assert_eq!(val, Value::str("hello"));
+        assert_eq!(val, Value::text("hello"));
     }
 
     // 複数シンボル混在の重複指定でも同じ公開値と生存バイト数になる。

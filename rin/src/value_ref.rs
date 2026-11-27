@@ -12,7 +12,7 @@ pub enum ValueTag {
     Float,
     Bool,
     Char,
-    Str,
+    Text,
     List,
     Array,
     Tuple,
@@ -70,7 +70,7 @@ impl<'a> ValueRef<'a> {
             RVal::EmptyList => ValueTag::List,
             RVal::Builtin(_) => ValueTag::Fn,
             RVal::Obj(id) => match self.pool.get(id) {
-                Obj::Str(_) => ValueTag::Str,
+                Obj::Str(_) => ValueTag::Text,
                 Obj::Ident(_) => ValueTag::Ident,
                 Obj::Cons { .. } => ValueTag::List,
                 Obj::Array(_) => ValueTag::Array,
@@ -127,7 +127,7 @@ impl<'a> ValueRef<'a> {
         }
     }
 
-    pub fn as_str(&self) -> Option<&'a str> {
+    pub fn as_text(&self) -> Option<&'a str> {
         match self.val {
             RVal::Obj(id) => match self.pool.get(id) {
                 Obj::Str(s) => Some(s.as_str()),
@@ -487,15 +487,7 @@ impl fmt::Display for ValueRef<'_> {
                 Frame::Val(v) => match v {
                     RVal::Void => f.write_str("void")?,
                     RVal::Int(n) => write!(f, "{n}")?,
-                    RVal::Float(x) => {
-                        if x.is_nan() {
-                            f.write_str("nan")?;
-                        } else if x.is_infinite() {
-                            f.write_str(if x.is_sign_positive() { "inf" } else { "-inf" })?;
-                        } else {
-                            write!(f, "{x}")?;
-                        }
-                    }
+                    RVal::Float(x) => crate::lexer::write_rin_float(f, x)?,
                     RVal::Bool(b) => f.write_str(if b { "true" } else { "false" })?,
                     RVal::Char(c) => crate::lexer::write_rin_char(f, c)?,
                     RVal::None => f.write_str("none")?,

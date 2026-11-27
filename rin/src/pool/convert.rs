@@ -52,7 +52,7 @@ impl Pool<'_> {
                                         )
                                     })?,
                             )),
-                            Value::Str(s) => Some(RVal::Obj(self.alloc_str(s.as_str(), span)?)),
+                            Value::Text(s) => Some(RVal::Obj(self.alloc_str(s.as_str(), span)?)),
                             Value::Ident(s) => {
                                 if !crate::lexer::is_valid_ident(s.as_str()) {
                                     return Err(self.core.err_fmt(
@@ -216,7 +216,7 @@ impl Pool<'_> {
                         RVal::EmptyList => Some(Value::empty_list()),
                         RVal::Builtin(b) => Some(Value::Builtin(b.name())),
                         RVal::Obj(id) => match self.get(id) {
-                            Obj::Str(s) => Some(Value::str(s.as_str())),
+                            Obj::Str(s) => Some(Value::text(s.as_str())),
                             Obj::Ident(s) => Some(Value::ident(s.as_str())),
                             Obj::Closure { proto, .. } => {
                                 Some(Value::Builtin(if proto.name.is_some() {

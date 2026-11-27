@@ -17,6 +17,26 @@ impl Parser<'_, '_, '_> {
                 self.advance()?;
                 Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Str(s)), 1))
             }
+            WorkTokenKind::TemplateStart(s) => {
+                self.advance()?;
+                let mut parts = RawVec::new();
+                if !s.is_empty()
+                    && parts
+                        .push_work(self.work, self.core, Expr::new(span, ExprKind::Str(s)))
+                        .is_none()
+                {
+                    return Err(self.oom(span));
+                }
+                self.push_frame(
+                    ParseFrame::Template {
+                        start: span,
+                        parts,
+                        max_child: 0,
+                    },
+                    span,
+                )?;
+                Ok(NextStep::StartExpr)
+            }
             WorkTokenKind::Char(c) => {
                 self.advance()?;
                 Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Char(c)), 1))
@@ -79,6 +99,9 @@ impl Parser<'_, '_, '_> {
                     span,
                 )?;
                 Ok(NextStep::StartExpr)
+            }
+            WorkTokenKind::TemplateMid(_) | WorkTokenKind::TemplateEnd(_) => {
+                Err(self.parse_err("src.syntax", span, "empty template interpolation"))
             }
             WorkTokenKind::LParen => self.start_paren(),
             WorkTokenKind::Ident(name) => self.start_ident(name, span),

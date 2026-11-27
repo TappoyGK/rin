@@ -87,7 +87,7 @@ pub fn val_float(&self, x: f64) -> Val
 pub fn val_bool(&self, b: bool) -> Val
 pub fn val_char(&self, c: char) -> Val
 pub fn val_none(&self) -> Val
-pub fn val_str(&mut self, s: &str) -> Result<Val, ErrorRef<'_>>
+pub fn val_text(&mut self, s: &str) -> Result<Val, ErrorRef<'_>>
 pub fn val_ident(&mut self, s: &str) -> Result<Val, ErrorRef<'_>>
 pub fn val_list(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
 pub fn val_array(&mut self, items: &[Val]) -> Result<Val, ErrorRef<'_>>
@@ -113,13 +113,13 @@ pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Re
 ```
 
 - **`Val` の所有権規約**：
-  - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_str` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
+  - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_text` / `val_ident` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
   - コンテナ構築（`val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）および `bind_val` / `call_ref` / `call_in_ref` / `eval_with_vals` は渡された `Val` を内部で retain して共有参照する。**所有権は移動しない**ため、呼び出し元は自分が生成した `Val` を使い終わったタイミングで必ず同じマシンの `release_val` へ返却する。
   - 解放済みの `Val` の再利用、二重 `release_val`、異なる `Builder` / `Machine` で生成した `Val` の受け渡しは不正であり、パニックするか別の値を読む。特に、解放済みの `Val` をスロット再利用後にもう一度 `release_val` へ渡した場合や、別の `Machine` の `Val`（`ObjId` が範囲内のもの）を `release_val` へ渡した場合は、ほかのハンドルや束縛が保持している別の値を解放し、それらが再利用後の別値を指すようになることがある（どの場合も境界検査によりメモリの範囲外には触れない）。
 - **`ValueRef<'_>` と補助借用ビュー**：
   - プール上の値を複製せずに直接読み取る借用ビュー。マシンの可変参照の借用期間中（次の可変操作まで）有効。
-  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Str` / `Ident` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
-  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_str`・`as_ident`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
+  - 公開型：`ValueTag`（`Void` / `Int` / `Float` / `Bool` / `Char` / `Text` / `Ident` / `List` / `Array` / `Tuple` / `Struct` / `Variant` / `None` / `Some` / `Ok` / `Err` / `Fn`）、`ListIter<'a>`（`Iterator<Item = ValueRef<'a>>`）、`SliceView<'a>`（`len` / `is_empty` / `get` / `iter`）、`StructRef<'a>`（`name` / `len` / `is_empty` / `field` / `get` / `fields`）、`VariantRef<'a>`（`type_name` / `variant` / `data`）。
+  - 主なメソッド：`tag`・`is_void`・`is_none`・`as_int`・`as_float`・`as_bool`・`as_char`・`as_text`・`as_ident`・`as_list`（`Option<ListIter<'_>>`）・`list_len`（`Option<usize>`）・`as_array`（`Option<SliceView<'_>>`）・`as_tuple`（`Option<SliceView<'_>>`）・`as_struct`（`Option<StructRef<'_>>`）・`as_variant`（`Option<VariantRef<'_>>`）・`as_some`・`as_ok`・`as_err`。
   - `Display` もシステムヒープを使わず `fmt::Write` へ直接出力する。`std-value` フィーチャ有効時は `to_value(&self) -> Value` で所有値へ変換できる。
 - **`ErrorRef<'_>`**：
   - マシン内のインラインエラーストアを参照する借用エラービュー（`kind`・`at`・`rule`・`message`・`module`・`backtrace_len`・`omitted_frames`・`write_backtrace`）。次の可変操作まで有効。`Display` を含めシステムヒープを一切使わない。`std-value` フィーチャ有効時は `to_error(&self) -> Error` で所有型 `Error` へ変換できる。
@@ -339,7 +339,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 
 ### 2.1 型定義
 
-- `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_STR`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`, `RIN_TAG_IDENT`
+- `RinTag`：`RIN_TAG_VOID`, `RIN_TAG_INT`, `RIN_TAG_FLOAT`, `RIN_TAG_BOOL`, `RIN_TAG_CHAR`, `RIN_TAG_TEXT`, `RIN_TAG_LIST`, `RIN_TAG_ARRAY`, `RIN_TAG_TUPLE`, `RIN_TAG_STRUCT`, `RIN_TAG_VARIANT`, `RIN_TAG_NONE`, `RIN_TAG_SOME`, `RIN_TAG_OK`, `RIN_TAG_ERR`, `RIN_TAG_FN`, `RIN_TAG_IDENT`
 - `RinLimits`：`{ size_t steps; size_t depth; size_t memory_bytes; }`
 - `RinRegionConfig`：`{ size_t initial_block; size_t max_block; }`（内部で `initial_block` は `256` 以上に、`max_block` は `initial_block` 以上に正規化される）
 - `RinMemoryConfig`：`{ RinRegionConfig perm; RinRegionConfig obj; RinRegionConfig work; }`
@@ -404,7 +404,7 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_str` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
+- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_text` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
 - 有効な `Rin` への状態変更・評価操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（**ホスト側で `rin_drop` に渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等の入力値として渡せる）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
@@ -435,7 +435,7 @@ if (!result.ok) {
 | `RinValue *rin_int(Rin *rin, int64_t n)` | `i64` 値を生成する |
 | `RinValue *rin_float(Rin *rin, double x)` | `f64` 値を生成する |
 | `RinValue *rin_bool(Rin *rin, bool b)` | `bool` 値を生成する |
-| `RinValue *rin_str(Rin *rin, const char *s)` | UTF-8 文字列を生成する |
+| `RinValue *rin_text(Rin *rin, const char *s)` | UTF-8 の `text` 値を生成する |
 | `RinValue *rin_ident(Rin *rin, const char *s)` | UTF-8 識別子値（`ident`）を生成する（無効な識別子名は `RIN_ERR_HOST` を記録して `NULL` を返す） |
 | `RinValue *rin_i64s(Rin *rin, const int64_t *ptr, size_t len)` | `i64` の `array` を生成する |
 | `RinValue *rin_f64s(Rin *rin, const double *ptr, size_t len)` | `f64` の `array` を生成する |
@@ -458,8 +458,8 @@ if (!result.ok) {
 | `bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out)` | `i64` なら `*out` に書き込み `true` を返す |
 | `bool rin_as_float(const Rin *rin, const RinValue *val, double *out)` | `f64` なら `*out` に書き込み `true` を返す |
 | `bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out)` | `bool` なら `*out` に書き込み `true` を返す |
-| `const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len)` | `Str` の UTF-8 バイト列を借用して返す（**NUL 終端ではない**。長さは `*out_len` へ書き込み、空文字列は非 NULL ポインタと長さ 0 を返す。`val` が有効な間のみ有効。非文字列または `out_len == NULL` は `NULL` を返し、失敗時は `*out_len` を書き換えない） |
-| `const uint8_t *rin_as_ident(const Rin *rin, const RinValue *val, size_t *out_len)` | `Ident` の UTF-8 バイト列を借用して返す（`rin_as_str` と同じく NUL 終端ではない。非 `Ident` または `out_len == NULL` は `NULL` を返し `*out_len` を書き換えない） |
+| `const uint8_t *rin_as_text(const Rin *rin, const RinValue *val, size_t *out_len)` | `Text` の UTF-8 バイト列を借用して返す（**NUL 終端ではない**。長さは `*out_len` へ書き込み、空文字列は非 NULL ポインタと長さ 0 を返す。`val` が有効な間のみ有効。非 `Text` または `out_len == NULL` は `NULL` を返し、失敗時は `*out_len` を書き換えない） |
+| `const uint8_t *rin_as_ident(const Rin *rin, const RinValue *val, size_t *out_len)` | `Ident` の UTF-8 バイト列を借用して返す（`rin_as_text` と同じく NUL 終端ではない。非 `Ident` または `out_len == NULL` は `NULL` を返し `*out_len` を書き換えない） |
 | `size_t rin_len(const Rin *rin, const RinValue *val)` | `List`、`Array`、または `Tuple` の要素数を返す |
 | `RinValue *rin_car(Rin *rin, const RinValue *val)` | `List` の先頭要素を所有 `RinValue *` で返す（空・非リストは `NULL`、`rin_drop` で解放） |
 | `RinValue *rin_cdr(Rin *rin, const RinValue *val)` | `List` の残余リストを所有 `RinValue *` で返す（O(1)、非リストは `NULL`、`rin_drop` で解放） |
@@ -519,7 +519,7 @@ if (!result.ok) {
 
 | 分類 | C FFI API | Rust API |
 |---|---|---|
-| 値の生成・破棄 | `rin_int` / `rin_float` / `rin_bool` / `rin_str` / `rin_i64s` / `rin_f64s` / `rin_nil` / `rin_cons` / `rin_none` / `rin_some` / `rin_struct` + `rin_struct_set` / `rin_variant` / `rin_drop` | ゼロヒープ: `val_*` / `release_val`、`std-value`: `Value` コンストラクタ・`Drop` |
+| 値の生成・破棄 | `rin_int` / `rin_float` / `rin_bool` / `rin_text` / `rin_ident` / `rin_i64s` / `rin_f64s` / `rin_nil` / `rin_cons` / `rin_none` / `rin_some` / `rin_struct` + `rin_struct_set` / `rin_variant` / `rin_drop` | ゼロヒープ: `val_*` / `release_val`、`std-value`: `Value` コンストラクタ・`Drop` |
 | 値の読み取り | `rin_tag` / `rin_as_*` / `rin_len` / `rin_car` / `rin_cdr` / `rin_field` / `rin_variant_name` / `rin_unwrap` / `rin_tuple_get` / `rin_copy_*` | ゼロヒープ: `value_ref`（`ValueRef` / `ListIter` / `SliceView` / `StructRef` / `VariantRef`）、`std-value`: `Value` パターンマッチ・各メソッド |
 | スキーマ検証（`std-value`） | `rin_schema` / `rin_schema_free` / `rin_check` / `rin_check_str` | `Schema::parse` / `Schema::check` |
 | Rust のみ（`std-value`） | （なし） | `rin::eval` / `rin::eval_with` / `rin::eval_with_allocator` / `rin::fmt::format` / `rin::test` / `Error::render` |

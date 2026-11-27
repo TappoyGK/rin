@@ -15,7 +15,7 @@ typedef enum RinTag {
     RIN_TAG_FLOAT = 2,
     RIN_TAG_BOOL = 3,
     RIN_TAG_CHAR = 4,
-    RIN_TAG_STR = 5,
+    RIN_TAG_TEXT = 5,
     RIN_TAG_LIST = 6,
     RIN_TAG_ARRAY = 7,
     RIN_TAG_TUPLE = 8,
@@ -166,7 +166,7 @@ const RinError *rin_last_error(const Rin *rin);
 RinValue *rin_int(Rin *rin, int64_t n);
 RinValue *rin_float(Rin *rin, double x);
 RinValue *rin_bool(Rin *rin, bool b);
-RinValue *rin_str(Rin *rin, const char *s);
+RinValue *rin_text(Rin *rin, const char *s);
 RinValue *rin_ident(Rin *rin, const char *s);
 RinValue *rin_i64s(Rin *rin, const int64_t *ptr, size_t len);
 RinValue *rin_f64s(Rin *rin, const double *ptr, size_t len);
@@ -181,14 +181,14 @@ void rin_drop(Rin *rin, RinValue *val);
 
 /* 値読み取り（rin_car / rin_cdr / rin_field / rin_unwrap / rin_tuple_get の返り値は rin_drop で返却）。
  * 上記 5 関数でハンドル領域の確保に失敗した場合は NULL を返し、rin_last_error を更新する。
- * rin_as_str / rin_variant_name が返すポインタは NUL 終端ではなく、長さは *out_len で受け取る。
+ * rin_as_text / rin_variant_name が返すポインタは NUL 終端ではなく、長さは *out_len で受け取る。
  * 空文字列は非 NULL ポインタと長さ 0 を返す。out_len == NULL や型不一致時は NULL を返し *out_len を書き換えない。
  */
 RinTag rin_tag(const Rin *rin, const RinValue *val);
 bool rin_as_int(const Rin *rin, const RinValue *val, int64_t *out);
 bool rin_as_float(const Rin *rin, const RinValue *val, double *out);
 bool rin_as_bool(const Rin *rin, const RinValue *val, bool *out);
-const uint8_t *rin_as_str(const Rin *rin, const RinValue *val, size_t *out_len);
+const uint8_t *rin_as_text(const Rin *rin, const RinValue *val, size_t *out_len);
 const uint8_t *rin_as_ident(const Rin *rin, const RinValue *val, size_t *out_len);
 size_t rin_len(const Rin *rin, const RinValue *val);
 RinValue *rin_car(Rin *rin, const RinValue *val);

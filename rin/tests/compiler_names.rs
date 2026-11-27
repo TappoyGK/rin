@@ -65,8 +65,8 @@ fn many_globals_and_repeated_string_constants_keep_their_numbers() {
             .rev()
             .flat_map(|i| {
                 [
-                    Value::str(format!("text{i}")),
-                    Value::str(format!("text{i}")),
+                    Value::text(format!("text{i}")),
+                    Value::text(format!("text{i}")),
                 ]
             })
             .collect(),

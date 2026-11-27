@@ -32,6 +32,7 @@ const CHUNK_SLOTS: usize = 256;
 enum Slot {
     Free { next: Option<u32> },
     Live { rc: u32, obj: Obj },
+    Immortal(Obj),
     Dying { next: Option<u32>, obj: Obj },
 }
 
@@ -151,6 +152,8 @@ pub(crate) struct Pool<'a> {
     /// 最終チャンク内の初期化済みスロット数。
     last_chunk_len: usize,
     free_head: Option<u32>,
+    /// 読み込み段階で永続領域へインターンした定数 `text` リテラルの共有表。
+    perm_strs: crate::mem::RawMap<crate::mem::RawStr, ObjId>,
     #[cfg(all(test, feature = "std-value"))]
     release_counts: release_tests::Counts,
 }
@@ -175,6 +178,7 @@ impl<'a> Pool<'a> {
             chunks: ChunkTable::new(),
             last_chunk_len: 0,
             free_head: None,
+            perm_strs: crate::mem::RawMap::new(),
             #[cfg(all(test, feature = "std-value"))]
             release_counts: release_tests::Counts::default(),
         }
@@ -241,7 +245,7 @@ impl<'a> Pool<'a> {
     #[inline(always)]
     pub fn get(&self, id: ObjId) -> &Obj {
         match self.slot_ref(id) {
-            Slot::Live { obj, .. } => obj,
+            Slot::Live { obj, .. } | Slot::Immortal(obj) => obj,
             Slot::Free { .. } | Slot::Dying { .. } => panic!("dangling ObjId({})", id.0),
         }
     }
@@ -302,7 +306,7 @@ impl<'a> Pool<'a> {
                         };
                         obj
                     }
-                    Slot::Free { .. } | Slot::Dying { .. } => continue,
+                    Slot::Immortal(_) | Slot::Free { .. } | Slot::Dying { .. } => continue,
                 }
             } else if let Some(id_u32) = pending {
                 let id = ObjId(id_u32);
@@ -351,7 +355,7 @@ impl<'a> Pool<'a> {
                 *rc -= 1;
                 *rc == 0
             }
-            Slot::Free { .. } | Slot::Dying { .. } => false,
+            Slot::Immortal(_) | Slot::Free { .. } | Slot::Dying { .. } => false,
         };
         if became_zero {
             let prev = std::mem::replace(slot, Slot::Free { next: None });
@@ -474,6 +478,40 @@ impl<'a> Pool<'a> {
         }
     }
 
+    /// 永続領域上の不変 `RawStr` に対応する不滅 `ObjId` を共有表から取得または新規登録する。
+    pub(crate) fn intern_perm_str(&mut self, raw: crate::mem::RawStr) -> Option<ObjId> {
+        let s = raw.as_str();
+        let hash = crate::mem::fnv1a_bytes(s.as_bytes());
+        if let Some(id) = self.perm_strs.get_by(hash, |k| k.as_str() == s) {
+            return Some(id);
+        }
+        let len_u32 = u32::try_from(s.len()).ok()?;
+        let char_len = if s.is_ascii() {
+            len_u32
+        } else {
+            s.chars().count() as u32
+        };
+        let obj_str = if s.is_empty() {
+            ObjStr::empty()
+        } else {
+            ObjStr {
+                ptr: std::ptr::NonNull::new(s.as_ptr() as *mut u8).unwrap(),
+                len: len_u32,
+                char_len,
+                block_size: 0,
+            }
+        };
+        let id = self.alloc_obj(Obj::Str(obj_str), Span::default()).ok()?;
+        self.core.uncharge_obj(SLOT_BYTES);
+        let _ = self.core.charge_perm(SLOT_BYTES);
+        *self.slot_mut(id) = Slot::Immortal(Obj::Str(obj_str));
+        self.perm_strs
+            .insert_perm(&mut self.perm, &mut self.core, hash, raw, id, |a, b| {
+                a.as_str() == b.as_str()
+            })?;
+        Some(id)
+    }
+
     #[inline(always)]
     pub fn alloc_obj(&mut self, obj: Obj, span: Span) -> Result<ObjId, ErrRecorded> {
         if !self.core.charge_obj(SLOT_BYTES) {
@@ -485,7 +523,7 @@ impl<'a> Pool<'a> {
             let slot = self.slot_mut(id);
             let next = match *slot {
                 Slot::Free { next } => next,
-                Slot::Live { .. } | Slot::Dying { .. } => unreachable!(),
+                Slot::Live { .. } | Slot::Immortal(_) | Slot::Dying { .. } => unreachable!(),
             };
             *slot = Slot::Live { rc: 1, obj };
             self.free_head = next;

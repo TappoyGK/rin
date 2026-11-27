@@ -121,7 +121,7 @@ fn c_ffi_struct_variant_field_extraction() {
     );
     let src = CString::new(r#"Card { id: "strike" cost: 1 element: Element.Fire }"#).unwrap();
     let schema_src = CString::new(
-        "(struct Card (id string) (cost i64) (element (variant Element (Plain) (Fire) (Frost))))",
+        "(struct Card (id text) (cost i64) (element (variant Element (Plain) (Fire) (Frost))))",
     )
     .unwrap();
     let f_id = CString::new("id").unwrap();
@@ -135,7 +135,7 @@ fn c_ffi_struct_variant_field_extraction() {
 
         let v_id = ffi::rin_field(m, res.value, f_id.as_ptr());
         let mut id_len = 0;
-        let id_ptr = ffi::rin_as_str(m, v_id, &mut id_len);
+        let id_ptr = ffi::rin_as_text(m, v_id, &mut id_len);
         assert_eq!(std::slice::from_raw_parts(id_ptr, id_len), b"strike");
         ffi::rin_drop(m, v_id);
 
@@ -190,7 +190,7 @@ fn c_ffi_call_and_struct_roundtrip() {
         assert!(def_res.ok);
 
         let card = ffi::rin_struct(m, t_card.as_ptr());
-        let id_val = ffi::rin_str(m, v_id.as_ptr());
+        let id_val = ffi::rin_text(m, v_id.as_ptr());
         let cost_val = ffi::rin_int(m, 3);
         let elem_val = ffi::rin_variant(m, t_elem.as_ptr(), v_frost.as_ptr(), std::ptr::null());
         assert!(ffi::rin_struct_set(m, card, f_id.as_ptr(), id_val));

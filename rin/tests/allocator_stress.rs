@@ -92,7 +92,7 @@ fn oom_sweep_every_byte_across_phases() {
             );
             let mut owned = Vec::new();
             let res: Result<(), ErrorKind> = (|| {
-                let s = b.val_str("hello-oom").map_err(|e| e.kind())?;
+                let s = b.val_text("hello-oom").map_err(|e| e.kind())?;
                 owned.push(s);
                 let i = b.val_int(7);
                 let opt = b.val_some(s).map_err(|e| e.kind())?;
@@ -165,7 +165,7 @@ fn oom_sweep_every_byte_across_phases() {
         assert_eq!(machine.live_bytes(), baseline);
 
         // eval_with_vals で一時束縛を渡して OOM になっても live_bytes が基準値へ戻る。
-        let label = machine.val_str("tmp").unwrap();
+        let label = machine.val_text("tmp").unwrap();
         let n_big = machine.val_int(5000);
         let err = machine
             .eval_with_vals(

@@ -13,7 +13,7 @@ impl EnvState<'_> {
         self.pool.release_val(prev);
     }
 
-    pub(super) fn val_str(&mut self, s: &str) -> Result<Val, ErrorRef<'_>> {
+    pub(super) fn val_text(&mut self, s: &str) -> Result<Val, ErrorRef<'_>> {
         match self.pool.alloc_str(s, Span::default()) {
             Ok(id) => Ok(Val(RVal::Obj(id))),
             Err(_) => Err(self.pool.core.error.as_ref()),

@@ -34,6 +34,11 @@ impl Parser<'_, '_, '_> {
                     qq,
                 ))
             }
+            WorkTokenKind::TemplateStart(_) => Err(self.parse_err(
+                "src.syntax",
+                span,
+                "template interpolation is not allowed inside quote or quasiquote",
+            )),
             WorkTokenKind::Char(c) => {
                 self.advance()?;
                 Ok(NextStep::HaveDatum(

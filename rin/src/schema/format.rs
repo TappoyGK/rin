@@ -26,7 +26,7 @@ impl TypeExpr {
                     TypeExpr::F64 => f.write_str("F64")?,
                     TypeExpr::Bool => f.write_str("Bool")?,
                     TypeExpr::Char => f.write_str("Char")?,
-                    TypeExpr::String => f.write_str("String")?,
+                    TypeExpr::Text => f.write_str("Text")?,
                     TypeExpr::Ident => f.write_str("Ident")?,
                     TypeExpr::Ref(s) => {
                         f.write_str("Ref(")?;

@@ -258,8 +258,8 @@ macro_rules! impl_val_constructors {
             pub fn val_none(&self) -> Val {
                 Val(RVal::None)
             }
-            pub fn val_str(&mut self, s: &str) -> Result<Val, ErrorRef<'_>> {
-                self.inner.val_str(s)
+            pub fn val_text(&mut self, s: &str) -> Result<Val, ErrorRef<'_>> {
+                self.inner.val_text(s)
             }
             pub fn val_ident(&mut self, s: &str) -> Result<Val, ErrorRef<'_>> {
                 self.inner.val_ident(s)

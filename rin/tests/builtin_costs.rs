@@ -218,12 +218,12 @@ fn strings_nested_equality_and_scalar_operations() {
     for n in [0, 1, 17] {
         check(
             "len",
-            &[Value::str("あ".repeat(n))],
-            1 + 3 * n,
+            &[Value::text("あ".repeat(n))],
+            1,
             Value::Int(n as i64),
         );
-        let a = Value::str(format!("{}a", "x".repeat(n)));
-        let b = Value::str(format!("{}b", "x".repeat(n)));
+        let a = Value::text(format!("{}a", "x".repeat(n)));
+        let b = Value::text(format!("{}b", "x".repeat(n)));
         check("==", &[a.clone(), b.clone()], 3 + n, Value::Bool(false));
         check("!=", &[a.clone(), b.clone()], 3 + n, Value::Bool(true));
         check(

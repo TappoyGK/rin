@@ -50,7 +50,7 @@ pub unsafe extern "C" fn rin_bool(machine: *mut Rin, b: bool) -> *mut RinValue {
 /// # Safety
 /// `machine` は有効な `Rin` ポインタ、`s` は有効な NUL 終端 UTF-8 文字列でなければならない。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_str(machine: *mut Rin, s: *const c_char) -> *mut RinValue {
+pub unsafe extern "C" fn rin_text(machine: *mut Rin, s: *const c_char) -> *mut RinValue {
     let Some(m) = (unsafe { machine.as_mut() }) else {
         return std::ptr::null_mut();
     };
@@ -63,8 +63,8 @@ pub unsafe extern "C" fn rin_str(machine: *mut Rin, s: *const c_char) -> *mut Ri
         return std::ptr::null_mut();
     };
     let res = match m.state.as_mut().expect("Rin state present") {
-        RinState::Building(b) => b.val_str(text).map_err(|e| m.last_error.set_from_ref(e)),
-        RinState::Frozen(f) => f.val_str(text).map_err(|e| m.last_error.set_from_ref(e)),
+        RinState::Building(b) => b.val_text(text).map_err(|e| m.last_error.set_from_ref(e)),
+        RinState::Frozen(f) => f.val_text(text).map_err(|e| m.last_error.set_from_ref(e)),
     };
     match res {
         Ok(v) => m.alloc_handle(v),

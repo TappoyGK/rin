@@ -426,10 +426,14 @@ impl Runner<'_, '_> {
             },
             (RVal::Obj(id1), RVal::Obj(id2)) => {
                 let cmp = match (self.pool.get(id1), self.pool.get(id2)) {
-                    (Obj::Ident(s1), Obj::Ident(s2)) => {
-                        let cost = s1.len().min(s2.len());
-                        let ord = s1.as_str().cmp(s2.as_str());
-                        Some((cost, ord))
+                    (Obj::Str(s1), Obj::Str(s2)) | (Obj::Ident(s1), Obj::Ident(s2)) => {
+                        if id1 == id2 {
+                            Some((0, std::cmp::Ordering::Equal))
+                        } else {
+                            let cost = s1.len().min(s2.len());
+                            let ord = s1.as_str().cmp(s2.as_str());
+                            Some((cost, ord))
+                        }
                     }
                     _ => None,
                 };

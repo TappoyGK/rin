@@ -147,7 +147,7 @@ fn resource_errors_and_bind_failures_preserve_kind() {
             memory_bytes: 0,
             ..rin_limits_default()
         });
-        assert!(rin_str(m.0, c"value".as_ptr()).is_null());
+        assert!(rin_text(m.0, c"value".as_ptr()).is_null());
         check_error(m.0, RinErrorKind::TooMuchMemory);
         let v = rin_int(m.0, 1);
         assert!(!rin_bind(m.0, c"x".as_ptr(), v));

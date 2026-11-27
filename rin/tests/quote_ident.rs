@@ -99,7 +99,7 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     // 文字列エスケープ（Suz と共通）
     assert_eq!(
         eval("\"\\0\\n\\r\\t\\\\\\\"\\u{41}\\u{1F600}'\"").unwrap(),
-        Value::str("\0\n\r\t\\\"A😀'")
+        Value::text("\0\n\r\t\\\"A😀'")
     );
 
     // 文字リテラルの直後に記号や識別子が続く場合は次のトークンとして読まれる
@@ -200,7 +200,7 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert_eq!(eval("'foo").unwrap(), Value::ident("foo"));
     assert_eq!(eval("'\\a").unwrap(), Value::Char('a'));
     assert_eq!(eval("'123").unwrap(), Value::Int(123));
-    assert_eq!(eval("'\"hi\"").unwrap(), Value::str("hi"));
+    assert_eq!(eval("'\"hi\"").unwrap(), Value::text("hi"));
     assert_eq!(
         eval("'(a b)").unwrap(),
         Value::list(vec![Value::ident("a"), Value::ident("b")])
@@ -399,7 +399,7 @@ fn ident_operations_conversions_match_schema_and_ffi() {
     }
 
     // ident->text / text->ident
-    assert_eq!(eval("(ident->text 'hello)").unwrap(), Value::str("hello"));
+    assert_eq!(eval("(ident->text 'hello)").unwrap(), Value::text("hello"));
     assert_eq!(
         eval("(text->ident \"hello\")").unwrap(),
         Value::some(Value::ident("hello"))
@@ -421,7 +421,7 @@ fn ident_operations_conversions_match_schema_and_ffi() {
     // Schema DSL
     let schema = Schema::parse("ident").unwrap();
     assert!(schema.check(&Value::ident("foo")).is_ok());
-    assert!(schema.check(&Value::str("foo")).is_err());
+    assert!(schema.check(&Value::text("foo")).is_err());
 
     // Rust zero-heap API & Value import validation
     let mut alloc = HeapAllocator;
@@ -491,7 +491,7 @@ fn tuple_syntax_and_display_roundtrip() {
     );
     assert_eq!(
         eval("(tuple 1 \"a\" true)").unwrap(),
-        Value::tuple(vec![Value::Int(1), Value::str("a"), Value::Bool(true)])
+        Value::tuple(vec![Value::Int(1), Value::text("a"), Value::Bool(true)])
     );
 
     // 0 要素・1 要素・旧構文は構文エラー

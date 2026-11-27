@@ -57,7 +57,9 @@ impl<'a> Syntax<'a> {
         let mut work: Vec<_> = exprs.iter().collect();
         while let Some(expr) = work.pop() {
             this.plan(expr);
-            children(expr, &mut work);
+            if !matches!(expr.kind, ExprKind::Template(_)) {
+                children(expr, &mut work);
+            }
         }
         this
     }

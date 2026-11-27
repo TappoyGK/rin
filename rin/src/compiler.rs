@@ -88,6 +88,27 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
+    if !frozen && !finished.chunk.strings.is_empty() {
+        let mut objs = RawVec::new();
+        for &s in finished.chunk.strings.as_slice() {
+            let Some(raw) = RawStr::from_perm(&mut pool.perm, &mut pool.core, s.as_str()) else {
+                return Err(pool.core.err_oom(Span::default()));
+            };
+            let Some(id) = pool.intern_perm_str(raw) else {
+                return Err(pool.core.err_oom(Span::default()));
+            };
+            if objs.push_work(&mut pool.work, &mut pool.core, id).is_none() {
+                return Err(pool.core.err_oom(Span::default()));
+            }
+        }
+        if finished
+            .chunk
+            .set_str_objs(pool, CodeRegion::Work, objs)
+            .is_none()
+        {
+            return Err(pool.core.err_oom(Span::default()));
+        }
+    }
     Ok(finished.chunk)
 }
 
@@ -216,6 +237,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn add_string(&mut self, s: &str, span: Span) -> Result<u32, Failed> {
+        if u32::try_from(s.len()).is_err() {
+            return Err(self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                span,
+                "text length limit exceeded (4294967295 bytes)",
+            ));
+        }
         let region = self.current_region();
         let top = self.scopes.last_mut().unwrap();
         match top

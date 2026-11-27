@@ -82,6 +82,7 @@ pub enum ExprKind {
     Bool(bool),
     Char(char),
     Str(RawStr),
+    Template(RawVec<Expr>),
     None,
     Ident(RawStr),
     Quote(WorkBox<Datum>),
@@ -167,7 +168,9 @@ pub enum Pattern {
 #[cfg(feature = "std-value")]
 pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match &expr.kind {
-        ExprKind::List(xs) | ExprKind::Tuple(xs) => out.extend(xs.as_slice()),
+        ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Template(xs) => {
+            out.extend(xs.as_slice())
+        }
         ExprKind::Fn(f) => out.extend(f.body.as_slice()),
         ExprKind::Defn(d) => out.extend(d.body.as_slice()),
         ExprKind::Struct(s) => out.extend(s.fields.as_slice().iter().map(|(_, e)| e)),

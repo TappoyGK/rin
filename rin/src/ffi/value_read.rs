@@ -12,7 +12,7 @@ fn tag_from_value_tag(t: ValueTag) -> RinTag {
         ValueTag::Float => RinTag::Float,
         ValueTag::Bool => RinTag::Bool,
         ValueTag::Char => RinTag::Char,
-        ValueTag::Str => RinTag::Str,
+        ValueTag::Text => RinTag::Text,
         ValueTag::List => RinTag::List,
         ValueTag::Array => RinTag::Array,
         ValueTag::Tuple => RinTag::Tuple,
@@ -121,13 +121,13 @@ pub unsafe extern "C" fn rin_as_bool(
     false
 }
 
-/// `Str` 値の UTF-8 バイト列を借用する（`val` の生存中のみ有効）。
-/// 文字列でない場合は `NULL` を返す。
+/// `Text` 値の UTF-8 バイト列を借用する（`val` の生存中のみ有効）。
+/// `text` でない場合は `NULL` を返す。
 ///
 /// # Safety
 /// `machine`・`val`・`out_len` は有効なポインタでなければならない。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_as_str(
+pub unsafe extern "C" fn rin_as_text(
     machine: *const Rin,
     val: *const RinValue,
     out_len: *mut usize,
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn rin_as_str(
     if out_len.is_null() {
         return std::ptr::null();
     }
-    if let Some(s) = m.state_ref().value_ref(v.0).as_str() {
+    if let Some(s) = m.state_ref().value_ref(v.0).as_text() {
         unsafe { *out_len = s.len() };
         return s.as_ptr();
     }
