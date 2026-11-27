@@ -20,6 +20,7 @@ mod pool;
 pub mod schema;
 #[cfg(feature = "std-value")]
 pub mod test;
+mod typecheck;
 #[cfg(feature = "std-value")]
 pub mod value;
 pub mod value_ref;
