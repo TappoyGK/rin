@@ -9,9 +9,16 @@ impl EnvState<'_> {
     }
 
     pub(super) fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>> {
-        self.pool.retain_val(val.0);
+        if self.modules.get_val(name).is_some() {
+            self.pool.core.err_fmt(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("cannot bind '{name}': conflicts with loaded module '{name}'"),
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
         let Some(id) = self.syms.intern(&mut self.pool, name) else {
-            self.pool.release_val(val.0);
             self.pool.core.err_str(
                 "eval.limits",
                 ErrorKind::TooMuchMemory,
@@ -20,12 +27,27 @@ impl EnvState<'_> {
             );
             return Err(self.pool.core.error.as_ref());
         };
+        if id < STATIC_SYM_COUNT {
+            self.pool.core.err_fmt(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("cannot redefine builtin '{name}'"),
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
+        if self.globals.get(id).is_some() {
+            self.pool.core.err_fmt(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("'{name}' is already defined"),
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
+        self.pool.retain_val(val.0);
         match self.globals.set(&mut self.pool, id, val.0, Span::default()) {
-            Ok(Some(prev)) => {
-                self.pool.release_val(prev);
-                Ok(())
-            }
-            Ok(None) => Ok(()),
+            Ok(_) => Ok(()),
             Err(_) => {
                 self.pool.release_val(val.0);
                 Err(self.pool.core.error.as_ref())
@@ -84,48 +106,66 @@ impl EnvState<'_> {
         source: &str,
         bindings: &[(&str, Val)],
     ) -> Result<RVal, ErrRecorded> {
-        let chunk = {
+        if bindings.is_empty() {
+            let chunk = {
+                let exprs =
+                    parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+                compile_program(
+                    exprs.as_slice(),
+                    None,
+                    &mut self.syms,
+                    &mut self.pool,
+                    &self.globals,
+                    true,
+                )?
+            };
+            let mut runner = self.runner(None, true);
+            return runner.run_top_chunk(&chunk);
+        }
+        let (chunk, used) = {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
-            compile_program(
+            compile_program_with_bindings(
                 exprs.as_slice(),
                 None,
                 &mut self.syms,
                 &mut self.pool,
                 &self.globals,
                 true,
+                InitialBindingNames::Vals(bindings),
             )?
         };
-        if bindings.is_empty() {
-            let mut runner = self.runner(None, true);
-            return runner.run_top_chunk(&chunk);
-        }
-        let mut values = EvalBindingValues::new(bindings.len());
-        for &(name, val) in bindings {
-            if let Some(id) = self.syms.get(name) {
-                self.pool.retain_val(val.0);
-                match values.insert(&mut self.pool, id, val.0) {
-                    Ok(Some(prev)) => self.pool.release_val(prev),
-                    Ok(None) => {}
-                    Err(e) => {
-                        self.pool.release_val(val.0);
-                        values.release_all(&mut self.pool);
-                        return Err(e);
+        match used {
+            UsedBindings::Small { indices, len } => {
+                let mut vals = [RVal::Void; 8];
+                let count = len as usize;
+                for i in 0..count {
+                    vals[i] = bindings[indices[i] as usize].1.0;
+                }
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk_with_locals(&chunk, &vals[..count])
+            }
+            UsedBindings::Many(used_indices) => {
+                let mut vals = RawVec::<RVal>::new();
+                if !used_indices.is_empty() {
+                    if vals
+                        .reserve_work(&mut self.pool.work, &mut self.pool.core, used_indices.len())
+                        .is_none()
+                    {
+                        return Err(self.pool.core.err_oom(Span::default()));
+                    }
+                    for &idx in used_indices.as_slice() {
+                        let _ = vals.push_work(
+                            &mut self.pool.work,
+                            &mut self.pool.core,
+                            bindings[idx as usize].1.0,
+                        );
                     }
                 }
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk_with_locals(&chunk, vals.as_slice())
             }
         }
-        let eval_bindings = EvalBindings {
-            values,
-            names: EvalBindingNames::Vals(bindings),
-        };
-        let res = {
-            let mut runner = self.runner(None, true);
-            runner.eval_bindings = Some(&eval_bindings);
-            runner.run_top_chunk(&chunk)
-        };
-        eval_bindings.values.release_all(&mut self.pool);
-        res
     }
 
     pub(super) fn call_vals_ref(

@@ -39,14 +39,16 @@ impl std::fmt::Write for Fail {
 
 fn deep_roundtrips() {
     let mut alloc = HeapAllocator;
-    let mut m = Builder::new(
+    let mut machine = Builder::new(
         Limits {
             steps: 1_000_000, // 深い構造体の名前・フィールド比較も計上する。
             memory_bytes: 128 * 1024 * 1024,
             ..Limits::default()
         },
         &mut alloc,
-    );
+    )
+    .freeze()
+    .unwrap();
     for shape in 0..8 {
         let value = nested(shape, 20_000, Value::Int(7));
         let other = nested(shape, 20_000, Value::Int(7));
@@ -59,15 +61,23 @@ fn deep_roundtrips() {
         assert!(write!(&mut Fail, "{value}").is_err());
         assert!(write!(&mut Fail, "{value:?}").is_err());
         assert!(value.approx_bytes() >= 20_000);
-        m.bind("a", &value).unwrap();
-        m.bind("b", &other).unwrap();
-        assert!(m.eval("(== a b)").unwrap() == Value::Bool(true));
-        assert!(m.eval("a").unwrap() == value);
-        m.bind("b", &different).unwrap();
-        assert!(m.eval("(== a b)").unwrap() == Value::Bool(false));
-        m.bind("a", &Value::Void).unwrap();
-        m.bind("b", &Value::Void).unwrap();
-        assert_eq!(m.live_bytes(), 0);
+        assert!(
+            machine
+                .eval_with("(== a b)", &[("a", value.clone()), ("b", other.clone())])
+                .unwrap()
+                == Value::Bool(true)
+        );
+        assert!(machine.eval_with("a", &[("a", value.clone())]).unwrap() == value);
+        assert!(
+            machine
+                .eval_with(
+                    "(== a b)",
+                    &[("a", value.clone()), ("b", different.clone())]
+                )
+                .unwrap()
+                == Value::Bool(false)
+        );
+        assert_eq!(machine.live_bytes(), 0);
         let shared = value.clone();
         drop(value);
         assert!(shared == other);
@@ -371,8 +381,9 @@ fn shallow_and_iterative_paths_agree() {
             let other = nested(shape, depth, Value::Int(7));
             assert!(value == other);
             assert!(value != nested(shape, depth, Value::Int(8)));
-            m.bind("x", &value).unwrap();
-            assert!(m.eval("x").unwrap() == value);
+            let name = format!("x_{depth}_{shape}");
+            m.bind(&name, &value).unwrap();
+            assert!(m.eval(&name).unwrap() == value);
             assert_eq!(value.to_string(), other.to_string());
             assert_eq!(format!("{value:?}"), format!("{other:?}"));
             let nan = nested(shape, depth, Value::Float(f64::NAN));

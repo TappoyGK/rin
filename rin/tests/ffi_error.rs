@@ -206,14 +206,15 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
             Box::new(|| rin_bind(m.0, bad, v)),
             Box::new(|| rin_bind(m.0, c"x".as_ptr(), null())),
         ];
-        for case in cases {
+        for (idx, case) in cases.into_iter().enumerate() {
             finish(
                 rin_load(m.0, c"previous".as_ptr(), c"(/ 1 0)".as_ptr()),
                 false,
             );
             assert!(!case());
             check_error(m.0, RinErrorKind::Host);
-            assert!(rin_bind(m.0, c"x".as_ptr(), v));
+            let name = CString::new(format!("x_{idx}")).unwrap();
+            assert!(rin_bind(m.0, name.as_ptr(), v));
             assert!(rin_last_error(m.0).is_null());
         }
         rin_drop(m.0, v);

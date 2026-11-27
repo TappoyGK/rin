@@ -81,7 +81,7 @@ impl Runner<'_, '_> {
                                 "'def' is not allowed in a frozen environment",
                             ));
                         }
-                        self.define_top(id, v, span)?;
+                        self.define_top(id, v, span, "expr.def")?;
                         self.stack_push(RVal::Void, span)?;
                     }
                     Op::DefFn(name_id, proto_idx) => {
@@ -95,7 +95,7 @@ impl Runner<'_, '_> {
                         }
                         let proto = chunk.protos[proto_idx as usize];
                         let closure = self.build_closure(proto, frame.captures, base, span)?;
-                        self.define_top(name_id, closure, span)?;
+                        self.define_top(name_id, closure, span, "expr.defn")?;
                         self.stack_push(RVal::Void, span)?;
                     }
                     Op::MakeClosure(proto_idx) => {

@@ -80,16 +80,13 @@ fn duplicate_exports_do_not_leak_on_reload_or_unknown_symbol_error() {
     for src in cases {
         let mut alloc = HeapAllocator;
         let mut builder = Builder::new(Limits::default(), &mut alloc);
-        let mut first_live = None;
-        for _ in 0..4 {
-            builder.load_module("m", src).unwrap();
-            let live = builder.live_bytes();
-            match first_live {
-                None => first_live = Some(live),
-                Some(expected) => assert_eq!(live, expected, "leak on reload: {src}"),
-            }
-        }
-        let live = first_live.unwrap();
+        builder.load_module("m", src).unwrap();
+        let live = builder.live_bytes();
+        // 成功済みモジュールの再読込はエラーになり、live_bytes も増えない。
+        let err = builder.load_module("m", src).unwrap_err();
+        assert_eq!(err.kind, crate::ErrorKind::Runtime);
+        assert_eq!(err.rule(), "expr.module");
+        assert_eq!(builder.live_bytes(), live);
         match baseline {
             None => baseline = Some(live),
             Some(expected) => assert_eq!(live, expected, "live_bytes differs from baseline: {src}"),
@@ -106,14 +103,12 @@ fn duplicate_exports_do_not_leak_on_reload_or_unknown_symbol_error() {
         .unwrap();
     let mut alloc_dup = HeapAllocator;
     let mut b_dup = Builder::new(Limits::default(), &mut alloc_dup);
-    for _ in 0..3 {
-        b_dup
-            .load_module(
-                "m",
-                "(def a \"alpha\") (def b [1 2 3]) (export b a b) (export a)",
-            )
-            .unwrap();
-    }
+    b_dup
+        .load_module(
+            "m",
+            "(def a \"alpha\") (def b [1 2 3]) (export b a b) (export a)",
+        )
+        .unwrap();
     assert_eq!(b_dup.live_bytes(), b_single.live_bytes());
     assert_eq!(
         b_dup.eval("(import m) (tuple m.a m.b)").unwrap(),

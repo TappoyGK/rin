@@ -229,6 +229,53 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 pending_from = Some((scope_index, local_index));
             }
         }
+        if head.is_none()
+            && let Some(mut state_ptr) = self.initial
+        {
+            // SAFETY: コンパイル中は `Compiler` が `state_ptr` を排他的に所有している。
+            let state = unsafe { state_ptr.as_mut() };
+            if !state.names.is_empty() {
+                if let Some(saved_head) = state.saved_name_head {
+                    head = Some(saved_head);
+                } else {
+                    let mut table_ptr = self.name_table.expect("name table initialized");
+                    let region = self.region;
+                    let names = state.names;
+                    for idx in 0..names.len() {
+                        let name = names.get(idx);
+                        // SAFETY: コンパイル中は `Compiler` が `table_ptr` を排他的に所有している。
+                        let table = unsafe { table_ptr.as_mut() };
+                        let node_index = table.nodes.len();
+                        let text_start = table.text.len();
+                        if self
+                            .pool
+                            .extend_code_slice(region, &mut table.text, name.as_bytes())
+                            .is_none()
+                        {
+                            return Err(self.fail_oom(span));
+                        }
+                        let text_end = table.text.len();
+                        if self
+                            .pool
+                            .push_code(
+                                region,
+                                &mut table.nodes,
+                                NameNode {
+                                    start: text_start,
+                                    end: text_end,
+                                    parent: head,
+                                },
+                            )
+                            .is_none()
+                        {
+                            return Err(self.fail_oom(span));
+                        }
+                        head = Some(node_index);
+                    }
+                    state.saved_name_head = head;
+                }
+            }
+        }
         if let Some((first_scope, first_local)) = pending_from {
             let mut table_ptr = self.name_table.expect("name table initialized");
             let region = self.region;
@@ -277,8 +324,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         Ok(head)
     }
 
-    // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
-    // 再読込で消えるモジュールの束縛は、この判定に含めない。
+    // 大域の束縛は再定義されない。既存の値があれば未定義名にならない。
     #[cold]
     pub(super) fn record_name_site(
         &mut self,
@@ -287,8 +333,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
         span: Span,
     ) -> Result<(), Failed> {
         let scope = self.scopes.last().unwrap();
-        // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
-        if scope.outer_local_count == 0 && scope.locals.is_empty() {
+        // ローカルも初期束縛も見えない場所では文字数も調べず、表の準備にも入らない。
+        if scope.outer_local_count == 0 && scope.locals.is_empty() && self.initial.is_none() {
             return Ok(());
         }
         let Some(sym_name) = self.syms.name(id) else {
@@ -335,6 +381,30 @@ impl<'a, 'p> Compiler<'a, 'p> {
         Ok(())
     }
 
+    fn resolve_small_initial(&mut self, name: &str) -> Option<u32> {
+        let mut state_ptr = self.initial?;
+        // SAFETY: コンパイル中は `Compiler` が `state_ptr` を排他的に所有している。
+        let state = unsafe { state_ptr.as_mut() };
+        if !state.lazy_small {
+            return None;
+        }
+        let len = state.names.len();
+        for idx in (0..len).rev() {
+            if state.names.get(idx) == name {
+                let existing = state.small_slots[idx];
+                if existing != u32::MAX {
+                    return Some(existing);
+                }
+                let slot = state.small_used_len as u32;
+                state.small_slots[idx] = slot;
+                state.small_used[slot as usize] = idx as u32;
+                state.small_used_len += 1;
+                return Some(slot);
+            }
+        }
+        None
+    }
+
     pub(super) fn resolve_var(&mut self, name: RawStr, span: Span) -> Result<Op, Failed> {
         let top = self.scopes.len() - 1;
         if let Some(slot) = self.scopes[top].find_local(name.as_str()) {
@@ -344,6 +414,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             && let Some(cap_idx) = self.resolve_capture(top, name, span)?
         {
             return Ok(Op::GetCapture(cap_idx));
+        }
+        if top == 0
+            && self.initial.is_some()
+            && let Some(slot) = self.resolve_small_initial(name.as_str())
+        {
+            return Ok(Op::GetLocal(slot));
         }
         let id = self.intern_sym(name.as_str(), span)?;
         Ok(Op::GetGlobal(id))
@@ -365,6 +441,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 break;
             }
             cur = parent;
+        }
+        if owner.is_none()
+            && self.initial.is_some()
+            && let Some(slot) = self.resolve_small_initial(name.as_str())
+        {
+            owner = Some((1, slot));
         }
         let Some((first_capture_scope, slot)) = owner else {
             return Ok(None);

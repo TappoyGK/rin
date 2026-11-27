@@ -82,9 +82,10 @@ fn trig_matches_shared_vectors_strict_and_fused() {
         );
 
         // Machine 経由の評価でも同じビット列を返すこと。
-        machine_s.bind("x", &Value::Float(x)).unwrap();
-        machine_f.bind("x", &Value::Float(x)).unwrap();
-        let src = format!("({func} x)");
+        let name = format!("x_{count}");
+        machine_s.bind(&name, &Value::Float(x)).unwrap();
+        machine_f.bind(&name, &Value::Float(x)).unwrap();
+        let src = format!("({func} {name})");
         let Value::Float(eval_s) = machine_s.eval(&src).unwrap() else {
             panic!("expected float");
         };

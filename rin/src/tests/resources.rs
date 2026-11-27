@@ -199,10 +199,10 @@ fn fn_and_defn_body_last_expr_counts_step() {
         Value::Int(1)
     );
 
-    let chain = "(defn f () 1) (defn g () (f)) (defn f () 2) (g)";
+    let chain = "(defn f () 2) (defn g () (f)) (g)";
     assert_eq!(
-        eval_with(chain, &[], lim(7)).unwrap_err().kind,
+        eval_with(chain, &[], lim(6)).unwrap_err().kind,
         ErrorKind::TooManySteps
     );
-    assert_eq!(eval_with(chain, &[], lim(8)).unwrap(), Value::Int(2));
+    assert_eq!(eval_with(chain, &[], lim(7)).unwrap(), Value::Int(2));
 }

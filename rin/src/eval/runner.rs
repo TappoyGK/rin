@@ -181,13 +181,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         chunk: &Chunk,
         ip: usize,
     ) -> Result<RVal, ErrRecorded> {
-        if let Some(mod_id) = self.active_module {
-            if let Some(v) = self.modules.env(mod_id).get(id) {
-                self.pool.retain_val(v);
-                return Ok(v);
-            }
-        } else if let Some(bindings) = self.eval_bindings
-            && let Some(v) = bindings.values.get(id)
+        if let Some(mod_id) = self.active_module
+            && let Some(v) = self.modules.env(mod_id).get(id)
         {
             self.pool.retain_val(v);
             return Ok(v);
@@ -212,24 +207,6 @@ impl<'a, 'p> Runner<'a, 'p> {
     fn unknown_name(&mut self, id: u32, chunk: &Chunk, ip: usize) -> ErrRecorded {
         let span = chunk.spans[ip];
         let name = self.syms.name(id).unwrap_or("?");
-        let eval_names = self
-            .active_module
-            .is_none()
-            .then_some(self.eval_bindings)
-            .flatten()
-            .into_iter()
-            .flat_map(|b| {
-                let len = match b.names {
-                    #[cfg(feature = "std-value")]
-                    EvalBindingNames::Values(raw) => raw.len(),
-                    EvalBindingNames::Vals(raw) => raw.len(),
-                };
-                (0..len).map(move |i| match b.names {
-                    #[cfg(feature = "std-value")]
-                    EvalBindingNames::Values(raw) => raw[i].0,
-                    EvalBindingNames::Vals(raw) => raw[i].0,
-                })
-            });
         let frozen_mod_names = (self.frozen && self.active_module.is_none())
             .then(|| self.modules.loaded_names())
             .into_iter()
@@ -246,7 +223,6 @@ impl<'a, 'p> Runner<'a, 'p> {
             name,
             chunk
                 .visible_names(ip)
-                .chain(eval_names)
                 .chain(global_bound_names(self.syms, self.globals))
                 .chain(frozen_mod_names)
                 .chain(
@@ -258,23 +234,81 @@ impl<'a, 'p> Runner<'a, 'p> {
         ErrRecorded
     }
 
-    pub(super) fn define_top(&mut self, id: u32, val: RVal, span: Span) -> Result<(), ErrRecorded> {
-        let res = if let Some(mod_id) = self.active_module {
-            self.modules.set_env_slot(self.pool, mod_id, id, val, span)
-        } else {
-            self.globals.set(self.pool, id, val, span)
-        };
-        match res {
-            Ok(Some(p)) => {
-                self.pool.release_val(p);
-                Ok(())
-            }
-            Ok(None) => Ok(()),
-            Err(e) => {
+    pub(super) fn define_top(
+        &mut self,
+        id: u32,
+        val: RVal,
+        span: Span,
+        rule: &'static str,
+    ) -> Result<(), ErrRecorded> {
+        let name = self.syms.name(id).unwrap_or("?");
+        if id < STATIC_SYM_COUNT {
+            self.pool.release_val(val);
+            return Err(self.err_runtime_fmt(
+                rule,
+                span,
+                format_args!("cannot redefine builtin '{name}'"),
+            ));
+        }
+        if let Some(mod_id) = self.active_module {
+            if self.modules.env(mod_id).get(id).is_some() {
                 self.pool.release_val(val);
-                Err(e)
+                return Err(self.err_runtime_fmt(
+                    rule,
+                    span,
+                    format_args!("'{name}' is already defined"),
+                ));
+            }
+            match self.modules.set_env_slot(self.pool, mod_id, id, val, span) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    self.pool.release_val(val);
+                    Err(e)
+                }
+            }
+        } else {
+            if self.globals.get(id).is_some() {
+                self.pool.release_val(val);
+                return Err(self.err_runtime_fmt(
+                    rule,
+                    span,
+                    format_args!("'{name}' is already defined"),
+                ));
+            }
+            if self.modules.get_val(name).is_some() {
+                self.pool.release_val(val);
+                return Err(self.err_runtime_fmt(
+                    rule,
+                    span,
+                    format_args!("'{name}' conflicts with loaded module '{name}'"),
+                ));
+            }
+            if self
+                .added_globals
+                .push_work(&mut self.pool.work, &mut self.pool.core, id)
+                .is_none()
+            {
+                self.pool.release_val(val);
+                return Err(self.work_oom(span));
+            }
+            match self.globals.set(self.pool, id, val, span) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    self.added_globals.pop();
+                    self.pool.release_val(val);
+                    Err(e)
+                }
             }
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn rollback_added_globals(&mut self) {
+        for &id in self.added_globals.as_slice() {
+            self.globals.unset_no_alloc(self.pool, id);
+        }
+        self.added_globals.clear();
     }
 
     pub(super) fn release_slice(&mut self, vals: &[RVal]) {
@@ -338,20 +372,47 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     pub(super) fn run_top_chunk(&mut self, chunk: &Chunk) -> Result<RVal, ErrRecorded> {
+        self.run_top_chunk_with_locals(chunk, &[])
+    }
+
+    pub(super) fn run_top_chunk_with_locals(
+        &mut self,
+        chunk: &Chunk,
+        initial_vals: &[RVal],
+    ) -> Result<RVal, ErrRecorded> {
         let base = self.stack.len();
-        self.stack_resize_void(base + chunk.local_count as usize, Span::default())?;
+        let local_count = chunk.local_count as usize;
+        if local_count > 0 {
+            self.stack_reserve(local_count, Span::default())?;
+            for &val in initial_vals {
+                self.pool.retain_val(val);
+                let _ = self
+                    .stack
+                    .push_work(&mut self.pool.work, &mut self.pool.core, val);
+            }
+            let _ = self.stack.resize_work(
+                &mut self.pool.work,
+                &mut self.pool.core,
+                base + local_count,
+                RVal::Void,
+            );
+        }
         let frame = super::vm::RinFrame::new(
             FrameSource::Top(chunk),
             ObjSlice::empty(),
             base,
-            base + chunk.local_count as usize,
+            base + local_count,
             None,
             self.active_module,
             self.active_module,
             base,
             false,
         );
-        self.run_vm(frame)
+        let res = self.run_vm(frame);
+        if res.is_err() && !self.frozen && self.active_module.is_none() {
+            self.rollback_added_globals();
+        }
+        res
     }
 
     #[cold]

@@ -100,6 +100,8 @@ fn globals_builtins_modules_and_private_names() {
         m.eval("(import combat) combt").unwrap_err().message,
         "unknown name 'combt'; did you mean 'combat'?"
     );
+    // 失敗した評価の (import combat) は取り消されているため、明示的に import してから参照する。
+    m.eval("(import combat)").unwrap();
     assert_eq!(
         m.eval("combat.damge").unwrap_err().message,
         "module 'combat' has no export 'damge'; exports: attack"
@@ -187,7 +189,7 @@ fn field_and_export_lists_are_sorted_and_bounded() {
 }
 
 #[test]
-fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
+fn interned_names_from_failed_eval_do_not_become_global_hints() {
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
     // Interning an unexecuted definition does not make it a known global.
@@ -195,24 +197,23 @@ fn interned_names_and_reloaded_module_bindings_still_need_local_hints() {
         let err = m.eval("(let (damage 2) damge) (def damge 1)").unwrap_err();
         assert_eq!(err.message, "unknown name 'damge'; did you mean 'damage'?");
     }
-    // Also compile while the previous module environment still contains damage.
-    for _ in 0..2 {
-        m.load_module(
-            "combat",
-            "(def damage 1) (def saved (let (damge 2) (fn () damage))) (export saved)",
-        )
-        .unwrap();
-    }
+    m.load_module(
+        "combat",
+        "(def damage 1) (def saved (let (damge 2) (fn () damage))) (export saved)",
+    )
+    .unwrap();
+    // Reloading a successfully loaded module is rejected.
+    assert_eq!(
+        m.load_module("combat", "0").unwrap_err().rule(),
+        "expr.module"
+    );
     m.eval("(import combat) (def old combat.saved)").unwrap();
     assert_eq!(m.eval("(old)").unwrap(), Value::Int(1));
-    // Old closures survive reloading, but their module's definitions can disappear.
-    m.load_module("combat", "0").unwrap();
-    assert_eq!(
-        m.eval("(old)").unwrap_err().message,
-        "unknown name 'damage'; did you mean 'damge'?"
-    );
     m.bind("damage", &Value::Int(3)).unwrap();
-    assert_eq!(m.eval("(old)").unwrap(), Value::Int(3));
-    m.bind("damage", &Value::Int(4)).unwrap();
-    assert_eq!(m.eval("(old)").unwrap(), Value::Int(4));
+    // Module closure keeps reading its own module's damage = 1.
+    assert_eq!(m.eval("(old)").unwrap(), Value::Int(1));
+    assert_eq!(
+        m.bind("damage", &Value::Int(4)).unwrap_err().rule(),
+        "expr.def"
+    );
 }
