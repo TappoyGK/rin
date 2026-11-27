@@ -173,6 +173,12 @@ impl TypeEnv {
     }
 
     #[inline]
+    pub(crate) fn is_valid_type_id(&self, id: TypeId) -> bool {
+        let idx = id.0 as usize;
+        idx < PRIMITIVE_TYPE_COUNT || idx < self.types.len()
+    }
+
+    #[inline]
     pub(crate) fn get_type(&self, id: TypeId) -> PermTypeNode {
         let idx = id.0 as usize;
         if idx < self.types.len() {

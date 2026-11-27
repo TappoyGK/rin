@@ -35,6 +35,7 @@ pub(crate) enum InitialBindingNames<'a> {
     #[cfg(feature = "std-value")]
     Values(&'a [(&'a str, &'a str, crate::Value)]),
     Vals(&'a [(&'a str, &'a str, crate::Val)]),
+    TypedVals(&'a [(&'a str, crate::TypeHandle, crate::Val)]),
 }
 
 impl<'a> InitialBindingNames<'a> {
@@ -44,6 +45,7 @@ impl<'a> InitialBindingNames<'a> {
             #[cfg(feature = "std-value")]
             Self::Values(slice) => slice.len(),
             Self::Vals(slice) => slice.len(),
+            Self::TypedVals(slice) => slice.len(),
         }
     }
 
@@ -58,6 +60,7 @@ impl<'a> InitialBindingNames<'a> {
             #[cfg(feature = "std-value")]
             Self::Values(slice) => slice[idx].0,
             Self::Vals(slice) => slice[idx].0,
+            Self::TypedVals(slice) => slice[idx].0,
         }
     }
 }

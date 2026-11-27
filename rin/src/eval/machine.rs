@@ -37,6 +37,26 @@ impl<'a> Builder<'a> {
         self.inner.bind(name, type_expr, value)
     }
 
+    /// 事前解決済みの [`crate::TypeHandle`] 付きでホストの値を大域変数として束縛する。
+    #[cfg(feature = "std-value")]
+    pub fn bind_value_typed(
+        &mut self,
+        name: &str,
+        ty: crate::TypeHandle,
+        value: &Value,
+    ) -> Result<(), Error> {
+        let imported = match self.inner.pool.import(value, Span::default()) {
+            Ok(v) => Val(v),
+            Err(_) => return Err(self.inner.pool.core.error.to_owned_error()),
+        };
+        let res = self
+            .inner
+            .bind_typed_val(name, ty, imported)
+            .map_err(|e| e.to_error());
+        self.inner.pool.release_val(imported.0);
+        res
+    }
+
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
     #[cfg(feature = "std-value")]
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
@@ -122,6 +142,37 @@ impl<'a> Machine<'a> {
         bindings: &[(&str, &str, Value)],
     ) -> Result<Value, Error> {
         self.inner.eval_frozen(source, bindings)
+    }
+
+    /// 凍結した環境で、事前解決済みの [`crate::TypeHandle`] 付き初期束縛 `bindings` を与えてソースを評価する。
+    #[cfg(feature = "std-value")]
+    pub fn eval_with_typed(
+        &mut self,
+        source: &str,
+        bindings: &[(&str, crate::TypeHandle, Value)],
+    ) -> Result<Value, Error> {
+        let mut imported: Vec<(&str, crate::TypeHandle, Val)> = Vec::with_capacity(bindings.len());
+        for (name, ty, val) in bindings {
+            match self.inner.pool.import(val, Span::default()) {
+                Ok(rv) => imported.push((*name, *ty, Val(rv))),
+                Err(_) => {
+                    let err = self.inner.pool.core.error.to_owned_error();
+                    for (_, _, v) in imported {
+                        self.inner.pool.release_val(v.0);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        let res = self
+            .inner
+            .eval_frozen_typed_ref(source, &imported)
+            .map(|vr| vr.to_value())
+            .map_err(|e| e.to_error());
+        for (_, _, v) in imported {
+            self.inner.pool.release_val(v.0);
+        }
+        res
     }
 
     /// 定義済みの大域関数をソース再解析なしで直接呼び出す。

@@ -7,6 +7,7 @@
 // STEP 3 の評価パイプライン統合まではテストからのみ参照される項目があるため抑制。
 #![allow(dead_code, unused_imports)]
 
+mod api;
 mod boundary;
 mod builtins;
 mod checker;
@@ -14,6 +15,8 @@ mod checker;
 mod tests;
 mod types;
 mod work_types;
+
+pub use api::{FnSigRef, TypeHandle, TypeRef};
 
 pub(crate) use boundary::{
     check_rval_against_type, check_rval_against_type_expr, reject_fn_in_perm_type,

@@ -9,8 +9,31 @@ use crate::error::Span;
 use crate::value_ref::Val;
 
 use super::{
-    Rin, RinBinding, RinError, RinErrorKind, RinEvalResult, RinState, RinValue, begin_operation,
+    Rin, RinBinding, RinError, RinErrorKind, RinEvalResult, RinState, RinType, RinTypedBinding,
+    RinValue, begin_operation,
 };
+
+unsafe fn read_c_str<'a>(m: &mut Rin, ptr: *const c_char, label: &str) -> Option<&'a str> {
+    if ptr.is_null() {
+        m.record_host_error(label);
+        return None;
+    }
+    match unsafe { CStr::from_ptr(ptr) }.to_str() {
+        Ok(s) => Some(s),
+        Err(_) => {
+            m.record_host_error("invalid UTF-8 argument");
+            None
+        }
+    }
+}
+
+unsafe fn read_val(m: &mut Rin, ptr: *const RinValue, label: &str) -> Option<Val> {
+    if ptr.is_null() {
+        m.record_host_error(label);
+        return None;
+    }
+    Some(unsafe { (*ptr).0 })
+}
 
 const STACK_FFI_ARGS: usize = 16;
 
@@ -527,6 +550,393 @@ unsafe fn call_with_args(
         m.finish_eval_result()
     } else {
         RinEvalResult::failure()
+    }
+}
+
+/// 型式文字列を事前解決し、`*out` へ [`RinType`] を書き込む（読み込み段階のみ有効）。
+///
+/// # Safety
+/// `machine`・`type_expr`・`out` は有効なポインタ、`type_expr` は NUL 終端 UTF-8 であること。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_resolve_type(
+    machine: *mut Rin,
+    type_expr: *const c_char,
+    out: *mut RinType,
+) -> bool {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return false;
+    };
+    m.clear_error();
+    if out.is_null() {
+        m.record_host_error("rin_resolve_type: out is NULL");
+        return false;
+    }
+    let Some(ty_str) = (unsafe { read_c_str(m, type_expr, "rin_resolve_type: type_expr") }) else {
+        return false;
+    };
+    match m.state.as_mut().expect("Rin state present") {
+        RinState::Building(b) => match b.resolve_type(ty_str) {
+            Ok(handle) => {
+                unsafe { *out = RinType { id: handle.raw() } };
+                true
+            }
+            Err(e) => {
+                m.last_error.set_from_ref(e);
+                m.has_error = true;
+                false
+            }
+        },
+        RinState::Frozen(_) => {
+            m.record_simple_error(
+                "env.frozen",
+                RinErrorKind::Runtime,
+                Span::default(),
+                "cannot resolve new type on frozen Rin",
+            );
+            false
+        }
+    }
+}
+
+/// 事前解決済みの [`RinType`] を使って値を大域変数として束縛する。
+///
+/// # Safety
+/// `machine`・`name`・`val` は有効なポインタであること。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_bind_typed(
+    machine: *mut Rin,
+    name: *const c_char,
+    ty: RinType,
+    val: *const RinValue,
+) -> bool {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return false;
+    };
+    m.clear_error();
+    let Some(name_str) = (unsafe { read_c_str(m, name, "rin_bind_typed: name") }) else {
+        return false;
+    };
+    let Some(v) = (unsafe { read_val(m, val, "rin_bind_typed: val") }) else {
+        return false;
+    };
+    let handle = crate::TypeHandle::from_raw(ty.id);
+    match m.state.as_mut().expect("Rin state present") {
+        RinState::Building(b) => match b.bind_typed(name_str, handle, v) {
+            Ok(()) => true,
+            Err(e) => {
+                m.last_error.set_from_ref(e);
+                m.has_error = true;
+                false
+            }
+        },
+        RinState::Frozen(_) => {
+            m.record_simple_error(
+                "env.frozen",
+                RinErrorKind::Runtime,
+                Span::default(),
+                "cannot bind global variable on frozen Rin",
+            );
+            false
+        }
+    }
+}
+
+/// 凍結後の環境で、事前解決済みの [`RinTypedBinding`] を与えてソースを評価する。
+///
+/// # Safety
+/// `machine`・`source` は有効なポインタ、`bindings` は `binding_count` 個の有効な要素を指すこと。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_eval_with_typed(
+    machine: *mut Rin,
+    source: *const c_char,
+    bindings: *const RinTypedBinding,
+    binding_count: usize,
+) -> RinEvalResult {
+    let Some(m) = (unsafe { machine.as_mut() }) else {
+        return RinEvalResult::failure();
+    };
+    m.clear_error();
+    let Some(src) = (unsafe { read_c_str(m, source, "rin_eval_with_typed: source") }) else {
+        return RinEvalResult::failure();
+    };
+    if binding_count > 0 && bindings.is_null() {
+        m.record_host_error("rin_eval_with_typed: bindings is NULL");
+        return RinEvalResult::failure();
+    }
+    if matches!(m.state_ref(), RinState::Building(_)) {
+        m.record_simple_error(
+            "env.phase",
+            RinErrorKind::Runtime,
+            Span::default(),
+            "rin_eval_with_typed requires a frozen Rin; call rin_freeze first or use rin_build",
+        );
+        return RinEvalResult::failure();
+    }
+
+    type TypedEntry<'b> = (&'b str, crate::TypeHandle, Val);
+    let mut stack_buf: [TypedEntry<'_>; STACK_FFI_ARGS] =
+        [("", crate::TypeHandle::from_raw(0), Val::void()); STACK_FFI_ARGS];
+    let mut heap_ptr: Option<(NonNull<TypedEntry<'_>>, Layout)> = None;
+    let slice_mut: &mut [TypedEntry<'_>] = if binding_count <= STACK_FFI_ARGS {
+        &mut stack_buf[..binding_count]
+    } else {
+        let Some(layout) = Layout::array::<TypedEntry<'_>>(binding_count).ok() else {
+            m.record_simple_error(
+                "eval.limits",
+                RinErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            );
+            return RinEvalResult::failure();
+        };
+        let mut calloc = m.alloc;
+        let Some(ptr) = calloc.alloc(layout) else {
+            m.record_simple_error(
+                "eval.limits",
+                RinErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            );
+            return RinEvalResult::failure();
+        };
+        let typed = ptr.cast::<TypedEntry<'_>>();
+        heap_ptr = Some((typed, layout));
+        unsafe { std::slice::from_raw_parts_mut(typed.as_ptr(), binding_count) }
+    };
+
+    let mut filled = 0usize;
+    for i in 0..binding_count {
+        let entry = unsafe { &*bindings.add(i) };
+        let Some(bname) = (unsafe { read_c_str(m, entry.name, "rin_eval_with_typed: name") })
+        else {
+            for &(_, _, v) in &slice_mut[..filled] {
+                m.state_mut().release_val(v);
+            }
+            if let Some((p, layout)) = heap_ptr {
+                let mut calloc = m.alloc;
+                unsafe { calloc.dealloc(p.cast::<u8>(), layout) };
+            }
+            return RinEvalResult::failure();
+        };
+        let Some(v) = (unsafe { read_val(m, entry.value, "rin_eval_with_typed: value") }) else {
+            for &(_, _, v) in &slice_mut[..filled] {
+                m.state_mut().release_val(v);
+            }
+            if let Some((p, layout)) = heap_ptr {
+                let mut calloc = m.alloc;
+                unsafe { calloc.dealloc(p.cast::<u8>(), layout) };
+            }
+            return RinEvalResult::failure();
+        };
+        m.state_mut().retain_val(v);
+        slice_mut[i] = (bname, crate::TypeHandle::from_raw(entry.ty.id), v);
+        filled += 1;
+    }
+
+    let ok = match m.state.as_mut().expect("Rin state present") {
+        RinState::Frozen(f) => match f.eval_with_typed_vals(src, slice_mut) {
+            Ok(_) => true,
+            Err(e) => {
+                m.last_error.set_from_ref(e);
+                m.has_error = true;
+                false
+            }
+        },
+        RinState::Building(_) => unreachable!(),
+    };
+
+    for &(_, _, v) in &slice_mut[..filled] {
+        m.state_mut().release_val(v);
+    }
+    if let Some((p, layout)) = heap_ptr {
+        let mut calloc = m.alloc;
+        unsafe { calloc.dealloc(p.cast::<u8>(), layout) };
+    }
+
+    if ok {
+        m.finish_eval_result()
+    } else {
+        RinEvalResult::failure()
+    }
+}
+
+/// 大域関数 `defn` の仮引数個数を `*out_arity` へ書き込む。見つからない・NULL の場合は `false`。
+///
+/// # Safety
+/// `machine`・`fn_name`・`out_arity` は有効なポインタであること。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_fn_arity(
+    machine: *const Rin,
+    fn_name: *const c_char,
+    out_arity: *mut usize,
+) -> bool {
+    let Some(m) = (unsafe { machine.as_ref() }) else {
+        return false;
+    };
+    if fn_name.is_null() || out_arity.is_null() {
+        return false;
+    }
+    let Ok(name) = (unsafe { CStr::from_ptr(fn_name) }).to_str() else {
+        return false;
+    };
+    let sig = match m.state_ref() {
+        RinState::Building(b) => b.fn_sig(name),
+        RinState::Frozen(f) => f.fn_sig(name),
+    };
+    let Some(sig) = sig else {
+        return false;
+    };
+    unsafe { *out_arity = sig.param_count() };
+    true
+}
+
+/// モジュール公開関数 `defn` の仮引数個数を `*out_arity` へ書き込む。見つからない・NULL の場合は `false`。
+///
+/// # Safety
+/// `machine`・`mod_name`・`fn_name`・`out_arity` は有効なポインタであること。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_fn_arity_in(
+    machine: *const Rin,
+    mod_name: *const c_char,
+    fn_name: *const c_char,
+    out_arity: *mut usize,
+) -> bool {
+    let Some(m) = (unsafe { machine.as_ref() }) else {
+        return false;
+    };
+    if mod_name.is_null() || fn_name.is_null() || out_arity.is_null() {
+        return false;
+    }
+    let Ok(mname) = (unsafe { CStr::from_ptr(mod_name) }).to_str() else {
+        return false;
+    };
+    let Ok(fname) = (unsafe { CStr::from_ptr(fn_name) }).to_str() else {
+        return false;
+    };
+    let sig = match m.state_ref() {
+        RinState::Building(b) => b.fn_sig_in(mname, fname),
+        RinState::Frozen(f) => f.fn_sig_in(mname, fname),
+    };
+    let Some(sig) = sig else {
+        return false;
+    };
+    unsafe { *out_arity = sig.param_count() };
+    true
+}
+
+struct FixedBufWriter {
+    ptr: *mut u8,
+    cap: usize,
+    written: usize,
+    total: usize,
+}
+
+impl std::fmt::Write for FixedBufWriter {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        self.total = self.total.saturating_add(bytes.len());
+        if !self.ptr.is_null() && self.cap > 0 {
+            let max_content = self.cap - 1;
+            let avail = max_content.saturating_sub(self.written);
+            if avail > 0 {
+                let mut take = bytes.len().min(avail);
+                while take > 0 && !s.is_char_boundary(take) {
+                    take -= 1;
+                }
+                if take > 0 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            self.ptr.add(self.written),
+                            take,
+                        );
+                    }
+                    self.written += take;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn format_sig_to_c_buf(sig: crate::FnSigRef<'_>, out_buf: *mut c_char, out_cap: usize) -> usize {
+    use std::fmt::Write as _;
+    let mut w = FixedBufWriter {
+        ptr: out_buf.cast::<u8>(),
+        cap: out_cap,
+        written: 0,
+        total: 0,
+    };
+    let _ = write!(&mut w, "{sig}");
+    if !out_buf.is_null() && out_cap > 0 {
+        unsafe { *out_buf.add(w.written) = 0 };
+    }
+    w.total
+}
+
+/// 大域関数 `defn` のシグネチャを `out_buf`（最大 `out_cap` バイト、NUL 終端）へ書き出し、必要なバイト数（NUL 除く）を返す。
+/// 関数が存在しない場合は `0` を返す。
+///
+/// # Safety
+/// `machine`・`fn_name` は有効なポインタ、`out_cap > 0` のときは `out_buf` が有効であること。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_fn_sig_format(
+    machine: *const Rin,
+    fn_name: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let Some(m) = (unsafe { machine.as_ref() }) else {
+        return 0;
+    };
+    if fn_name.is_null() {
+        return 0;
+    }
+    let Ok(name) = (unsafe { CStr::from_ptr(fn_name) }).to_str() else {
+        return 0;
+    };
+    let sig = match m.state_ref() {
+        RinState::Building(b) => b.fn_sig(name),
+        RinState::Frozen(f) => f.fn_sig(name),
+    };
+    match sig {
+        Some(s) => format_sig_to_c_buf(s, out_buf, out_cap),
+        None => 0,
+    }
+}
+
+/// モジュール公開関数 `defn` のシグネチャを `out_buf`（最大 `out_cap` バイト、NUL 終端）へ書き出し、必要なバイト数（NUL 除く）を返す。
+/// 関数が存在しない場合は `0` を返す。
+///
+/// # Safety
+/// `machine`・`mod_name`・`fn_name` は有効なポインタ、`out_cap > 0` のときは `out_buf` が有効であること。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rin_fn_sig_format_in(
+    machine: *const Rin,
+    mod_name: *const c_char,
+    fn_name: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let Some(m) = (unsafe { machine.as_ref() }) else {
+        return 0;
+    };
+    if mod_name.is_null() || fn_name.is_null() {
+        return 0;
+    }
+    let Ok(mname) = (unsafe { CStr::from_ptr(mod_name) }).to_str() else {
+        return 0;
+    };
+    let Ok(fname) = (unsafe { CStr::from_ptr(fn_name) }).to_str() else {
+        return 0;
+    };
+    let sig = match m.state_ref() {
+        RinState::Building(b) => b.fn_sig_in(mname, fname),
+        RinState::Frozen(f) => f.fn_sig_in(mname, fname),
+    };
+    match sig {
+        Some(s) => format_sig_to_c_buf(s, out_buf, out_cap),
+        None => 0,
     }
 }
 

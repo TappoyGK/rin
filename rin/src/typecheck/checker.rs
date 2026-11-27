@@ -158,7 +158,7 @@ pub(crate) fn resolve_type_expr_perm<'a, 'alloc>(
         core,
         wpool,
         opts: CheckOptions {
-            frozen: false,
+            frozen: true,
             strict_defn_annotations: true,
             module_name: None,
             test_mode: false,

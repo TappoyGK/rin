@@ -189,6 +189,149 @@ fn host_boundary_type_validation() {
 }
 
 #[test]
+fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module(
+        "combat",
+        r#"
+(defschema Ctx (struct Ctx (atk i64) (crit bool)))
+(defn calc ((ctx Ctx) (bonus i64)) -> i64 (if ctx.crit (* ctx.atk 2) (+ ctx.atk bonus)))
+(def version 3)
+"#,
+    )
+    .unwrap();
+    b.eval(
+        r#"
+(import combat)
+(defschema Wrap (struct Wrap (ctx combat.Ctx)))
+(defn entry ((w Wrap)) -> (option i64) some(w.ctx.atk))
+"#,
+    )
+    .unwrap();
+
+    // 事前解決 TypeHandle（有効・無効・fn 型拒否）
+    let ty_i64 = b.resolve_type("i64").unwrap();
+    let ty_ctx = b.resolve_type("combat.Ctx").unwrap();
+    assert_eq!(
+        b.resolve_type("(fn (i64) i64)").unwrap_err().rule(),
+        "type.boundary"
+    );
+    let v10 = b.val_int(10);
+    b.bind_typed("k", ty_i64, v10).unwrap();
+    b.release_val(v10);
+
+    // Builder 段階でのシグネチャ・型照会
+    let sig_mod = b.fn_sig_in("combat", "calc").unwrap();
+    assert_eq!(sig_mod.param_count(), 2);
+    assert_eq!(sig_mod.param_name(0), Some("ctx"));
+    assert_eq!(sig_mod.param_type(0).unwrap().to_string(), "combat.Ctx");
+    assert_eq!(sig_mod.param_name(1), Some("bonus"));
+    assert_eq!(sig_mod.param_type(1).unwrap().to_string(), "i64");
+    assert_eq!(sig_mod.ret_type().to_string(), "i64");
+    assert_eq!(sig_mod.to_string(), "((ctx combat.Ctx) (bonus i64)) -> i64");
+    assert_eq!(
+        b.type_of_in("combat", "version").unwrap().to_string(),
+        "i64"
+    );
+    assert!(b.fn_sig_in("combat", "version").is_none());
+
+    let mut m = b.freeze().unwrap();
+
+    // Machine 段階でのシグネチャ・型照会
+    let sig_root = m.fn_sig("entry").unwrap();
+    assert_eq!(sig_root.param_count(), 1);
+    assert_eq!(sig_root.param_name(0), Some("w"));
+    assert_eq!(sig_root.param_type(0).unwrap().to_string(), "Wrap");
+    assert_eq!(sig_root.ret_type().to_string(), "(option i64)");
+    assert_eq!(sig_root.to_string(), "((w Wrap)) -> (option i64)");
+    assert_eq!(m.type_of("k").unwrap().to_string(), "i64");
+
+    // 事前解決 TypeHandle を使った反復 eval_with_typed / eval_with_typed_vals
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("atk".to_string(), Value::Int(12));
+    fields.insert("crit".to_string(), Value::Bool(true));
+    let ctx_val = Value::structure("Ctx", fields);
+    assert_eq!(
+        m.eval_with_typed(
+            "(+ (combat.calc c k) n)",
+            &[("c", ty_ctx, ctx_val.clone()), ("n", ty_i64, Value::Int(5))],
+        )
+        .unwrap(),
+        Value::Int(29)
+    );
+    // 型不一致は type.boundary
+    let err = m
+        .eval_with_typed("(+ n k)", &[("n", ty_i64, Value::text("bad"))])
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // C FFI での rin_resolve_type / rin_bind_typed / rin_eval_with_typed / rin_fn_arity / rin_fn_sig_format
+    use rin::ffi::*;
+    unsafe {
+        let r = rin_new(
+            rin_limits_default(),
+            RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: None,
+                dealloc: None,
+            },
+        );
+        assert!(
+            rin_load(
+                r,
+                c"m".as_ptr(),
+                c"(defn add ((a i64) (b i64)) -> i64 (+ a b))".as_ptr()
+            )
+            .ok
+        );
+        let mut ty = RinType { id: 0 };
+        assert!(rin_resolve_type(r, c"i64".as_ptr(), &mut ty));
+        let v7 = rin_int(r, 7);
+        assert!(rin_bind_typed(r, c"base".as_ptr(), ty, v7));
+        rin_drop(r, v7);
+
+        let mut arity = 0usize;
+        assert!(rin_fn_arity_in(
+            r,
+            c"m".as_ptr(),
+            c"add".as_ptr(),
+            &mut arity
+        ));
+        assert_eq!(arity, 2);
+        let mut buf = [0u8; 64];
+        let needed = rin_fn_sig_format_in(
+            r,
+            c"m".as_ptr(),
+            c"add".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        );
+        assert!(needed > 0 && needed < buf.len());
+        let sig_c = std::ffi::CStr::from_ptr(buf.as_ptr().cast())
+            .to_str()
+            .unwrap();
+        assert_eq!(sig_c, "((a i64) (b i64)) -> i64");
+
+        assert!(rin_freeze(r));
+        let vx = rin_int(r, 3);
+        let binding = RinTypedBinding {
+            name: c"x".as_ptr(),
+            ty,
+            value: vx,
+        };
+        let res = rin_eval_with_typed(r, c"(m.add base x)".as_ptr(), &binding, 1);
+        assert!(res.ok);
+        let mut out_i = 0i64;
+        assert!(rin_as_int(r, res.value, &mut out_i));
+        assert_eq!(out_i, 10);
+        rin_drop(r, vx);
+        rin_free(r);
+    }
+}
+
+#[test]
 fn type_expr_nesting_limit_enforced() {
     let mut src = String::from("(defschema Deep (struct Deep (x ");
     for _ in 0..260 {

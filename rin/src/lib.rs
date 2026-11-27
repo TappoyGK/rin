@@ -38,6 +38,7 @@ pub use math::MathFma;
 pub use mem::{MemoryConfig, RegionConfig};
 #[cfg(feature = "std-value")]
 pub use schema::Schema;
+pub use typecheck::{FnSigRef, TypeHandle, TypeRef};
 #[cfg(feature = "std-value")]
 pub use value::Value;
 pub use value_ref::{ListIter, SliceView, StructRef, Val, ValueRef, ValueTag, VariantRef};

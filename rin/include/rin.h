@@ -104,11 +104,21 @@ typedef struct RinError {
 /* rin_eval_with に渡す 1 件の初期束縛。
  * name と type_expr は NUL 終端の UTF-8、value は同じ Rin で生成した有効な RinValue。
  */
+typedef struct RinType {
+    uint32_t id;
+} RinType;
+
 typedef struct RinBinding {
     const char *name;
     const char *type_expr;
     const RinValue *value;
 } RinBinding;
+
+typedef struct RinTypedBinding {
+    const char *name;
+    RinType ty;
+    const RinValue *value;
+} RinTypedBinding;
 
 /* value は Rin が所有する借用ポインタ。同じ Rin に対する次の評価・呼び出し・解放まで有効。
  * rin_load 成功時と失敗時は NULL。ホスト側で解放してはならない。
@@ -126,16 +136,23 @@ void rin_free(Rin *rin);
 bool rin_freeze(Rin *rin);
 bool rin_set_math_fma(Rin *rin, RinMathFma mode);
 RinMathFma rin_math_fma(const Rin *rin);
+bool rin_resolve_type(Rin *rin, const char *type_expr, RinType *out);
 bool rin_bind(Rin *rin, const char *name, const char *type_expr, const RinValue *val);
+bool rin_bind_typed(Rin *rin, const char *name, RinType ty, const RinValue *val);
 RinEvalResult rin_build(Rin *rin, const char *source);
 RinEvalResult rin_eval(Rin *rin, const char *source);
 /* bindings は binding_count 個の有効な RinBinding を指すこと（binding_count == 0 なら NULL 可）。
  * binding_count > 0 で bindings == NULL、要素の name/value が NULL、または name が不正 UTF-8 なら RIN_ERR_HOST。
  */
 RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count);
+RinEvalResult rin_eval_with_typed(Rin *rin, const char *source, const RinTypedBinding *bindings, size_t binding_count);
 RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source);
 RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc);
 RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc);
+bool rin_fn_arity(const Rin *rin, const char *fn_name, size_t *out_arity);
+bool rin_fn_arity_in(const Rin *rin, const char *mod_name, const char *fn_name, size_t *out_arity);
+size_t rin_fn_sig_format(const Rin *rin, const char *fn_name, char *out_buf, size_t out_cap);
+size_t rin_fn_sig_format_in(const Rin *rin, const char *mod_name, const char *fn_name, char *out_buf, size_t out_cap);
 /* 直近の対象操作のエラー。エラーなし、または rin == NULL なら NULL。
  * ポインタと文字列は同じ rin の次の評価・呼び出し・状態変更操作（rin_build / rin_eval /
  * rin_eval_with / rin_load / rin_call / rin_call_in / rin_bind / rin_freeze /
