@@ -457,7 +457,10 @@ impl<'a> Lexer<'a> {
                     braces.push(BraceEntry::single());
                     return Ok(TokenKind::TemplateStart(out));
                 }
-                b'\\' => out.push(self.lex_escape(span)?),
+                b'\\' => {
+                    let esc_span = Span::new(self.line, self.col - 1);
+                    out.push(self.lex_escape(esc_span)?);
+                }
                 _ if b < 0x80 => out.push(b as char),
                 _ => {
                     let start = self.pos - 1;

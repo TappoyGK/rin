@@ -530,7 +530,8 @@ impl Lexer<'_> {
                     {
                         return Err(core.err_oom(span));
                     }
-                    let ch = self.lex_work_escape(span, core)?;
+                    let esc_span = Span::new(self.line, self.col - 1);
+                    let ch = self.lex_work_escape(esc_span, core)?;
                     let mut enc = [0u8; 4];
                     let bytes = ch.encode_utf8(&mut enc).as_bytes();
                     if buf.extend_from_slice_work(work, core, bytes).is_none() {

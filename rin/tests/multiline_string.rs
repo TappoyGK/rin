@@ -190,6 +190,25 @@ fn multiline_errors_and_spans() {
     assert_eq!(err.at.line, 4);
     assert_eq!(err.at.col, 9);
 
+    // 1 行文字列内のエスケープエラーも `\` の位置を指す
+    for (src, line, col) in [
+        ("(def a 1)\n\"x\\q\"", 2, 3),
+        ("(def a 1)\n\"ab \\u{110000}\"", 2, 5),
+        ("(def a 1)\n\"${1} \\q\"", 2, 7),
+        ("(def a 1)\n(list \\a \"\\q\")", 2, 11),
+    ] {
+        let err = eval(src).unwrap_err();
+        assert_eq!(err.rule(), "src.escape", "{src:?}: {err}");
+        assert_eq!((err.at.line, err.at.col), (line, col), "{src:?}: {err}");
+        let ferr = rin::fmt::format(src).unwrap_err();
+        assert_eq!(ferr.rule(), "src.escape", "fmt {src:?}: {ferr}");
+        assert_eq!(
+            (ferr.at.line, ferr.at.col),
+            (line, col),
+            "fmt {src:?}: {ferr}"
+        );
+    }
+
     // 未閉鎖の複数行文字列
     let err = eval("\"\"\"\n  hello\n").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Lex);
