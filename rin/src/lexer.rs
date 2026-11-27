@@ -337,6 +337,11 @@ impl<'a> Lexer<'a> {
             b'$' => Ok('$'),
             b'0' => Ok('\0'),
             b'u' => self.lex_unicode_escape(span),
+            b'\n' | b'\r' => Err(Error::lex(
+                "src.escape",
+                span,
+                "unknown escape sequence '\\' at end of line",
+            )),
             _ => {
                 let ch = self.char_at(esc_pos);
                 for _ in 1..ch.len_utf8() {
@@ -645,7 +650,10 @@ impl<'a> Lexer<'a> {
                     braces.push(BraceEntry::multiline(ctx));
                     return Ok(TokenKind::TemplateStart(out));
                 }
-                b'\\' => out.push(self.lex_escape(span)?),
+                b'\\' => {
+                    let esc_span = Span::new(self.line, self.col - 1);
+                    out.push(self.lex_escape(esc_span)?);
+                }
                 _ if b < 0x80 => out.push(b as char),
                 _ => {
                     let start = self.pos - 1;

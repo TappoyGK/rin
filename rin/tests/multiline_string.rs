@@ -153,10 +153,42 @@ fn multiline_errors_and_spans() {
     assert_eq!(err.kind, ErrorKind::Lex);
     assert_eq!(err.rule(), "src.string");
 
-    // 行末のバックスラッシュによる行継続は未知のエスケープ
-    let err = eval("\"\"\"\n  a\\\n  b\n  \"\"\"").unwrap_err();
+    // 行末のバックスラッシュによる行継続は未知のエスケープ（位置は `\`、メッセージに生の改行を含めない）
+    let src = "\"\"\"\n  a\\\n  b\n  \"\"\"";
+    let err = eval(src).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Lex);
     assert_eq!(err.rule(), "src.escape");
+    assert_eq!(err.at.line, 2);
+    assert_eq!(err.at.col, 4);
+    assert!(!err.message.contains('\n'), "msg: {:?}", err.message);
+    assert!(
+        err.message.contains("at end of line"),
+        "msg: {}",
+        err.message
+    );
+    let ferr = rin::fmt::format(src).unwrap_err();
+    assert_eq!(ferr.rule(), "src.escape");
+    assert_eq!(ferr.at.line, 2);
+    assert_eq!(ferr.at.col, 4);
+    assert!(!ferr.message.contains('\n'), "fmt msg: {:?}", ferr.message);
+
+    // 複数行文字列内のエスケープエラー位置は `\` の位置を指す
+    let src = "(def a 1)\n\"\"\"\n  line1\n  line2 \\q\n  \"\"\"";
+    let err = eval(src).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Lex);
+    assert_eq!(err.rule(), "src.escape");
+    assert_eq!(err.at.line, 4);
+    assert_eq!(err.at.col, 9);
+    let ferr = rin::fmt::format(src).unwrap_err();
+    assert_eq!(ferr.at.line, 4);
+    assert_eq!(ferr.at.col, 9);
+
+    let src = "(def a 1)\n\"\"\"\n  line1\n  line2 \\u{110000}\n  \"\"\"";
+    let err = eval(src).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Lex);
+    assert_eq!(err.rule(), "src.escape");
+    assert_eq!(err.at.line, 4);
+    assert_eq!(err.at.col, 9);
 
     // 未閉鎖の複数行文字列
     let err = eval("\"\"\"\n  hello\n").unwrap_err();

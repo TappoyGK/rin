@@ -198,6 +198,12 @@ impl Lexer<'_> {
             b'$' => Ok('$'),
             b'0' => Ok('\0'),
             b'u' => self.lex_work_unicode_escape(span, core),
+            b'\n' | b'\r' => Err(core.err_str(
+                "src.escape",
+                ErrorKind::Lex,
+                span,
+                "unknown escape sequence '\\' at end of line",
+            )),
             _ => {
                 let ch = self.char_at(esc_pos);
                 for _ in 1..ch.len_utf8() {
@@ -796,7 +802,8 @@ impl Lexer<'_> {
                     }
                 }
                 b'\\' => {
-                    let ch = self.lex_work_escape(span, core)?;
+                    let esc_span = Span::new(self.line, self.col - 1);
+                    let ch = self.lex_work_escape(esc_span, core)?;
                     let mut enc = [0u8; 4];
                     let bytes = ch.encode_utf8(&mut enc).as_bytes();
                     if buf.extend_from_slice_work(work, core, bytes).is_none() {
