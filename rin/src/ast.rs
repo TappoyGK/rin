@@ -30,16 +30,111 @@ pub struct VariantExpr {
     pub data: Option<WorkBox<Expr>>,
 }
 
+// 型 AST フィールドは STEP 2 の型検査器から参照する（--no-default-features では fmt が無効なため dead_code を抑制）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct TypeExpr {
+    pub span: Span,
+    pub kind: TypeExprKind,
+}
+
+impl TypeExpr {
+    pub fn new(span: Span, kind: TypeExprKind) -> Self {
+        Self { span, kind }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum TypeExprKind {
+    Void,
+    I64,
+    F64,
+    Bool,
+    Char,
+    Text,
+    Ident,
+    Datum,
+    List(WorkBox<TypeExpr>),
+    Array(WorkBox<TypeExpr>),
+    Option(WorkBox<TypeExpr>),
+    Result {
+        ok: WorkBox<TypeExpr>,
+        err: WorkBox<TypeExpr>,
+    },
+    Tuple(RawVec<TypeExpr>),
+    Fn {
+        params: RawVec<TypeExpr>,
+        ret: WorkBox<TypeExpr>,
+    },
+    Named {
+        module: Option<RawStr>,
+        name: RawStr,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct VariantCaseDef {
+    pub span: Span,
+    pub name: RawStr,
+    pub payload: Option<WorkBox<TypeExpr>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum SchemaBody {
+    Struct {
+        open: bool,
+        type_name: RawStr,
+        fields: RawVec<(RawStr, TypeExpr)>,
+    },
+    Variant {
+        type_name: RawStr,
+        cases: RawVec<VariantCaseDef>,
+    },
+    CloneOf {
+        module: Option<RawStr>,
+        name: RawStr,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct DefSchemaExpr {
+    pub name: RawStr,
+    pub body: SchemaBody,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct Param {
+    pub name: RawStr,
+    pub ty: Option<WorkBox<TypeExpr>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DefExpr {
+    pub name: RawStr,
+    #[allow(dead_code)]
+    pub ty: Option<WorkBox<TypeExpr>>,
+    pub value: WorkBox<Expr>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DefnExpr {
     pub name: RawStr,
-    pub params: RawVec<RawStr>,
+    pub params: RawVec<Param>,
+    #[allow(dead_code)]
+    pub ret_ty: Option<WorkBox<TypeExpr>>,
     pub body: RawVec<Expr>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct FnExpr {
-    pub params: RawVec<RawStr>,
+    pub params: RawVec<Param>,
+    #[allow(dead_code)]
+    pub ret_ty: Option<WorkBox<TypeExpr>>,
     pub body: RawVec<Expr>,
 }
 
@@ -106,10 +201,8 @@ pub enum ExprKind {
         target: WorkBox<Expr>,
         fields: RawVec<(RawStr, Expr)>,
     },
-    Def {
-        name: RawStr,
-        value: WorkBox<Expr>,
-    },
+    Def(WorkBox<DefExpr>),
+    DefSchema(#[allow(dead_code)] WorkBox<DefSchemaExpr>),
     Import {
         name: RawStr,
     },
@@ -146,6 +239,17 @@ pub struct MatchArm {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatumTypePat {
+    I64,
+    F64,
+    Bool,
+    Char,
+    Text,
+    Ident,
+    List,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pattern {
     Wildcard,
     Int(i64),
@@ -157,7 +261,12 @@ pub enum Pattern {
     Some(Option<RawStr>),
     Ok(Option<RawStr>),
     Err(Option<RawStr>),
+    DatumType {
+        kind: DatumTypePat,
+        binding: Option<RawStr>,
+    },
     Variant {
+        module: Option<RawStr>,
         type_name: RawStr,
         variant: RawStr,
         binding: Option<RawStr>,
@@ -174,10 +283,10 @@ pub(crate) fn children<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         ExprKind::Fn(f) => out.extend(f.body.as_slice()),
         ExprKind::Defn(d) => out.extend(d.body.as_slice()),
         ExprKind::Struct(s) => out.extend(s.fields.as_slice().iter().map(|(_, e)| e)),
+        ExprKind::Def(d) => out.push(d.value.as_ref()),
         ExprKind::Some(x)
         | ExprKind::Ok(x)
         | ExprKind::Err(x)
-        | ExprKind::Def { value: x, .. }
         | ExprKind::Field { target: x, .. } => out.push(x.as_ref()),
         ExprKind::Variant(v) => {
             if let Some(d) = &v.data {

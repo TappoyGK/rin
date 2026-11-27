@@ -7,13 +7,15 @@ mod frames;
 mod pattern;
 mod primary;
 mod resume;
+mod type_expr;
 use frames::*;
 
 #[cfg(feature = "std-value")]
 use crate::alloc::HeapAllocator;
 use crate::ast::{
-    Datum, DatumKind, DefnExpr, Expr, ExprKind, FnExpr, LetExpr, MatchArm, Pattern, StructExpr,
-    VariantExpr,
+    Datum, DatumKind, DatumTypePat, DefExpr, DefSchemaExpr, DefnExpr, Expr, ExprKind, FnExpr,
+    LetExpr, MatchArm, Param, Pattern, SchemaBody, StructExpr, TypeExpr, TypeExprKind,
+    VariantCaseDef, VariantExpr,
 };
 #[cfg(feature = "std-value")]
 use crate::error::Error;

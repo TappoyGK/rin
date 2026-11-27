@@ -7,14 +7,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let last = i + 1 == exprs.len();
             let span = expr.span;
             match &expr.kind {
-                ExprKind::Def { name, value } => {
+                ExprKind::Def(d) => {
+                    let d = d.as_ref();
                     if self.frozen {
                         return Err(self.fail_decl("def", span));
                     }
                     self.push_tick_span(span)?;
-                    self.compile_expr_shallow(value.as_ref(), false, 1)?;
-                    let n_idx = self.intern_sym(name.as_str(), span)?;
+                    self.compile_expr_shallow(d.value.as_ref(), false, 1)?;
+                    let n_idx = self.intern_sym(d.name.as_str(), span)?;
                     self.emit(Op::DefGlobal(n_idx), span)?;
+                }
+                ExprKind::DefSchema(_) => {
+                    if self.frozen {
+                        return Err(self.fail_decl("defschema", span));
+                    }
+                    self.emit_raw(Op::Void, span)?;
                 }
                 ExprKind::Defn(d) => {
                     let d = d.as_ref();
@@ -35,8 +42,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     let defn_work_mark =
                         (!self.frozen).then(|| self.pool.work.mark(&self.pool.core));
                     let mut inner = self.new_scope();
-                    for &p in params {
-                        inner.alloc_slot(self.pool, p, span)?;
+                    for p in params {
+                        inner.alloc_slot(self.pool, p.name, span)?;
                     }
                     self.push_scope(inner, span)?;
                     self.compile_body_shallow(d.body.as_slice(), true, 1)?;
@@ -290,8 +297,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 self.compile_expr_shallow(index.as_ref(), false, depth + 1)?;
                 self.emit(Op::GetIndex, span)?;
             }
-            ExprKind::Def { .. } => {
+            ExprKind::Def(_) => {
                 return Err(self.fail_decl("def", span));
+            }
+            ExprKind::DefSchema(_) => {
+                return Err(self.fail_decl("defschema", span));
             }
             ExprKind::Defn(_) => {
                 return Err(self.fail_decl("defn", span));
@@ -303,8 +313,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return Err(self.fail_parse("compile.capacity", span, "too many parameters"));
                 };
                 let mut inner = self.new_scope();
-                for &p in params {
-                    inner.alloc_slot(self.pool, p, span)?;
+                for p in params {
+                    inner.alloc_slot(self.pool, p.name, span)?;
                 }
                 self.push_scope(inner, span)?;
                 self.compile_body_shallow(f.body.as_slice(), true, depth + 1)?;

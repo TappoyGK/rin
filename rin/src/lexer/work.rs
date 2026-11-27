@@ -39,9 +39,36 @@ pub(crate) struct WorkToken {
     pub attached: bool,
 }
 
+/// `WorkLexer` の位置スナップショット（`(def name TypeExpr? expr)` の先読み復元用）。
+#[derive(Clone, Copy)]
+pub(crate) struct WorkLexerState {
+    pos: usize,
+    line: usize,
+    col: usize,
+    braces_len: usize,
+}
+
 /// 作業領域 `WorkArena` 向けのストリーミング字句解析器（トークン配列を確保せず 1 トークンずつ返す）。
 pub(crate) struct WorkLexer<'a> {
     inner: Lexer<'a>,
+}
+
+impl WorkLexer<'_> {
+    pub(crate) fn save_state(&self) -> WorkLexerState {
+        WorkLexerState {
+            pos: self.inner.pos,
+            line: self.inner.line,
+            col: self.inner.col,
+            braces_len: self.inner.work_braces.len(),
+        }
+    }
+
+    pub(crate) fn restore_state(&mut self, state: WorkLexerState) {
+        self.inner.pos = state.pos;
+        self.inner.line = state.line;
+        self.inner.col = state.col;
+        self.inner.work_braces.truncate(state.braces_len);
+    }
 }
 
 impl<'a> WorkLexer<'a> {

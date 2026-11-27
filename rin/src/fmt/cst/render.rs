@@ -40,7 +40,7 @@ impl Cst<'_> {
 
     fn definition(&self, id: usize) -> bool {
         let start = self.nodes[id].range.start;
-        self.tokens.get(start+1).is_some_and(|(t,_)| matches!(&t.kind, TokenKind::Ident(n) if matches!(n.as_str(), "def" | "defn" | "deftest")))
+        self.tokens.get(start+1).is_some_and(|(t,_)| matches!(&t.kind, TokenKind::Ident(n) if matches!(n.as_str(), "def" | "defn" | "defschema" | "deftest")))
             && self.tokens.get(start).is_some_and(|(t,_)| t.kind==TokenKind::LParen)
     }
     pub(in crate::fmt) fn render_root(&self, out: &mut Output) {

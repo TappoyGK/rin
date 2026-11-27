@@ -61,7 +61,7 @@ Rin は次のものを含まない。
 **[src.keywords]** 次の語は予約語または特殊リテラルである。
 
 ```text
-def defn fn let if when match with import export
+def defn defschema fn let if when match with import export
 quote quasiquote unquote unquote_splicing
 tuple field index variant struct
 true false none some ok err inf nan
@@ -448,10 +448,22 @@ true false none some ok err inf nan
 ```ebnf
 Program    ::= TopItem* EOF
 TopItem    ::= Decl | Expr
-Decl       ::= "(" "def" IDENT Expr ")"
-             | "(" "defn" IDENT "(" IDENT* ")" Expr+ ")"
+Decl       ::= "(" "def" IDENT TypeExpr? Expr ")"
+             | "(" "defn" IDENT "(" Param* ")" ( "->" TypeExpr )? Expr+ ")"
+             | "(" "defschema" UpperIdent SchemaBody ")"
              | "(" "import" IDENT ")"
              | "(" "export" IDENT* ")"
+SchemaBody ::= "(" ( "struct" | "open_struct" ) UpperIdent ( "(" IDENT TypeExpr ")" )* ")"
+             | "(" "variant" UpperIdent ( "(" UpperIdent TypeExpr? ")" )* ")"
+             | ( IDENT "." )? UpperIdent
+TypeExpr   ::= "void" | "i64" | "f64" | "bool" | "char" | "text" | "ident" | "datum"
+             | ( IDENT "." )? UpperIdent
+             | "(" ( "list" | "array" | "option" ) TypeExpr ")"
+             | "(" "result" TypeExpr TypeExpr ")"
+             | "(" "tuple" TypeExpr TypeExpr+ ")"
+             | "(" "fn" "(" TypeExpr* ")" TypeExpr ")"
+TypedParam ::= "(" IDENT TypeExpr ")"
+Param      ::= IDENT | TypedParam
 Expr       ::= Primary ( "." IDENT | "[" Expr "]" )*
 Primary    ::= INT | FLOAT | STRING | Template | CHAR
              | "true" | "false" | "none" | "inf" | "nan"
@@ -465,7 +477,7 @@ Primary    ::= INT | FLOAT | STRING | Template | CHAR
              | IDENT
 Template   ::= '"' TextPart ( "${" Expr "}" TextPart )+ '"'
              | '"""' Newline MultiTextPart ( "${" Expr "}" MultiTextPart )+ '"""'
-SpecialForm ::= "(" "fn" "(" IDENT* ")" Expr+ ")"
+SpecialForm ::= "(" "fn" "(" Param* ")" ( "->" TypeExpr )? Expr+ ")"
               | "(" "let" "(" ( IDENT Expr )* ")" Expr+ ")"
               | "(" "if" Expr Expr Expr ")"
               | "(" "when" Expr Expr+ ")"
@@ -480,7 +492,8 @@ SpecialForm ::= "(" "fn" "(" IDENT* ")" Expr+ ")"
               | "(" ( "quote" | "quasiquote" ) Datum ")"
 Pattern    ::= "_" | INT | STRING | CHAR | "'" IDENT | "true" | "false" | "none"
              | ( "some" | "ok" | "err" ) "(" ( IDENT | "_" ) ")"
-             | UpperIdent "." IDENT ( "(" ( IDENT | "_" ) ")" )?
+             | ( "i64" | "f64" | "bool" | "char" | "text" | "ident" | "list" ) "(" ( IDENT | "_" ) ")"
+             | ( IDENT "." )? UpperIdent "." IDENT ( "(" ( IDENT | "_" ) ")" )?
              | IDENT
 (* STRING は埋め込みのない文字列リテラル。Pattern・DatumPrimary では Template を許さない *)
 Datum      ::= DatumPrimary ( "." IDENT | "[" Datum "]" )*

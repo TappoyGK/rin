@@ -522,11 +522,17 @@ fn copy_pattern_to_code(pool: &mut Pool<'_>, region: CodeRegion, pat: Pattern) -
         Pattern::Some(b) => Pattern::Some(copy_opt_str(pool, region, b)?),
         Pattern::Ok(b) => Pattern::Ok(copy_opt_str(pool, region, b)?),
         Pattern::Err(b) => Pattern::Err(copy_opt_str(pool, region, b)?),
+        Pattern::DatumType { kind, binding } => Pattern::DatumType {
+            kind,
+            binding: copy_opt_str(pool, region, binding)?,
+        },
         Pattern::Variant {
+            module,
             type_name,
             variant,
             binding,
         } => Pattern::Variant {
+            module: copy_opt_str(pool, region, module)?,
             type_name: pool.alloc_code_str(region, type_name.as_str())?,
             variant: pool.alloc_code_str(region, variant.as_str())?,
             binding: copy_opt_str(pool, region, binding)?,

@@ -341,12 +341,18 @@ impl Parser<'_, '_, '_> {
                     1 + depth,
                 ))
             }
-            ParseFrame::Def { start, name } => {
+            ParseFrame::Def {
+                start,
+                name,
+                ty,
+                ty_depth,
+            } => {
                 self.expect(WorkTokenKind::RParen, "')'")?;
                 let value = self.alloc_box(expr, start)?;
+                let def = self.alloc_box(DefExpr { name, ty, value }, start)?;
                 Ok(NextStep::HaveExpr(
-                    Expr::new(start, ExprKind::Def { name, value }),
-                    1 + depth,
+                    Expr::new(start, ExprKind::Def(def)),
+                    1 + depth.max(ty_depth),
                 ))
             }
             ParseFrame::Body(mut bf) => {

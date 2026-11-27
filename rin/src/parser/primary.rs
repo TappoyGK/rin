@@ -288,8 +288,44 @@ impl Parser<'_, '_, '_> {
                 "def" => {
                     self.advance()?; // def
                     let (name, _) = self.expect_ident("variable name")?;
-                    self.push_frame(ParseFrame::Def { start, name }, start)?;
+                    // `(def name TypeExpr expr)` か `(def name expr)` かを先読みで判定する。
+                    let saved_lexer = self.lexer.save_state();
+                    let saved_cur = self.cur;
+                    let saved_next = self.next;
+                    let saved_mark = self.work.mark(self.core);
+                    let parsed_ty = match self.parse_type_expr(self.frames.len() + 1) {
+                        Ok((ty, ty_depth))
+                            if self.peek().kind != WorkTokenKind::RParen && !self.at_eof() =>
+                        {
+                            Some((self.alloc_box(ty, start)?, ty_depth))
+                        }
+                        _ => {
+                            self.lexer.restore_state(saved_lexer);
+                            self.cur = saved_cur;
+                            self.next = saved_next;
+                            self.work.rewind(self.core, saved_mark);
+                            None
+                        }
+                    };
+                    let (ty, ty_depth) = match parsed_ty {
+                        Some((t, d)) => (Some(t), d),
+                        None => (None, 0),
+                    };
+                    self.push_frame(
+                        ParseFrame::Def {
+                            start,
+                            name,
+                            ty,
+                            ty_depth,
+                        },
+                        start,
+                    )?;
                     return Ok(NextStep::StartExpr);
+                }
+                "defschema" => {
+                    self.advance()?; // defschema
+                    let (expr, depth) = self.parse_defschema(start)?;
+                    return Ok(NextStep::HaveExpr(expr, depth));
                 }
                 "import" => {
                     self.advance()?; // import
@@ -325,13 +361,27 @@ impl Parser<'_, '_, '_> {
                 "defn" => {
                     self.advance()?; // defn
                     let (name, _) = self.expect_ident("function name")?;
-                    let params = self.parse_param_list()?;
-                    return self.start_nonempty_body(start, 0, BodyTarget::Defn { name, params });
+                    let (params, p_depth) = self.parse_param_list()?;
+                    let (ret_ty, r_depth) = self.parse_opt_return_type()?;
+                    return self.start_nonempty_body(
+                        start,
+                        p_depth.max(r_depth),
+                        BodyTarget::Defn {
+                            name,
+                            params,
+                            ret_ty,
+                        },
+                    );
                 }
                 "fn" => {
                     self.advance()?; // fn
-                    let params = self.parse_param_list()?;
-                    return self.start_nonempty_body(start, 0, BodyTarget::Fn { params });
+                    let (params, p_depth) = self.parse_param_list()?;
+                    let (ret_ty, r_depth) = self.parse_opt_return_type()?;
+                    return self.start_nonempty_body(
+                        start,
+                        p_depth.max(r_depth),
+                        BodyTarget::Fn { params, ret_ty },
+                    );
                 }
                 "let" => {
                     self.advance()?; // let
@@ -583,12 +633,27 @@ impl Parser<'_, '_, '_> {
         target: BodyTarget,
     ) -> Result<Expr, ErrRecorded> {
         let kind = match target {
-            BodyTarget::Defn { name, params } => {
-                ExprKind::Defn(self.alloc_box(DefnExpr { name, params, body }, start)?)
-            }
-            BodyTarget::Fn { params } => {
-                ExprKind::Fn(self.alloc_box(FnExpr { params, body }, start)?)
-            }
+            BodyTarget::Defn {
+                name,
+                params,
+                ret_ty,
+            } => ExprKind::Defn(self.alloc_box(
+                DefnExpr {
+                    name,
+                    params,
+                    ret_ty,
+                    body,
+                },
+                start,
+            )?),
+            BodyTarget::Fn { params, ret_ty } => ExprKind::Fn(self.alloc_box(
+                FnExpr {
+                    params,
+                    ret_ty,
+                    body,
+                },
+                start,
+            )?),
             BodyTarget::Let { bindings } => {
                 ExprKind::Let(self.alloc_box(LetExpr { bindings, body }, start)?)
             }

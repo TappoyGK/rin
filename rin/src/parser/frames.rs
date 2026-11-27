@@ -12,10 +12,12 @@ pub(super) enum WrapKind {
 pub(super) enum BodyTarget {
     Defn {
         name: RawStr,
-        params: RawVec<RawStr>,
+        params: RawVec<Param>,
+        ret_ty: Option<WorkBox<TypeExpr>>,
     },
     Fn {
-        params: RawVec<RawStr>,
+        params: RawVec<Param>,
+        ret_ty: Option<WorkBox<TypeExpr>>,
     },
     Let {
         bindings: RawVec<(RawStr, Expr)>,
@@ -178,6 +180,8 @@ pub(super) enum ParseFrame {
     Def {
         start: Span,
         name: RawStr,
+        ty: Option<WorkBox<TypeExpr>>,
+        ty_depth: usize,
     },
     Body(WorkBox<BodyFrame>),
     LetBindVal(WorkBox<LetBindFrame>),

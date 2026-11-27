@@ -192,6 +192,7 @@ pub struct Limits {
 pub enum ErrorKind {
     Lex,
     Parse,
+    Type,
     Runtime,
     TooManySteps,
     TooDeep,
@@ -384,7 +385,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 typedef enum RinErrorKind {
     RIN_ERR_LEX = 0, RIN_ERR_PARSE = 1, RIN_ERR_RUNTIME = 2,
     RIN_ERR_TOO_MANY_STEPS = 3, RIN_ERR_TOO_DEEP = 4,
-    RIN_ERR_TOO_MUCH_MEMORY = 5, RIN_ERR_HOST = 6
+    RIN_ERR_TOO_MUCH_MEMORY = 5, RIN_ERR_HOST = 6, RIN_ERR_TYPE = 7
 } RinErrorKind;
 
 typedef struct RinError {

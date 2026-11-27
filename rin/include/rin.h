@@ -81,7 +81,8 @@ typedef enum RinErrorKind {
     RIN_ERR_TOO_MANY_STEPS = 3,
     RIN_ERR_TOO_DEEP = 4,
     RIN_ERR_TOO_MUCH_MEMORY = 5,
-    RIN_ERR_HOST = 6
+    RIN_ERR_HOST = 6,
+    RIN_ERR_TYPE = 7
 } RinErrorKind;
 
 /* 文字列は UTF-8・NUL 終端。Rin が所有し、ホストは解放しない。

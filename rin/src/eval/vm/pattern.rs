@@ -29,11 +29,35 @@ impl Runner<'_, '_> {
                 Obj::Err(inner) => Some(bind.as_ref().map(|_| *inner)),
                 _ => None,
             },
+            (Pattern::DatumType { kind, binding }, v) => {
+                let matched = match kind {
+                    crate::ast::DatumTypePat::I64 => matches!(v, RVal::Int(_)),
+                    crate::ast::DatumTypePat::F64 => matches!(v, RVal::Float(_)),
+                    crate::ast::DatumTypePat::Bool => matches!(v, RVal::Bool(_)),
+                    crate::ast::DatumTypePat::Char => matches!(v, RVal::Char(_)),
+                    crate::ast::DatumTypePat::Text => {
+                        matches!(v, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Str(_)))
+                    }
+                    crate::ast::DatumTypePat::Ident => {
+                        matches!(v, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Ident(_)))
+                    }
+                    crate::ast::DatumTypePat::List => {
+                        matches!(v, RVal::EmptyList)
+                            || matches!(v, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Cons { .. }))
+                    }
+                };
+                if matched {
+                    Some(binding.as_ref().map(|_| v))
+                } else {
+                    None
+                }
+            }
             (
                 Pattern::Variant {
                     type_name,
                     variant,
                     binding,
+                    ..
                 },
                 RVal::Obj(id),
             ) => match self.pool.get(id) {

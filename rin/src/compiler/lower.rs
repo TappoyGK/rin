@@ -335,8 +335,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     target.span,
                 )?;
             }
-            ExprKind::Def { .. } => {
+            ExprKind::Def(_) => {
                 return Err(self.fail_decl("def", span));
+            }
+            ExprKind::DefSchema(_) => {
+                return Err(self.fail_decl("defschema", span));
             }
             ExprKind::Defn(_) => {
                 return Err(self.fail_decl("defn", span));
@@ -348,8 +351,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return Err(self.fail_parse("compile.capacity", span, "too many parameters"));
                 };
                 let mut inner = self.new_scope();
-                for &p in params {
-                    inner.alloc_slot(self.pool, p, span)?;
+                for p in params {
+                    inner.alloc_slot(self.pool, p.name, span)?;
                 }
                 self.push_scope(inner, span)?;
                 let step_box = self.alloc_step_box(FinishFnStep { arity, span }, span)?;

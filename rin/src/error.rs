@@ -51,6 +51,7 @@ impl Default for Limits {
 pub enum ErrorKind {
     Lex,
     Parse,
+    Type,
     Runtime,
     TooManySteps,
     TooDeep,
@@ -195,6 +196,10 @@ impl Error {
 
     pub fn parse(rule: &'static str, at: Span, message: impl Into<String>) -> Self {
         Self::new(rule, ErrorKind::Parse, at, message)
+    }
+
+    pub fn type_err(rule: &'static str, at: Span, message: impl Into<String>) -> Self {
+        Self::new(rule, ErrorKind::Type, at, message)
     }
 
     pub fn runtime(rule: &'static str, at: Span, message: impl Into<String>) -> Self {

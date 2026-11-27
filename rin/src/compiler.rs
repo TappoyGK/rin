@@ -266,6 +266,7 @@ fn collect_expr_idents(
                 | ExprKind::Char(_)
                 | ExprKind::Str(_)
                 | ExprKind::None
+                | ExprKind::DefSchema(_)
                 | ExprKind::Import { .. }
                 | ExprKind::Export { .. }
                 | ExprKind::Quote(_) => {}
@@ -292,11 +293,13 @@ fn collect_expr_idents(
                         push_e(&mut expr_stack, pool, data.as_ref())?;
                     }
                 }
+                ExprKind::Def(d) => {
+                    push_e(&mut expr_stack, pool, d.as_ref().value.as_ref())?;
+                }
                 ExprKind::Some(e)
                 | ExprKind::Ok(e)
                 | ExprKind::Err(e)
-                | ExprKind::Field { target: e, .. }
-                | ExprKind::Def { value: e, .. } => {
+                | ExprKind::Field { target: e, .. } => {
                     push_e(&mut expr_stack, pool, e.as_ref())?;
                 }
                 ExprKind::Index { target, index } => {
@@ -579,6 +582,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let rule = match form {
                 "def" => "expr.def",
                 "defn" => "expr.defn",
+                "defschema" => "type.defschema",
                 _ => "expr.module",
             };
             self.pool.core.err_fmt(
@@ -873,6 +877,10 @@ fn pattern_binding(pat: &Pattern) -> Option<RawStr> {
         Pattern::Some(Some(name))
         | Pattern::Ok(Some(name))
         | Pattern::Err(Some(name))
+        | Pattern::DatumType {
+            binding: Some(name),
+            ..
+        }
         | Pattern::Variant {
             binding: Some(name),
             ..
