@@ -302,6 +302,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     pub(super) fn rollback_added_globals(&mut self) {
         for &id in self.added_globals.as_slice() {
             self.globals.unset_no_alloc(self.pool, id);
@@ -380,19 +382,21 @@ impl<'a, 'p> Runner<'a, 'p> {
     ) -> Result<RVal, ErrRecorded> {
         let base = self.stack.len();
         let local_count = chunk.local_count as usize;
-        self.stack_reserve(local_count, Span::default())?;
-        for &val in initial_vals {
-            self.pool.retain_val(val);
-            let _ = self
-                .stack
-                .push_work(&mut self.pool.work, &mut self.pool.core, val);
+        if local_count > 0 {
+            self.stack_reserve(local_count, Span::default())?;
+            for &val in initial_vals {
+                self.pool.retain_val(val);
+                let _ = self
+                    .stack
+                    .push_work(&mut self.pool.work, &mut self.pool.core, val);
+            }
+            let _ = self.stack.resize_work(
+                &mut self.pool.work,
+                &mut self.pool.core,
+                base + local_count,
+                RVal::Void,
+            );
         }
-        let _ = self.stack.resize_work(
-            &mut self.pool.work,
-            &mut self.pool.core,
-            base + local_count,
-            RVal::Void,
-        );
         let frame = super::vm::RinFrame::new(
             FrameSource::Top(chunk),
             ObjSlice::empty(),

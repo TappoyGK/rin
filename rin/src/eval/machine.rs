@@ -255,7 +255,30 @@ impl<'a> EnvState<'a> {
         source: &str,
         bindings: &[(&str, Value)],
     ) -> Result<Value, Error> {
-        let (chunk, used_indices) = match (|| {
+        if bindings.is_empty() {
+            let res = (|| {
+                let exprs =
+                    parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+                let chunk = compile_program(
+                    exprs.as_slice(),
+                    None,
+                    &mut self.syms,
+                    &mut self.pool,
+                    &self.globals,
+                    true,
+                )?;
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk(&chunk)
+            })();
+            let last = match res {
+                Ok(v) => v,
+                Err(_) => return Err(self.pool.core.error.to_owned_error()),
+            };
+            let exported = self.pool.export(last);
+            self.pool.release_val(last);
+            return Ok(exported);
+        }
+        let (chunk, used) = match (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
             compile_program_with_bindings(
@@ -272,76 +295,126 @@ impl<'a> EnvState<'a> {
             Err(_) => return Err(self.pool.core.error.to_owned_error()),
         };
 
-        let mut used_vals = RawVec::<RVal>::new();
-        let mut extra_objs = RawVec::<RVal>::new();
-        let used_slice = used_indices.as_slice();
-        if !used_slice.is_empty()
-            && used_vals
-                .resize_work(
-                    &mut self.pool.work,
-                    &mut self.pool.core,
-                    used_slice.len(),
-                    RVal::Void,
-                )
-                .is_none()
-        {
-            let _ = self.pool.core.err_oom(Span::default());
-            return Err(self.pool.core.error.to_owned_error());
-        }
-
-        // `used_slice` は参照された束縛の添字列（厳密降順）。
-        let mut next_slot = used_slice.len();
-        for (idx, (_, value)) in bindings.iter().enumerate() {
-            match self.pool.import(value, Span::default()) {
-                Ok(rval) => {
-                    if next_slot > 0 && used_slice[next_slot - 1] as usize == idx {
-                        next_slot -= 1;
-                        used_vals.as_mut_slice()[next_slot] = rval;
-                    } else if matches!(rval, RVal::Obj(_))
-                        && extra_objs
-                            .push_work(&mut self.pool.work, &mut self.pool.core, rval)
-                            .is_none()
-                    {
-                        self.pool.release_val(rval);
-                        for &v in used_vals.as_slice() {
-                            self.pool.release_val(v);
+        match used {
+            UsedBindings::Small { indices, len } => {
+                let count = len as usize;
+                let mut used_vals = [RVal::Void; 8];
+                let mut extra_objs = [RVal::Void; 8];
+                let mut extra_len = 0usize;
+                for (idx, (_, value)) in bindings.iter().enumerate() {
+                    match self.pool.import(value, Span::default()) {
+                        Ok(rval) => {
+                            if let Some(slot) =
+                                indices[..count].iter().position(|&b| b as usize == idx)
+                            {
+                                used_vals[slot] = rval;
+                            } else if matches!(rval, RVal::Obj(_)) {
+                                extra_objs[extra_len] = rval;
+                                extra_len += 1;
+                            }
                         }
-                        for &v in extra_objs.as_slice() {
-                            self.pool.release_val(v);
+                        Err(_) => {
+                            for &v in &used_vals[..count] {
+                                self.pool.release_val(v);
+                            }
+                            for &v in &extra_objs[..extra_len] {
+                                self.pool.release_val(v);
+                            }
+                            return Err(self.pool.core.error.to_owned_error());
                         }
-                        let _ = self.pool.core.err_oom(Span::default());
-                        return Err(self.pool.core.error.to_owned_error());
                     }
                 }
-                Err(_) => {
-                    for &v in used_vals.as_slice() {
-                        self.pool.release_val(v);
-                    }
-                    for &v in extra_objs.as_slice() {
-                        self.pool.release_val(v);
-                    }
+                let res = {
+                    let mut runner = self.runner(None, true);
+                    runner.run_top_chunk_with_locals(&chunk, &used_vals[..count])
+                };
+                for &v in &used_vals[..count] {
+                    self.pool.release_val(v);
+                }
+                for &v in &extra_objs[..extra_len] {
+                    self.pool.release_val(v);
+                }
+                let last = match res {
+                    Ok(v) => v,
+                    Err(_) => return Err(self.pool.core.error.to_owned_error()),
+                };
+                let exported = self.pool.export(last);
+                self.pool.release_val(last);
+                Ok(exported)
+            }
+            UsedBindings::Many(used_indices) => {
+                let mut used_vals = RawVec::<RVal>::new();
+                let mut extra_objs = RawVec::<RVal>::new();
+                let used_slice = used_indices.as_slice();
+                if !used_slice.is_empty()
+                    && used_vals
+                        .resize_work(
+                            &mut self.pool.work,
+                            &mut self.pool.core,
+                            used_slice.len(),
+                            RVal::Void,
+                        )
+                        .is_none()
+                {
+                    let _ = self.pool.core.err_oom(Span::default());
                     return Err(self.pool.core.error.to_owned_error());
                 }
+
+                // `used_slice` は参照された束縛の添字列（厳密降順）。
+                let mut next_slot = used_slice.len();
+                for (idx, (_, value)) in bindings.iter().enumerate() {
+                    match self.pool.import(value, Span::default()) {
+                        Ok(rval) => {
+                            if next_slot > 0 && used_slice[next_slot - 1] as usize == idx {
+                                next_slot -= 1;
+                                used_vals.as_mut_slice()[next_slot] = rval;
+                            } else if matches!(rval, RVal::Obj(_))
+                                && extra_objs
+                                    .push_work(&mut self.pool.work, &mut self.pool.core, rval)
+                                    .is_none()
+                            {
+                                self.pool.release_val(rval);
+                                for &v in used_vals.as_slice() {
+                                    self.pool.release_val(v);
+                                }
+                                for &v in extra_objs.as_slice() {
+                                    self.pool.release_val(v);
+                                }
+                                let _ = self.pool.core.err_oom(Span::default());
+                                return Err(self.pool.core.error.to_owned_error());
+                            }
+                        }
+                        Err(_) => {
+                            for &v in used_vals.as_slice() {
+                                self.pool.release_val(v);
+                            }
+                            for &v in extra_objs.as_slice() {
+                                self.pool.release_val(v);
+                            }
+                            return Err(self.pool.core.error.to_owned_error());
+                        }
+                    }
+                }
+
+                let res = {
+                    let mut runner = self.runner(None, true);
+                    runner.run_top_chunk_with_locals(&chunk, used_vals.as_slice())
+                };
+                for &v in used_vals.as_slice() {
+                    self.pool.release_val(v);
+                }
+                for &v in extra_objs.as_slice() {
+                    self.pool.release_val(v);
+                }
+                let last = match res {
+                    Ok(v) => v,
+                    Err(_) => return Err(self.pool.core.error.to_owned_error()),
+                };
+                let exported = self.pool.export(last);
+                self.pool.release_val(last);
+                Ok(exported)
             }
         }
-
-        let res = {
-            let mut runner = self.runner(None, true);
-            runner.run_top_chunk_with_locals(&chunk, used_vals.as_slice())
-        };
-        for &v in used_vals.as_slice() {
-            self.pool.release_val(v);
-        }
-        for &v in extra_objs.as_slice() {
-            self.pool.release_val(v);
-        }
-        let last = match res {
-            Ok(v) => v,
-            Err(_) => return Err(self.pool.core.error.to_owned_error()),
-        };
-        let exported = self.pool.export(last);
-        self.pool.release_val(last);
-        Ok(exported)
     }
 
     #[cfg(feature = "std-value")]
@@ -359,9 +432,8 @@ impl<'a> EnvState<'a> {
             &mut self.pool,
             &self.globals,
             false,
-            InitialBindingNames::Empty,
         ) {
-            Ok((chunk, _)) => chunk,
+            Ok(chunk) => chunk,
             Err(_) => {
                 self.pool.work.rewind(&mut self.pool.core, mark);
                 return (Vec::new(), Err(self.pool.core.error.to_owned_error()));

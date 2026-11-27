@@ -106,7 +106,23 @@ impl EnvState<'_> {
         source: &str,
         bindings: &[(&str, Val)],
     ) -> Result<RVal, ErrRecorded> {
-        let (chunk, used_indices) = {
+        if bindings.is_empty() {
+            let chunk = {
+                let exprs =
+                    parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+                compile_program(
+                    exprs.as_slice(),
+                    None,
+                    &mut self.syms,
+                    &mut self.pool,
+                    &self.globals,
+                    true,
+                )?
+            };
+            let mut runner = self.runner(None, true);
+            return runner.run_top_chunk(&chunk);
+        }
+        let (chunk, used) = {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
             compile_program_with_bindings(
@@ -119,24 +135,37 @@ impl EnvState<'_> {
                 InitialBindingNames::Vals(bindings),
             )?
         };
-        let mut vals = RawVec::<RVal>::new();
-        if !used_indices.is_empty() {
-            if vals
-                .reserve_work(&mut self.pool.work, &mut self.pool.core, used_indices.len())
-                .is_none()
-            {
-                return Err(self.pool.core.err_oom(Span::default()));
+        match used {
+            UsedBindings::Small { indices, len } => {
+                let mut vals = [RVal::Void; 8];
+                let count = len as usize;
+                for i in 0..count {
+                    vals[i] = bindings[indices[i] as usize].1.0;
+                }
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk_with_locals(&chunk, &vals[..count])
             }
-            for &idx in used_indices.as_slice() {
-                let _ = vals.push_work(
-                    &mut self.pool.work,
-                    &mut self.pool.core,
-                    bindings[idx as usize].1.0,
-                );
+            UsedBindings::Many(used_indices) => {
+                let mut vals = RawVec::<RVal>::new();
+                if !used_indices.is_empty() {
+                    if vals
+                        .reserve_work(&mut self.pool.work, &mut self.pool.core, used_indices.len())
+                        .is_none()
+                    {
+                        return Err(self.pool.core.err_oom(Span::default()));
+                    }
+                    for &idx in used_indices.as_slice() {
+                        let _ = vals.push_work(
+                            &mut self.pool.work,
+                            &mut self.pool.core,
+                            bindings[idx as usize].1.0,
+                        );
+                    }
+                }
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk_with_locals(&chunk, vals.as_slice())
             }
         }
-        let mut runner = self.runner(None, true);
-        runner.run_top_chunk_with_locals(&chunk, vals.as_slice())
     }
 
     pub(super) fn call_vals_ref(

@@ -32,7 +32,6 @@ const SHALLOW_COMPILE_DEPTH: usize = 3;
 /// `eval_with` / `eval_with_vals` の初期束縛名ビュー（コピーや一時配列確保なし）。
 #[derive(Clone, Copy)]
 pub(crate) enum InitialBindingNames<'a> {
-    Empty,
     #[cfg(feature = "std-value")]
     Values(&'a [(&'a str, crate::Value)]),
     Vals(&'a [(&'a str, crate::Val)]),
@@ -42,7 +41,6 @@ impl<'a> InitialBindingNames<'a> {
     #[inline]
     pub(crate) fn len(self) -> usize {
         match self {
-            Self::Empty => 0,
             #[cfg(feature = "std-value")]
             Self::Values(slice) => slice.len(),
             Self::Vals(slice) => slice.len(),
@@ -57,12 +55,29 @@ impl<'a> InitialBindingNames<'a> {
     #[inline]
     pub(crate) fn get(self, idx: usize) -> &'a str {
         match self {
-            Self::Empty => unreachable!(),
             #[cfg(feature = "std-value")]
             Self::Values(slice) => slice[idx].0,
             Self::Vals(slice) => slice[idx].0,
         }
     }
+}
+
+/// `compile_program_with_bindings` が返す、参照された初期束縛の添字列。
+pub(crate) enum UsedBindings {
+    /// 0..=8 件の初期束縛（参照された束縛のみをスタック上に保持、作業領域確保ゼロ）。
+    Small { indices: [u32; 8], len: u8 },
+    /// 9 件以上の初期束縛（参照された束縛の添字列、厳密降順）。
+    Many(RawVec<u32>),
+}
+
+struct InitialBindingState<'a> {
+    names: InitialBindingNames<'a>,
+    /// `true` のとき `names.len() <= 8` のオンデマンド解決経路を使う。
+    lazy_small: bool,
+    small_slots: [u32; 8],
+    small_used: [u32; 8],
+    small_used_len: u8,
+    saved_name_head: Option<usize>,
 }
 
 /// AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
@@ -74,23 +89,10 @@ pub(crate) fn compile_program(
     globals: &EnvSlots,
     frozen: bool,
 ) -> Result<Chunk, ErrRecorded> {
-    let (chunk, _) = compile_program_parts(
-        exprs,
-        &[],
-        module,
-        syms,
-        pool,
-        globals,
-        frozen,
-        InitialBindingNames::Empty,
-    )?;
-    Ok(chunk)
+    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)
 }
 
 /// 初期レキシカル束縛名付きで AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
-///
-/// 返り値の `RawVec<u32>` は各初期ローカルスロットに対応する `initial` の添字である。
-/// 参照された束縛のみを後ろ勝ちで抽出した添字列（厳密降順）を返す。
 pub(crate) fn compile_program_with_bindings(
     exprs: &[Expr],
     module: Option<u32>,
@@ -99,8 +101,114 @@ pub(crate) fn compile_program_with_bindings(
     globals: &EnvSlots,
     frozen: bool,
     initial: InitialBindingNames<'_>,
-) -> Result<(Chunk, RawVec<u32>), ErrRecorded> {
-    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen, initial)
+) -> Result<(Chunk, UsedBindings), ErrRecorded> {
+    let initial_len = initial.len();
+    if initial_len == 0 {
+        let chunk = compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)?;
+        return Ok((
+            chunk,
+            UsedBindings::Small {
+                indices: [0; 8],
+                len: 0,
+            },
+        ));
+    }
+    if initial_len <= 8 {
+        let mut state = InitialBindingState {
+            names: initial,
+            lazy_small: true,
+            small_slots: [u32::MAX; 8],
+            small_used: [0; 8],
+            small_used_len: 0,
+            saved_name_head: None,
+        };
+        let mut root_scope = Scope::new(module);
+        // `let` / `match` のスロットは `initial_len` 以降から確保し、オンデマンド割り当てする `0..initial_len` と衝突させない。
+        root_scope.next_slot = initial_len as u32;
+        let chunk = compile_program_inner(
+            exprs,
+            &[],
+            module,
+            syms,
+            pool,
+            globals,
+            frozen,
+            root_scope,
+            Some(&mut state),
+        )?;
+        Ok((
+            chunk,
+            UsedBindings::Small {
+                indices: state.small_used,
+                len: state.small_used_len,
+            },
+        ))
+    } else {
+        compile_program_with_many_bindings(exprs, module, syms, pool, globals, frozen, initial)
+    }
+}
+
+#[inline(never)]
+fn compile_program_with_many_bindings(
+    exprs: &[Expr],
+    module: Option<u32>,
+    syms: &mut SymTable,
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
+    frozen: bool,
+    initial: InitialBindingNames<'_>,
+) -> Result<(Chunk, UsedBindings), ErrRecorded> {
+    let mut root_scope = Scope::new(module);
+    let mut used_indices = RawVec::<u32>::new();
+    let mut idents = collect_expr_idents(exprs, &[], pool)?;
+    if !idents.is_empty() {
+        // 後ろから走査することで、同名重複の後勝ちと `used_indices` の厳密降順を同時に得る。
+        for idx in (0..initial.len()).rev() {
+            let name = initial.get(idx);
+            let hash = fnv1a_bytes(name.as_bytes());
+            if let Some(u32::MAX) = idents.get_by(hash, |k| k.as_str() == name) {
+                // SAFETY: `initial` の `&str` はこのコンパイル呼び出し全体を通して有効。
+                let raw = unsafe {
+                    RawStr::from_raw_utf8(
+                        NonNull::new(name.as_ptr().cast_mut()).unwrap_or(NonNull::dangling()),
+                        name.len(),
+                    )
+                };
+                let slot = root_scope.alloc_slot(pool, raw, Span::default())?;
+                // 既に存在するキーの更新なので確保は起きない。
+                let _ =
+                    idents.insert_work(&mut pool.work, &mut pool.core, hash, raw, slot, |a, b| {
+                        a.as_str() == b.as_str()
+                    });
+                if used_indices
+                    .push_work(&mut pool.work, &mut pool.core, idx as u32)
+                    .is_none()
+                {
+                    return Err(pool.core.err_oom(Span::default()));
+                }
+            }
+        }
+    }
+    let mut state = InitialBindingState {
+        names: initial,
+        lazy_small: false,
+        small_slots: [u32::MAX; 8],
+        small_used: [0; 8],
+        small_used_len: 0,
+        saved_name_head: None,
+    };
+    let chunk = compile_program_inner(
+        exprs,
+        &[],
+        module,
+        syms,
+        pool,
+        globals,
+        frozen,
+        root_scope,
+        Some(&mut state),
+    )?;
+    Ok((chunk, UsedBindings::Many(used_indices)))
 }
 
 /// ソース中に現れる識別子（`ExprKind::Ident`）を非再帰で収集する。
@@ -294,61 +402,45 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     pool: &'a mut Pool<'p>,
     globals: &'a EnvSlots,
     frozen: bool,
-    initial: InitialBindingNames<'a>,
-) -> Result<(Chunk, RawVec<u32>), ErrRecorded> {
+) -> Result<Chunk, ErrRecorded> {
+    compile_program_inner(
+        exprs,
+        body,
+        module,
+        syms,
+        pool,
+        globals,
+        frozen,
+        Scope::new(module),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_program_inner<'a, 'p>(
+    exprs: &'a [Expr],
+    body: &'a [Expr],
+    module: Option<u32>,
+    syms: &'a mut SymTable,
+    pool: &'a mut Pool<'p>,
+    globals: &'a EnvSlots,
+    frozen: bool,
+    root_scope: Scope,
+    initial: Option<&mut InitialBindingState<'a>>,
+) -> Result<Chunk, ErrRecorded> {
     let region = if frozen {
         CodeRegion::Work
     } else {
         CodeRegion::Perm
     };
     let mut scopes = RawVec::new();
-    let mut root_scope = Scope::new(module);
-    let mut used_indices = RawVec::<u32>::new();
-    let mut deferred_initial = InitialBindingNames::Empty;
-
-    let initial_len = initial.len();
-    if initial_len > 0 {
-        deferred_initial = initial;
-        let mut idents = collect_expr_idents(exprs, body, pool)?;
-        if !idents.is_empty() {
-            // 後ろから走査することで、同名重複の後勝ちと `used_indices` の厳密降順を同時に得る。
-            for idx in (0..initial_len).rev() {
-                let name = initial.get(idx);
-                let hash = fnv1a_bytes(name.as_bytes());
-                if let Some(u32::MAX) = idents.get_by(hash, |k| k.as_str() == name) {
-                    // SAFETY: `initial` の `&str` はこのコンパイル呼び出し全体を通して有効。
-                    let raw = unsafe {
-                        RawStr::from_raw_utf8(
-                            NonNull::new(name.as_ptr().cast_mut()).unwrap_or(NonNull::dangling()),
-                            name.len(),
-                        )
-                    };
-                    let slot = root_scope.alloc_slot(pool, raw, Span::default())?;
-                    // 既に存在するキーの更新なので確保は起きない。
-                    let _ = idents.insert_work(
-                        &mut pool.work,
-                        &mut pool.core,
-                        hash,
-                        raw,
-                        slot,
-                        |a, b| a.as_str() == b.as_str(),
-                    );
-                    if used_indices
-                        .push_work(&mut pool.work, &mut pool.core, idx as u32)
-                        .is_none()
-                    {
-                        return Err(pool.core.err_oom(Span::default()));
-                    }
-                }
-            }
-        }
-    }
     if scopes
         .push_work(&mut pool.work, &mut pool.core, root_scope)
         .is_none()
     {
         return Err(pool.core.err_oom(Span::default()));
     }
+    let initial_ptr = initial.map(NonNull::from);
     let mut compiler = Compiler {
         scopes,
         module,
@@ -358,8 +450,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
         globals,
         frozen,
         name_table: None,
-        deferred_initial,
-        deferred_initial_head: None,
+        initial: initial_ptr,
     };
     if exprs.is_empty() && body.is_empty() {
         compiler.emit_raw(Op::Void, Span::default())?;
@@ -375,8 +466,12 @@ pub(crate) fn compile_program_parts<'a, 'p>(
         }
         compiler.flush_ticks(Span::default())?;
     }
+    // SAFETY: `initial_ptr` はこの関数内の `initial` への排他的参照から作られ、`compiler` は直後に破棄される。
+    let small_used_len = compiler
+        .initial
+        .map_or(0, |p| unsafe { p.as_ref().small_used_len as u32 });
     let mut finished = compiler.scopes.pop().unwrap();
-    finished.chunk.local_count = finished.max_slots;
+    finished.chunk.local_count = finished.max_slots.max(small_used_len);
     if !frozen && !finished.chunk.strings.is_empty() {
         let mut objs = RawVec::new();
         for &s in finished.chunk.strings.as_slice() {
@@ -398,7 +493,7 @@ pub(crate) fn compile_program_parts<'a, 'p>(
             return Err(pool.core.err_oom(Span::default()));
         }
     }
-    Ok((finished.chunk, used_indices))
+    Ok(finished.chunk)
 }
 
 #[cfg(all(test, feature = "std-value"))]
@@ -417,8 +512,7 @@ struct Compiler<'a, 'p> {
     globals: &'a EnvSlots,
     frozen: bool,
     name_table: Option<NonNull<NameTable>>,
-    deferred_initial: InitialBindingNames<'a>,
-    deferred_initial_head: Option<usize>,
+    initial: Option<NonNull<InitialBindingState<'a>>>,
 }
 
 impl<'a, 'p> Compiler<'a, 'p> {
