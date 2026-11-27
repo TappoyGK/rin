@@ -237,6 +237,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn add_string(&mut self, s: &str, span: Span) -> Result<u32, Failed> {
+        if u32::try_from(s.len()).is_err() {
+            return Err(self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                span,
+                "text length limit exceeded (4294967295 bytes)",
+            ));
+        }
         let region = self.current_region();
         let top = self.scopes.last_mut().unwrap();
         match top

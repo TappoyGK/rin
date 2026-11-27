@@ -54,7 +54,7 @@ impl Pool<'_> {
             return Ok(ObjStr::empty());
         }
         let Ok(len_u32) = u32::try_from(s.len()) else {
-            return Err(self.oom_error(span, "memory limit exceeded"));
+            return Err(self.oom_error(span, "text length limit exceeded (4294967295 bytes)"));
         };
         let Some(block) = self.obj_heap.alloc(&mut self.core, s.len(), 1) else {
             return Err(self.oom_limit_error(span));

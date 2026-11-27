@@ -676,22 +676,8 @@ pub(crate) fn write_rin_float(f: &mut fmt::Formatter<'_>, x: f64) -> fmt::Result
 
     let abs = x.abs();
     if (1e-6..1e21).contains(&abs) {
-        struct DotTracker<'a, 'b> {
-            f: &'a mut fmt::Formatter<'b>,
-            has_dot: bool,
-        }
-        impl fmt::Write for DotTracker<'_, '_> {
-            #[inline(always)]
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                if !self.has_dot && s.as_bytes().contains(&b'.') {
-                    self.has_dot = true;
-                }
-                self.f.write_str(s)
-            }
-        }
-        let mut tracker = DotTracker { f, has_dot: false };
-        write!(tracker, "{x}")?;
-        if !tracker.has_dot {
+        write!(f, "{x}")?;
+        if x.fract() == 0.0 {
             f.write_str(".0")?;
         }
         return Ok(());

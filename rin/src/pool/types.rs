@@ -202,15 +202,18 @@ impl ObjStr {
         if self.is_ascii() {
             return Some(&s[start..end]);
         }
+        let mut it = s.chars();
         let byte_start = if start == 0 {
             0
         } else {
-            s.char_indices().nth(start)?.0
+            it.nth(start - 1)?;
+            s.len() - it.as_str().len()
         };
         let byte_end = if end == char_len {
             s.len()
         } else {
-            byte_start + s[byte_start..].char_indices().nth(end - start)?.0
+            it.nth(end - start - 1)?;
+            s.len() - it.as_str().len()
         };
         Some(&s[byte_start..byte_end])
     }
