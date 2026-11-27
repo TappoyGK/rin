@@ -14,16 +14,16 @@ use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 fn frozen_rejects_declarations_and_module_forms_before_execution() {
     let mut alloc = HeapAllocator;
     let mut builder = Builder::new(Limits::default(), &mut alloc);
-    builder.bind("x", &Value::Int(10)).unwrap();
+    builder.bind("x", "i64", &Value::Int(10)).unwrap();
     let mut machine = builder.freeze().unwrap();
 
     for src in [
         "(def a 1)",
-        "(defn f (n) n)",
+        "(defn f ((n i64)) -> i64 n)",
         "(import m)",
         "(export x)",
         "(if false (def a 1) 0)",
-        "(fn () (defn f () 1))",
+        "(fn () (defn f () -> i64 1))",
         "(let (y 1) (import m) y)",
         "(/ 1 0) (def late 1)", // 手前のゼロ除算より前に構文エラーで止まること
     ] {
@@ -48,10 +48,13 @@ fn non_top_level_declarations_are_syntax_errors_even_during_loading() {
     let mut alloc = HeapAllocator;
     let mut builder = Builder::new(Limits::default(), &mut alloc);
     for (src, rule) in [
-        ("(defn g () (def y 1) y)", "expr.def"),
-        ("(defn mk () (defn made () 42) 0)", "expr.defn"),
-        ("(defn late () (import lib) 0)", "expr.module"),
-        ("(defn exp () (export x) 0)", "expr.module"),
+        ("(defn g () -> i64 (def y 1) y)", "expr.def"),
+        (
+            "(defn mk () -> i64 (defn made () -> i64 42) 0)",
+            "expr.defn",
+        ),
+        ("(defn late () -> i64 (import lib) 0)", "expr.module"),
+        ("(defn exp () -> i64 (export x) 0)", "expr.module"),
         ("(if false (def y 1) 0)", "expr.def"),
         ("(let (a 1) (def y 2) y)", "expr.def"),
         ("(fn () (def y 1))", "expr.def"),
@@ -61,7 +64,7 @@ fn non_top_level_declarations_are_syntax_errors_even_during_loading() {
         assert_eq!(err.rule(), rule, "{src}");
     }
     let mod_err = builder
-        .load_module("mm", "(def z 0) (defn h () (def z (+ z 1)) z)")
+        .load_module("mm", "(def z 0) (defn h () -> i64 (def z (+ z 1)) z)")
         .unwrap_err();
     assert_eq!(mod_err.kind, ErrorKind::Parse);
     assert_eq!(mod_err.rule(), "expr.def");
@@ -74,12 +77,18 @@ fn frozen_exposes_loaded_modules_without_import_and_keeps_isolation() {
     builder
         .load_module(
             "math_mod",
-            "(export add base_val) (def secret 99) (def base_val 40) (defn add (a b) (+ a b))",
+            "(export add base_val) (def secret 99) (def base_val 40) (defn add ((a i64) (b i64)) -> i64 (+ a b))",
         )
         .unwrap();
-    builder
-        .load_module("other_mod", "(defn read_unimported () math_mod.base_val)")
-        .unwrap();
+    let iso_err = builder
+        .load_module(
+            "other_mod",
+            "(defn read_unimported () -> i64 math_mod.base_val)",
+        )
+        .unwrap_err();
+    assert_eq!(iso_err.kind, ErrorKind::Type);
+    assert_eq!(iso_err.rule(), "expr.name");
+
     let mut machine = builder.freeze().unwrap();
 
     // 実行段階では import なしで公開シンボルを参照できる。
@@ -90,15 +99,8 @@ fn frozen_exposes_loaded_modules_without_import_and_keeps_isolation() {
 
     // 非公開シンボルは依然として参照できない。
     let priv_err = machine.eval("math_mod.secret").unwrap_err();
-    assert_eq!(priv_err.kind, ErrorKind::Runtime);
+    assert_eq!(priv_err.kind, ErrorKind::Type);
     assert_eq!(priv_err.rule(), "expr.module");
-
-    // モジュール内の関数から、import していない別モジュールへはアクセスできない。
-    let iso_err = machine
-        .call_in("other_mod", "read_unimported", &[])
-        .unwrap_err();
-    assert_eq!(iso_err.kind, ErrorKind::Runtime);
-    assert_eq!(iso_err.rule(), "expr.name");
 
     // 凍結時の未定義名候補には読み込み済みモジュール名も含まれる。
     let hint_err = machine.eval("math_mo").unwrap_err();
@@ -115,19 +117,22 @@ fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
     let mut alloc = HeapAllocator;
     let mut builder = Builder::new(
         Limits {
-            memory_bytes: 16_384,
+            memory_bytes: 32_768,
             ..Limits::default()
         },
         &mut alloc,
     );
-    builder.bind("x", &Value::Int(10)).unwrap();
-    builder.eval("(defn read_x () x)").unwrap();
+    builder.bind("x", "i64", &Value::Int(10)).unwrap();
+    builder.eval("(defn read_x () -> i64 x)").unwrap();
     let mut machine = builder.freeze().unwrap();
     let baseline = machine.live_bytes();
 
     // 一時束縛はトップレベル評価中だけ有効で、大域 x を一時的に覆う。
     let v = machine
-        .eval_with("(+ x y)", &[("x", Value::Int(100)), ("y", Value::Int(23))])
+        .eval_with(
+            "(+ x y)",
+            &[("x", "i64", Value::Int(100)), ("y", "i64", Value::Int(23))],
+        )
         .unwrap();
     assert_eq!(v, Value::Int(123));
     assert_eq!(machine.live_bytes(), baseline);
@@ -141,30 +146,33 @@ fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
 
     // 一時束縛が実行時エラーやメモリ超過になっても解放される。
     let err = machine
-        .eval_with("(/ x 0)", &[("tmp", Value::text("hello"))])
+        .eval_with("(/ x 0)", &[("tmp", "text", Value::text("hello"))])
         .unwrap_err();
     assert_eq!(err.rule(), "op.arith");
     assert_eq!(machine.live_bytes(), baseline);
 
-    let big = Value::text("a".repeat(20_000));
+    let big = Value::text("a".repeat(40_000));
     let mem_err = machine
-        .eval_with("x", &[("small", Value::text("ok")), ("big", big)])
+        .eval_with(
+            "x",
+            &[("small", "text", Value::text("ok")), ("big", "text", big)],
+        )
         .unwrap_err();
     assert_eq!(mem_err.kind, ErrorKind::TooMuchMemory);
     assert_eq!(machine.live_bytes(), baseline);
 
     // 9 個以上の束縛（ヒープ経路）と同名上書きも正しく評価・解放される。
     let many = [
-        ("a1", Value::Int(1)),
-        ("a2", Value::Int(2)),
-        ("a3", Value::Int(3)),
-        ("a4", Value::Int(4)),
-        ("a5", Value::Int(5)),
-        ("a6", Value::Int(6)),
-        ("a7", Value::Int(7)),
-        ("a8", Value::Int(8)),
-        ("a9", Value::Int(9)),
-        ("a1", Value::Int(10)),
+        ("a1", "i64", Value::Int(1)),
+        ("a2", "i64", Value::Int(2)),
+        ("a3", "i64", Value::Int(3)),
+        ("a4", "i64", Value::Int(4)),
+        ("a5", "i64", Value::Int(5)),
+        ("a6", "i64", Value::Int(6)),
+        ("a7", "i64", Value::Int(7)),
+        ("a8", "i64", Value::Int(8)),
+        ("a9", "i64", Value::Int(9)),
+        ("a1", "i64", Value::Int(10)),
     ];
     let sum = machine
         .eval_with(
@@ -190,13 +198,17 @@ fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
         assert!(!rin_freeze(std::ptr::null_mut()));
 
         let v10 = rin_int(m, 10);
-        assert!(rin_bind(m, c"g".as_ptr(), v10));
+        assert!(rin_bind(m, c"g".as_ptr(), c"i64".as_ptr(), v10));
         rin_drop(m, v10);
 
-        let load_res = rin_load(m, c"mod_a".as_ptr(), c"(defn twice (n) (* n 2))".as_ptr());
+        let load_res = rin_load(
+            m,
+            c"mod_a".as_ptr(),
+            c"(defn twice ((n i64)) -> i64 (* n 2))".as_ptr(),
+        );
         assert!(load_res.ok);
 
-        let def_res = rin_build(m, c"(defn add_g (n) (+ n g))".as_ptr());
+        let def_res = rin_build(m, c"(defn add_g ((n i64)) -> i64 (+ n g))".as_ptr());
         assert!(def_res.ok);
 
         // 凍結前の rin_eval / rin_eval_with は env.phase エラー
@@ -241,7 +253,7 @@ fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
 
         // 凍結後の rin_bind は env.frozen エラー
         let v20 = rin_int(m, 20);
-        assert!(!rin_bind(m, c"g".as_ptr(), v20));
+        assert!(!rin_bind(m, c"g".as_ptr(), c"i64".as_ptr(), v20));
         rin_drop(m, v20);
         let err = rin_last_error(m);
         assert!(!err.is_null());
@@ -277,10 +289,12 @@ fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
         let binds = [
             RinBinding {
                 name: c"g".as_ptr(),
+                type_expr: c"i64".as_ptr(),
                 value: tmp_g,
             },
             RinBinding {
                 name: c"y".as_ptr(),
+                type_expr: c"i64".as_ptr(),
                 value: tmp_y,
             },
         ];

@@ -162,18 +162,23 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             .load_module_ref(
                 "cards",
                 r#"
-                (export make_card total_cost boom)
-                (defn helper (x) (* x 2))
-                (defn make_card (name cost)
+                (defschema Kind (variant Kind (Spell i64)))
+                (defschema Card (struct Card (name text) (cost i64) (kind Kind)))
+                (export Kind Card make_card total_cost boom)
+                (defn helper ((x i64)) -> i64 (* x 2))
+                (defn make_card ((name text) (cost i64)) -> Card
                   Card { name: name cost: (helper cost) kind: Kind.Spell(cost) })
-                (defn total_cost (xs)
+                (defn total_cost ((xs (list Card))) -> i64
                   (fold (fn (acc c) (+ acc c.cost)) 0
                     (sort_by (fn (c) c.cost)
                       (filter (fn (c) (> c.cost 0)) xs))))
-                (defn inner (n) (if (== n 0) (/ 1 0) (+ 1 (inner (- n 1)))))
-                (defn boom (n) (inner n))
+                (defn inner ((n i64)) -> i64 (if (== n 0) (/ 1 0) (+ 1 (inner (- n 1)))))
+                (defn boom ((n i64)) -> i64 (inner n))
                 "#,
             )
+            .unwrap();
+        builder
+            .eval_ref("(defschema Meta (struct Meta (tag text) (count i64)))")
             .unwrap();
 
         let s = builder.val_text("fireball").unwrap();
@@ -190,8 +195,8 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             .val_struct("Meta", &[("tag", s), ("count", i3)])
             .unwrap();
         let var = builder.val_variant("Flag", "On", Some(i3)).unwrap();
-        builder.bind_val("meta", st).unwrap();
-        builder.bind_val("nums", lst).unwrap();
+        builder.bind_val("meta", "Meta", st).unwrap();
+        builder.bind_val("nums", "(list i64)", lst).unwrap();
 
         assert_eq!(builder.value_ref(opt).tag(), ValueTag::Some);
         assert_eq!(builder.value_ref(ok_v).tag(), ValueTag::Ok);
@@ -211,7 +216,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
         builder.release_val(var);
 
         builder
-            .eval_ref("(defn add_meta (n) (+ n meta.count))")
+            .eval_ref("(defn add_meta ((n i64)) -> i64 (+ n meta.count))")
             .unwrap();
 
         let mut machine = builder.into_machine();
@@ -248,7 +253,7 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
 
             let bv = machine.val_int(99);
             let v2 = machine
-                .eval_with_vals("(+ tmp meta.count)", &[("tmp", bv)])
+                .eval_with_vals("(+ tmp meta.count)", &[("tmp", "i64", bv)])
                 .unwrap();
             assert_eq!(v2.as_int(), Some(102));
             machine.release_val(bv);
@@ -315,12 +320,12 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
         }
         {
             let e = machine.eval_ref("add_met").unwrap_err();
-            assert_eq!(e.kind(), ErrorKind::Runtime);
+            assert_eq!(e.kind(), ErrorKind::Type);
             assert!(e.message().contains("did you mean 'add_meta'?"));
         }
         {
             let e = machine.eval_ref("meta.missing").unwrap_err();
-            assert_eq!(e.kind(), ErrorKind::Runtime);
+            assert_eq!(e.kind(), ErrorKind::Type);
             assert!(e.message().contains("fields: count, tag"));
         }
 
@@ -344,8 +349,8 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
             );
             b.eval_ref(
                 r#"
-                (defn deep (n) (if (== n 0) 0 (+ 1 (deep (- n 1)))))
-                (defn spin (n) (if (== n 0) 0 (spin (- n 1))))
+                (defn deep ((n i64)) -> i64 (if (== n 0) 0 (+ 1 (deep (- n 1)))))
+                (defn spin ((n i64)) -> i64 (if (== n 0) 0 (spin (- n 1))))
                 "#,
             )
             .unwrap();
@@ -382,7 +387,8 @@ fn zero_heap_full_rust_lifecycle_and_error_paths() {
                 },
                 &mut arena3,
             );
-            b.eval_ref("(defn blowup (n) (range 0 n))").unwrap();
+            b.eval_ref("(defn blowup ((n i64)) -> (list i64) (range 0 n))")
+                .unwrap();
             let mut m = b.into_machine();
 
             let e_mem = m.eval_ref("(blowup 10000)").unwrap_err();
@@ -438,7 +444,7 @@ fn zero_heap_full_c_ffi_lifecycle() {
             let lr = rin_load(
                 m,
                 c"mod_a".as_ptr(),
-                c"(defn f (x) (+ x 1)) (defn boom () (/ 1 0))".as_ptr(),
+                c"(defn f ((x i64)) -> i64 (+ x 1)) (defn boom () -> i64 (/ 1 0))".as_ptr(),
             );
             assert!(lr.ok);
 
@@ -489,8 +495,8 @@ fn zero_heap_full_c_ffi_lifecycle() {
             let mut fbuf = [0.0f64; 2];
             assert_eq!(rin_copy_f64s(m, v_f64s, fbuf.as_mut_ptr(), 2), 2);
 
-            assert!(rin_bind(m, c"g".as_ptr(), v_int));
-            let br = rin_build(m, c"(defn add_g (k) (+ g k))".as_ptr());
+            assert!(rin_bind(m, c"g".as_ptr(), c"i64".as_ptr(), v_int));
+            let br = rin_build(m, c"(defn add_g ((k i64)) -> i64 (+ g k))".as_ptr());
             assert!(br.ok);
             assert!(rin_freeze(m));
 
@@ -499,6 +505,7 @@ fn zero_heap_full_c_ffi_lifecycle() {
 
             let binds = [RinBinding {
                 name: c"g".as_ptr(),
+                type_expr: c"i64".as_ptr(),
                 value: v_int,
             }];
             let wr = rin_eval_with(m, c"(+ g 1)".as_ptr(), binds.as_ptr(), 1);
@@ -630,7 +637,8 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
     builder
         .eval_ref(
             r#"
-            (defn work (n)
+            (defschema Item (struct Item (k i64) (label text)))
+            (defn work ((n i64)) -> i64
               (let (xs (range 0 n)
                     ys (map (fn (x) Item { k: x label: "item" }) xs)
                     zs (filter (fn (it) (== (% it.k 2) 0)) ys))
@@ -650,7 +658,9 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
 
         let s = machine.val_text("elem").unwrap();
         let lst = machine.val_list(&[s, machine.val_int(i as i64)]).unwrap();
-        let v = machine.eval_with_vals("(len xs)", &[("xs", lst)]).unwrap();
+        let v = machine
+            .eval_with_vals("(len xs)", &[("xs", "(list datum)", lst)])
+            .unwrap();
         assert_eq!(v.as_int(), Some(2));
         machine.release_val(lst);
         machine.release_val(s);
@@ -677,7 +687,9 @@ fn arena_usage_plateaus_across_thousands_of_evaluations() {
 
         let s = machine.val_text("elem").unwrap();
         let lst = machine.val_list(&[s, machine.val_int(i as i64)]).unwrap();
-        let v = machine.eval_with_vals("(len xs)", &[("xs", lst)]).unwrap();
+        let v = machine
+            .eval_with_vals("(len xs)", &[("xs", "(list datum)", lst)])
+            .unwrap();
         assert_eq!(v.as_int(), Some(2));
         machine.release_val(lst);
         machine.release_val(s);

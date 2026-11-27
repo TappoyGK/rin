@@ -10,15 +10,25 @@ fn every_limit_releases_temporaries_and_preserves_bound_values() {
         "(fold (fn (a x) (push a x)) [] xs)",
         "(== [xs xs] [xs xs])",
         "(== LongName { long_field: xs } LongName { long_field: xs })",
-        "(== LongName.Variant(xs) LongName.Variant(xs))",
+        "(== LongNameV.Variant(xs) LongNameV.Variant(xs))",
         "(append xs (reverse xs))",
         "(zip xs xs)",
         "[xs xs xs]",
         "xs[2]",
     ];
+    let schema_prelude = r#"
+        (defschema LongName (struct LongName (long_field (list i64))))
+        (defschema LongNameV (variant LongNameV (Variant (list i64))))
+    "#;
     for source in sources {
         let xs = Value::list(vec![Value::Int(3), Value::Int(1), Value::Int(2)]);
-        let expected = rin::eval_with(source, &[("xs", xs.clone())], Limits::default()).unwrap();
+        let expected = {
+            let mut alloc = HeapAllocator;
+            let mut m = Builder::new(Limits::default(), &mut alloc);
+            m.eval(schema_prelude).unwrap();
+            m.bind("xs", "(list i64)", &xs).unwrap();
+            m.eval(source).unwrap()
+        };
         for steps in 0..=100 {
             let mut alloc = HeapAllocator;
             let mut m = Builder::new(
@@ -28,7 +38,8 @@ fn every_limit_releases_temporaries_and_preserves_bound_values() {
                 },
                 &mut alloc,
             );
-            m.bind("xs", &xs).unwrap();
+            m.eval(schema_prelude).unwrap();
+            m.bind("xs", "(list i64)", &xs).unwrap();
             let baseline = m.live_bytes();
             for _ in 0..3 {
                 match m.eval(source) {
@@ -82,15 +93,17 @@ fn with_charges_original_fields_before_copying() {
                 continue;
             }
             let (source, cost) = if update {
-                ("(with s { f0: 7 })", n + 3)
+                ("(with s { f0: some(7) })", n + 4)
             } else {
                 ("(with s {})", n + 2)
             };
             let mut expected = fields.clone();
             if update {
-                expected.insert("f0".into(), Value::Int(7));
+                expected.insert("f0".into(), Value::some(Value::Int(7)));
             }
             let expected = Value::structure("S", expected);
+            let field_defs: String = (0..n).map(|i| format!(" (f{i} (option i64))")).collect();
+            let schema_def = format!("(defschema S (struct S{field_defs}))");
             for steps in 0..=cost {
                 let mut alloc = HeapAllocator;
                 let mut m = Builder::new(
@@ -100,7 +113,8 @@ fn with_charges_original_fields_before_copying() {
                     },
                     &mut alloc,
                 );
-                m.bind("s", &original).unwrap();
+                m.eval(&schema_def).unwrap();
+                m.bind("s", "S", &original).unwrap();
                 let baseline = m.live_bytes();
                 for _ in 0..3 {
                     let result = m.eval(source);

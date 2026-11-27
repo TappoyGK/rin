@@ -38,7 +38,12 @@ fn c_ffi_roundtrip_with_custom_allocator() {
 
     unsafe {
         let v_in = ffi::rin_i64s(m, input.as_ptr(), input.len());
-        assert!(ffi::rin_bind(m, name.as_ptr(), v_in));
+        assert!(ffi::rin_bind(
+            m,
+            name.as_ptr(),
+            c"(array i64)".as_ptr(),
+            v_in
+        ));
         ffi::rin_drop(m, v_in);
 
         let res = ffi::rin_build(m, src.as_ptr());
@@ -77,7 +82,7 @@ fn c_ffi_list_library_roundtrip() {
         let v10 = ffi::rin_int(m, 10);
         let l1 = ffi::rin_cons(m, v20, empty);
         let l2 = ffi::rin_cons(m, v10, l1);
-        assert!(ffi::rin_bind(m, name.as_ptr(), l2));
+        assert!(ffi::rin_bind(m, name.as_ptr(), c"(list i64)".as_ptr(), l2));
 
         ffi::rin_drop(m, empty);
         ffi::rin_drop(m, v20);
@@ -119,7 +124,14 @@ fn c_ffi_struct_variant_field_extraction() {
             dealloc: None,
         },
     );
-    let src = CString::new(r#"Card { id: "strike" cost: 1 element: Element.Fire }"#).unwrap();
+    let src = CString::new(
+        r#"
+        (defschema Element (variant Element (Plain) (Fire) (Frost)))
+        (defschema Card (struct Card (id text) (cost i64) (element Element)))
+        Card { id: "strike" cost: 1 element: Element.Fire }
+        "#,
+    )
+    .unwrap();
     let schema_src = CString::new(
         "(struct Card (id text) (cost i64) (element (variant Element (Plain) (Fire) (Frost))))",
     )
@@ -169,7 +181,9 @@ fn c_ffi_call_and_struct_roundtrip() {
     );
     let def_src = CString::new(
         r#"
-        (defn discount (card)
+        (defschema Element (variant Element (Plain) (Fire) (Frost)))
+        (defschema Card (struct Card (id text) (cost i64) (element Element)))
+        (defn discount ((card Card)) -> Card
           (match card.element
             (Element.Frost (with card { cost: (- card.cost 1) }))
             (_ card)))

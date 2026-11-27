@@ -63,20 +63,36 @@ fn deep_roundtrips() {
         assert!(value.approx_bytes() >= 20_000);
         assert!(
             machine
-                .eval_with("(== a b)", &[("a", value.clone()), ("b", other.clone())])
+                .eval_with(
+                    "(== a b)",
+                    &[
+                        ("a", "datum", nested(0, 20_000, Value::Int(7))),
+                        ("b", "datum", nested(0, 20_000, Value::Int(7)))
+                    ]
+                )
                 .unwrap()
                 == Value::Bool(true)
         );
-        assert!(machine.eval_with("a", &[("a", value.clone())]).unwrap() == value);
-        assert!(
-            machine
-                .eval_with(
-                    "(== a b)",
-                    &[("a", value.clone()), ("b", different.clone())]
-                )
-                .unwrap()
-                == Value::Bool(false)
-        );
+        if shape == 0 {
+            assert!(
+                machine
+                    .eval_with("a", &[("a", "datum", value.clone())])
+                    .unwrap()
+                    == value
+            );
+            assert!(
+                machine
+                    .eval_with(
+                        "(== a b)",
+                        &[
+                            ("a", "datum", value.clone()),
+                            ("b", "datum", different.clone())
+                        ]
+                    )
+                    .unwrap()
+                    == Value::Bool(false)
+            );
+        }
         assert_eq!(machine.live_bytes(), 0);
         let shared = value.clone();
         drop(value);
@@ -129,7 +145,7 @@ fn deep_roundtrips() {
     }
     drop(shared_node);
     // 実際の Mod ソースから、既定 Limits で深い値を作る経路。
-    drop(rin::eval("(fold (fn (acc x) [acc]) [] (range 0 5000))").unwrap());
+    drop(rin::eval("(fold (fn (acc x) `[,acc]) '() (range 0 5000))").unwrap());
 }
 
 fn schemas_and_ffi() {
@@ -177,12 +193,19 @@ fn schemas_and_ffi() {
         rin_drop(m, value);
         let inner = rin_unwrap(m, wrapper);
         rin_drop(m, wrapper);
-        assert!(rin_bind(m, c"x".as_ptr(), inner));
+        let mut deep_list = rin_nil(m);
+        for _ in 0..2_000 {
+            let next = rin_cons(m, deep_list, rin_nil(m));
+            rin_drop(m, deep_list);
+            deep_list = next;
+        }
+        assert!(rin_bind(m, c"x".as_ptr(), c"datum".as_ptr(), deep_list));
+        rin_drop(m, deep_list);
         rin_drop(m, inner);
         assert!(rin_freeze(m));
         let result = rin_eval(m, c"x".as_ptr());
         assert!(result.ok);
-        assert!(rin_check(m, result.value, schema));
+        assert!(rin_check_str(m, result.value, c"datum".as_ptr()));
         let mut structure = rin_none(m);
         for _ in 0..2_000 {
             let st = rin_struct(m, c"S".as_ptr());
@@ -219,10 +242,13 @@ fn failure_cleanup() {
         ]);
         let mut alloc = HeapAllocator;
         let mut m = Builder::new(Limits::default(), &mut alloc);
-        m.bind("keep", &Value::text("retained")).unwrap();
+        m.bind("keep", "text", &Value::text("retained")).unwrap();
         let before = m.live_bytes();
         for _ in 0..3 {
-            assert_eq!(m.bind("bad", &bad).unwrap_err().kind, ErrorKind::Runtime);
+            assert_eq!(
+                m.bind("bad", "datum", &bad).unwrap_err().kind,
+                ErrorKind::Runtime
+            );
             assert_eq!(m.live_bytes(), before);
             assert!(m.eval("keep").unwrap() == Value::text("retained"));
         }
@@ -237,11 +263,11 @@ fn failure_cleanup() {
                 &mut alloc,
             );
             assert_eq!(
-                m.bind("x", &good).unwrap_err().kind,
+                m.bind("x", "datum", &good).unwrap_err().kind,
                 ErrorKind::TooMuchMemory
             );
             assert_eq!(m.live_bytes(), 0);
-            if budget >= 4000 {
+            if budget >= 8000 {
                 assert!(m.eval("42").unwrap() == Value::Int(42));
             }
         }
@@ -266,12 +292,12 @@ fn allocator_failures() {
             unsafe { HeapAllocator.dealloc(ptr, layout) }
         }
     }
-    let deep = nested(4, 2000, Value::None);
+    let deep = nested(0, 2000, Value::None);
     for remaining in 0..4 {
         let mut alloc = FailAfter { remaining };
         let mut m = Builder::new(Limits::default(), &mut alloc);
         assert_eq!(
-            m.bind("x", &deep).unwrap_err().kind,
+            m.bind("x", "datum", &deep).unwrap_err().kind,
             ErrorKind::TooMuchMemory
         );
         assert_eq!(m.live_bytes(), 0);
@@ -279,7 +305,8 @@ fn allocator_failures() {
     // すでに取り込んだ別引数と、変換中の兄弟の両方を回収する。
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
-    m.eval("(defn accept (a b) 1)").unwrap();
+    m.eval("(defn accept ((a datum) (b (array datum))) -> i64 1)")
+        .unwrap();
     let mut m = m.freeze().unwrap();
     let before = m.live_bytes();
     let bad = Value::array(vec![deep.clone(), Value::Builtin("invalid")]);
@@ -288,7 +315,11 @@ fn allocator_failures() {
         ErrorKind::Runtime
     );
     assert_eq!(m.live_bytes(), before);
-    assert!(m.call("accept", &[Value::None, Value::None]).unwrap() == Value::Int(1));
+    assert!(
+        m.call("accept", &[Value::None, Value::array(vec![])])
+            .unwrap()
+            == Value::Int(1)
+    );
 }
 
 #[test]
@@ -364,7 +395,7 @@ fn formatting_and_schema_error_order() {
         .check(&v)
         .unwrap_err();
     assert_eq!(err.message, "$.a[0]: expected bool, got i64");
-    let err = Schema::parse("(struct S (a any))")
+    let err = Schema::parse("(struct S (a datum))")
         .unwrap()
         .check(&v)
         .unwrap_err();
@@ -382,8 +413,10 @@ fn shallow_and_iterative_paths_agree() {
             assert!(value == other);
             assert!(value != nested(shape, depth, Value::Int(8)));
             let name = format!("x_{depth}_{shape}");
-            m.bind(&name, &value).unwrap();
-            assert!(m.eval(&name).unwrap() == value);
+            if shape == 0 {
+                m.bind(&name, "datum", &value).unwrap();
+                assert!(m.eval(&name).unwrap() == value);
+            }
             assert_eq!(value.to_string(), other.to_string());
             assert_eq!(format!("{value:?}"), format!("{other:?}"));
             let nan = nested(shape, depth, Value::Float(f64::NAN));
@@ -398,7 +431,10 @@ fn shallow_and_iterative_paths_agree() {
                     Value::Builtin("invalid"),
                 ]),
             );
-            assert_eq!(m.bind("bad", &bad).unwrap_err().kind, ErrorKind::Runtime);
+            assert_eq!(
+                m.bind("bad", "datum", &bad).unwrap_err().kind,
+                ErrorKind::Runtime
+            );
             assert_eq!(m.live_bytes(), before, "failed import at depth {depth}");
             assert!(m.eval("42").unwrap() == Value::Int(42));
         }

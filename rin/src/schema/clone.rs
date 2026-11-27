@@ -41,7 +41,7 @@ impl TypeExpr {
         'clone_loop: loop {
             match next {
                 CloneNext::Start(cur) => match cur {
-                    TypeExpr::Any => next = CloneNext::Have(TypeExpr::Any),
+                    TypeExpr::Datum => next = CloneNext::Have(TypeExpr::Datum),
                     TypeExpr::Void => next = CloneNext::Have(TypeExpr::Void),
                     TypeExpr::I64 => next = CloneNext::Have(TypeExpr::I64),
                     TypeExpr::F64 => next = CloneNext::Have(TypeExpr::F64),

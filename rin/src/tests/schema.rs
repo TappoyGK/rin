@@ -13,16 +13,37 @@ fn schema_validation_strict_open_recursive_and_ffi() {
     )
     .unwrap();
 
-    let ok_val = eval(r#"[Card { id: "strike" cost: 1 element: Element.Fire }]"#).unwrap();
+    let ok_val = eval(
+        r#"
+        (defschema Element (variant Element (Plain) (Fire) (Frost)))
+        (defschema Card (struct Card (id text) (cost i64) (element Element)))
+        [Card { id: "strike" cost: 1 element: Element.Fire }]
+        "#,
+    )
+    .unwrap();
     assert!(s.check(&ok_val).is_ok());
 
-    let extra_field =
-        eval(r#"[Card { id: "strike" cost: 1 element: Element.Fire rarity: 2 }]"#).unwrap();
+    let extra_field = eval(
+        r#"
+        (defschema Element (variant Element (Plain) (Fire) (Frost)))
+        (defschema Card (struct Card (id text) (cost i64) (element Element) (rarity i64)))
+        [Card { id: "strike" cost: 1 element: Element.Fire rarity: 2 }]
+        "#,
+    )
+    .unwrap();
     assert!(s.check(&extra_field).is_err());
 
-    let open_s =
-        Schema::parse("(list (open_struct Card (id text) (cost i64) (element any)))").unwrap();
+    let open_s = Schema::parse(
+        r#"
+        (defschema Element (variant Element (Plain) (Fire) (Frost)))
+        (list (open_struct Card (id text) (cost i64) (element Element)))
+        "#,
+    )
+    .unwrap();
     assert!(open_s.check(&extra_field).is_ok());
+
+    // `any` は廃止されている
+    assert!(Schema::parse("(list any)").is_err());
 
     let rec = Schema::parse(
         r#"
@@ -31,7 +52,13 @@ fn schema_validation_strict_open_recursive_and_ffi() {
         "#,
     )
     .unwrap();
-    let tree = eval("Node { val: 1 next: some(Node { val: 2 next: none }) }").unwrap();
+    let tree = eval(
+        r#"
+        (defschema Node (struct Node (val i64) (next (option Node))))
+        Node { val: 1 next: some(Node { val: 2 next: none }) }
+        "#,
+    )
+    .unwrap();
     assert!(rec.check(&tree).is_ok());
 
     unsafe {

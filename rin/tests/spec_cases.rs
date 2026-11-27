@@ -471,19 +471,32 @@ fn evaluate_case(case: &SpecCase) -> Result<Value, Error> {
         }
         if !case.initial_bindings.is_empty() {
             let mut machine = builder.freeze().expect("freeze");
-            let evaluated: Vec<(String, Value)> = case
+            let evaluated: Vec<(String, String, Value)> = case
                 .initial_bindings
                 .iter()
                 .map(|(k, expr)| {
+                    let (name, explicit_ty) = match k.split_once(':') {
+                        Some((n, t)) => (n.trim().to_string(), Some(t.trim().to_string())),
+                        None => (k.clone(), None),
+                    };
                     let v = eval(expr).unwrap_or_else(|e| {
                         panic!("{}: failed to eval binding '{k} = {expr}': {e}", case.id)
                     });
-                    (k.clone(), v)
+                    let ty = explicit_ty.unwrap_or_else(|| match &v {
+                        Value::Int(_) => "i64".to_string(),
+                        Value::Float(_) => "f64".to_string(),
+                        Value::Bool(_) => "bool".to_string(),
+                        Value::Char(_) => "char".to_string(),
+                        Value::Text(_) => "text".to_string(),
+                        Value::Ident(_) => "ident".to_string(),
+                        _ => "datum".to_string(),
+                    });
+                    (name, ty, v)
                 })
                 .collect();
-            let refs: Vec<(&str, Value)> = evaluated
+            let refs: Vec<(&str, &str, Value)> = evaluated
                 .iter()
-                .map(|(k, v)| (k.as_str(), v.clone()))
+                .map(|(k, t, v)| (k.as_str(), t.as_str(), v.clone()))
                 .collect();
             machine.eval_with(&case.source, &refs)
         } else {
@@ -541,6 +554,10 @@ fn run_case(case: &SpecCase) {
         "構文エラー" => {
             let err = result.unwrap_err();
             assert_eq!(err.kind, ErrorKind::Parse, "{}: {err}", case.id);
+        }
+        "型エラー" => {
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Type, "{}: {err}", case.id);
         }
         "実行時エラー" => {
             let err = result.unwrap_err();

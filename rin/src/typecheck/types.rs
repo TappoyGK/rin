@@ -95,6 +95,7 @@ pub(crate) struct ModuleTypeEnv {
     pub(crate) name: RawStr,
     pub(crate) exports_types: RawMap<RawStr, SchemaId>,
     pub(crate) exports_vals: RawMap<RawStr, ValBinding>,
+    pub(crate) export_val_names: RawVec<RawStr>,
 }
 
 /// 失敗時のゼロ確保ロールバック用スナップショット。
@@ -103,6 +104,7 @@ pub(crate) struct TypeEnvSnapshot {
     root_type_slots_len: usize,
     root_val_slots_len: usize,
     module_slots_len: usize,
+    root_import_slots_len: usize,
 }
 
 /// 永続領域 (`PermArena`) に保持する型環境。
@@ -113,8 +115,11 @@ pub(crate) struct TypeEnv {
     root_type_slots: RawVec<Option<SchemaId>>,
     root_vals: RawMap<RawStr, u32>,
     root_val_slots: RawVec<Option<ValBinding>>,
+    root_val_names: RawVec<RawStr>,
     modules: RawMap<RawStr, u32>,
     module_slots: RawVec<Option<ModuleTypeEnv>>,
+    root_imports: RawMap<RawStr, u32>,
+    root_import_slots: RawVec<Option<u32>>,
 }
 
 impl TypeEnv {
@@ -126,8 +131,11 @@ impl TypeEnv {
             root_type_slots: RawVec::new(),
             root_vals: RawMap::new(),
             root_val_slots: RawVec::new(),
+            root_val_names: RawVec::new(),
             modules: RawMap::new(),
             module_slots: RawVec::new(),
+            root_imports: RawMap::new(),
+            root_import_slots: RawVec::new(),
         }
     }
 
@@ -333,6 +341,10 @@ impl TypeEnv {
             .root_val_slots
             .push_perm(perm, core, Some(binding))
             .is_none()
+            || self
+                .root_val_names
+                .push_perm(perm, core, raw_name)
+                .is_none()
         {
             return Err(core.err_str(
                 "eval.limits",
@@ -411,12 +423,77 @@ impl TypeEnv {
         Ok(slot_idx)
     }
 
+    pub(crate) fn lookup_root_import(&self, name: &str) -> Option<u32> {
+        let h = fnv1a_bytes(name.as_bytes());
+        let slot_idx = self.root_imports.get_by(h, |k| k.as_str() == name)?;
+        self.root_import_slots.as_slice()[slot_idx as usize]
+    }
+
+    pub(crate) fn define_root_import(
+        &mut self,
+        perm: &mut PermArena,
+        core: &mut AllocCore<'_>,
+        name: &str,
+        mod_slot: u32,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let h = fnv1a_bytes(name.as_bytes());
+        if let Some(slot_idx) = self.root_imports.get_by(h, |k| k.as_str() == name) {
+            self.root_import_slots.as_mut_slice()[slot_idx as usize] = Some(mod_slot);
+            return Ok(());
+        }
+        let Some(raw_name) = RawStr::from_perm(perm, core, name) else {
+            return Err(core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                span,
+                "memory limit exceeded",
+            ));
+        };
+        let slot_idx = self.root_import_slots.len() as u32;
+        if self
+            .root_import_slots
+            .push_perm(perm, core, Some(mod_slot))
+            .is_none()
+            || self
+                .root_imports
+                .insert_perm(perm, core, h, raw_name, slot_idx, |a, b| {
+                    a.as_str() == b.as_str()
+                })
+                .is_none()
+        {
+            return Err(core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                span,
+                "memory limit exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn iter_root_val_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.root_val_slots
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.map(|_| self.root_val_names.as_slice()[i].as_str()))
+    }
+
+    pub(crate) fn iter_module_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.module_slots
+            .as_slice()
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|m| m.name.as_str()))
+    }
+
     /// 失敗時の巻き戻し用スナップショットを取得する。
     pub(crate) fn snapshot(&self) -> TypeEnvSnapshot {
         TypeEnvSnapshot {
             root_type_slots_len: self.root_type_slots.len(),
             root_val_slots_len: self.root_val_slots.len(),
             module_slots_len: self.module_slots.len(),
+            root_import_slots_len: self.root_import_slots.len(),
         }
     }
 
@@ -429,6 +506,9 @@ impl TypeEnv {
             *slot = None;
         }
         for slot in &mut self.module_slots.as_mut_slice()[snap.module_slots_len..] {
+            *slot = None;
+        }
+        for slot in &mut self.root_import_slots.as_mut_slice()[snap.root_import_slots_len..] {
             *slot = None;
         }
     }

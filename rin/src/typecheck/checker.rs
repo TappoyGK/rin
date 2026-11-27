@@ -34,8 +34,10 @@ pub(crate) struct CheckOptions<'a> {
     pub(crate) test_mode: bool,
     /// 成功時に新規定義を `TypeEnv`（`PermArena`）へ確定するか。
     pub(crate) commit: bool,
-    /// 一時的な初期束縛（`eval_with` 用）。
+    /// 一時的な初期束縛（`eval_with` の永続型ハンドル用）。
     pub(crate) extra_bindings: &'a [(&'a str, TypeId)],
+    /// 一時的な初期束縛（`eval_with` の型式 AST 用・凍結環境で `PermArena` 不使用）。
+    pub(crate) extra_binding_exprs: &'a [(&'a str, TypeExpr)],
 }
 
 impl Default for CheckOptions<'_> {
@@ -47,6 +49,7 @@ impl Default for CheckOptions<'_> {
             test_mode: false,
             commit: true,
             extra_bindings: &[],
+            extra_binding_exprs: &[],
         }
     }
 }
@@ -90,6 +93,7 @@ pub(crate) struct TypeChecker<'a, 'alloc> {
     local_defns: RawVec<LocalDefnInfo>,
     /// `import` されたモジュール名 -> `TypeEnv.module_slots` インデックス。
     imported_modules: RawMap<RawStr, u32>,
+    local_imports: RawVec<(RawStr, u32, Span)>,
     /// ブロックスコープの変数スタック（`let` / `fn` / `defn` / `match`）。
     scopes: RawVec<ScopeBinding>,
     /// `export` で指定された名前一覧。
@@ -123,6 +127,7 @@ pub(crate) fn check_program_work<'a, 'alloc>(
         local_defs: RawVec::new(),
         local_defns: RawVec::new(),
         imported_modules: RawMap::new(),
+        local_imports: RawVec::new(),
         scopes: RawVec::new(),
         explicit_exports: RawVec::new(),
         has_export: false,
@@ -159,12 +164,14 @@ pub(crate) fn resolve_type_expr_perm<'a, 'alloc>(
             test_mode: false,
             commit: false,
             extra_bindings: &[],
+            extra_binding_exprs: &[],
         },
         local_type_map: RawMap::new(),
         local_val_map: RawMap::new(),
         local_defs: RawVec::new(),
         local_defns: RawVec::new(),
         imported_modules: RawMap::new(),
+        local_imports: RawVec::new(),
         scopes: RawVec::new(),
         explicit_exports: RawVec::new(),
         has_export: false,
@@ -195,28 +202,70 @@ impl<'a> TypeChecker<'a, '_> {
                 return Err(oom(self.core, Span::default()));
             }
         }
+        for (name, te) in self.opts.extra_binding_exprs {
+            let Some(rs) = RawStr::from_work(self.work, self.core, name) else {
+                return Err(oom(self.core, te.span));
+            };
+            let wty = self.resolve_type_expr(te)?;
+            if self
+                .scopes
+                .push_work(self.work, self.core, ScopeBinding { name: rs, ty: wty })
+                .is_none()
+            {
+                return Err(oom(self.core, te.span));
+            }
+        }
 
-        // 1. import の収集（モジュール型参照を可能にするため defschema 解決より先に登録）
+        // 1. import / export の凍結検査と import の収集
         for expr in exprs {
-            if let ExprKind::Import { name } = expr.kind {
-                let Some((slot_idx, _)) = self.env.lookup_module(name.as_str()) else {
-                    return Err(self.core.err_str(
-                        "expr.module",
-                        ErrorKind::Runtime,
-                        expr.span,
-                        "unknown module",
-                    ));
-                };
-                let h = fnv1a_bytes(name.as_bytes());
-                if self
-                    .imported_modules
-                    .insert_work(self.work, self.core, h, name, slot_idx, |a, b| {
-                        a.as_str() == b.as_str()
-                    })
-                    .is_none()
-                {
-                    return Err(oom(self.core, expr.span));
+            match expr.kind {
+                ExprKind::Import { name } => {
+                    if self.opts.frozen {
+                        return Err(self.core.err_str(
+                            "env.frozen",
+                            ErrorKind::Parse,
+                            expr.span,
+                            "cannot use import in frozen environment",
+                        ));
+                    }
+                    let Some((slot_idx, _)) = self.env.lookup_module(name.as_str()) else {
+                        use std::fmt::Write as _;
+                        let out =
+                            self.core
+                                .error
+                                .begin_msg("expr.module", ErrorKind::Runtime, expr.span);
+                        let _ = write!(out, "unknown module '{}'", name.as_str());
+                        crate::diagnostic::write_suggest(
+                            out,
+                            name.as_str(),
+                            self.env.iter_module_names(),
+                        );
+                        return Err(ErrRecorded);
+                    };
+                    let h = fnv1a_bytes(name.as_bytes());
+                    if self
+                        .imported_modules
+                        .insert_work(self.work, self.core, h, name, slot_idx, |a, b| {
+                            a.as_str() == b.as_str()
+                        })
+                        .is_none()
+                        || self
+                            .local_imports
+                            .push_work(self.work, self.core, (name, slot_idx, expr.span))
+                            .is_none()
+                    {
+                        return Err(oom(self.core, expr.span));
+                    }
                 }
+                ExprKind::Export { .. } if self.opts.frozen => {
+                    return Err(self.core.err_str(
+                        "env.frozen",
+                        ErrorKind::Parse,
+                        expr.span,
+                        "cannot use export in frozen environment",
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -226,7 +275,7 @@ impl<'a> TypeChecker<'a, '_> {
                 if self.opts.frozen {
                     return Err(self.core.err_str(
                         "env.frozen",
-                        ErrorKind::Runtime,
+                        ErrorKind::Parse,
                         expr.span,
                         "cannot use defschema in frozen environment",
                     ));
@@ -254,7 +303,7 @@ impl<'a> TypeChecker<'a, '_> {
                 if self.opts.frozen {
                     return Err(self.core.err_str(
                         "env.frozen",
-                        ErrorKind::Runtime,
+                        ErrorKind::Parse,
                         expr.span,
                         "cannot use defn in frozen environment",
                     ));
@@ -287,13 +336,13 @@ impl<'a> TypeChecker<'a, '_> {
                     if self.opts.frozen {
                         return Err(self.core.err_str(
                             "env.frozen",
-                            ErrorKind::Runtime,
+                            ErrorKind::Parse,
                             expr.span,
                             "cannot use def in frozen environment",
                         ));
                     }
                     let d = d.as_ref();
-                    self.check_no_val_redef(d.name.as_str(), expr.span)?;
+                    self.check_no_val_redef(d.name.as_str(), expr.span, "expr.def")?;
                     let exp = match d.ty {
                         Some(ty_box) => Some(self.resolve_type_expr(ty_box.as_ref())?),
                         None => None,
@@ -463,6 +512,9 @@ impl<'a> TypeChecker<'a, '_> {
                             return Err(oom(self.core, span));
                         }
                     }
+                    wfields
+                        .as_mut_slice()
+                        .sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
                     self.wpool.local_schemas.as_mut_slice()[i].kind =
                         Some(LocalSchemaKind::Struct {
                             open: *open,
@@ -644,7 +696,7 @@ impl<'a> TypeChecker<'a, '_> {
         d: &crate::ast::DefnExpr,
         span: Span,
     ) -> Result<(), ErrRecorded> {
-        self.check_no_val_redef(d.name.as_str(), span)?;
+        self.check_no_val_redef(d.name.as_str(), span, "expr.defn")?;
         let mut params = RawVec::<(RawStr, WorkTypeId)>::new();
         let mut param_tys = RawVec::new();
         for p in d.params.as_slice() {
@@ -772,27 +824,35 @@ impl<'a> TypeChecker<'a, '_> {
         res
     }
 
-    fn check_no_val_redef(&mut self, name: &str, span: Span) -> Result<(), ErrRecorded> {
+    fn check_no_val_redef(
+        &mut self,
+        name: &str,
+        span: Span,
+        rule: &'static str,
+    ) -> Result<(), ErrRecorded> {
+        let emit = |core: &mut AllocCore<'_>, msg: &str| -> ErrRecorded {
+            if rule == "expr.defn" {
+                core.err_str("expr.defn", ErrorKind::Runtime, span, msg)
+            } else {
+                core.err_str("expr.def", ErrorKind::Runtime, span, msg)
+            }
+        };
         let h = fnv1a_bytes(name.as_bytes());
         if self
             .local_val_map
             .get_by(h, |k| k.as_str() == name)
             .is_some()
         {
-            return Err(self.core.err_str(
-                "expr.def",
-                ErrorKind::Runtime,
-                span,
-                "cannot redefine name in same unit",
-            ));
+            return Err(emit(self.core, "cannot redefine name in same unit"));
         }
         if self.opts.module_name.is_none() && self.env.lookup_root_val(name).is_some() {
-            return Err(self.core.err_str(
-                "expr.def",
-                ErrorKind::Runtime,
-                span,
-                "cannot redefine existing global name",
-            ));
+            return Err(emit(self.core, "cannot redefine existing global name"));
+        }
+        if name == "pi" || lookup_builtin_by_name(name).is_some() {
+            return Err(emit(self.core, "cannot redefine builtin name"));
+        }
+        if self.opts.module_name.is_none() && self.env.lookup_module(name).is_some() {
+            return Err(emit(self.core, "cannot redefine loaded module name"));
         }
         Ok(())
     }
@@ -986,7 +1046,7 @@ impl<'a> TypeChecker<'a, '_> {
                 self.check_quasiquote_datum(datum.as_ref())?;
                 Ok(WTY_DATUM)
             }
-            ExprKind::List(items) => self.check_list_elements(items.as_slice(), expected, span),
+            ExprKind::List(items) => self.check_list_chain(items.as_slice(), expected, span),
             ExprKind::Tuple(items) => {
                 let exp_items = match expected {
                     Some(e) => match self
@@ -1134,63 +1194,139 @@ impl<'a> TypeChecker<'a, '_> {
                 )
             }
             ExprKind::Field { target, field } => {
-                let tt = self.check_expr(target.as_ref(), None)?;
-                let node =
-                    self.wpool
-                        .unwrap_perm(tt, self.env, self.work, self.core, target.span)?;
-                match node {
-                    WorkTypeNode::Module(slot_idx) => {
-                        let Some(menv) = self.env.get_module(slot_idx) else {
-                            return Err(self.type_err("expr.module", span, "unknown module"));
-                        };
-                        let h = fnv1a_bytes(field.as_bytes());
-                        let Some(vb) = menv
-                            .exports_vals
-                            .get_by(h, |k| k.as_str() == field.as_str())
-                        else {
-                            return Err(self.type_err(
-                                "expr.module",
-                                span,
-                                "module does not export this symbol",
-                            ));
-                        };
-                        self.wpool
-                            .alloc_node(self.work, self.core, WorkTypeNode::Perm(vb.ty), span)
-                    }
-                    WorkTypeNode::Schema(sid) => {
-                        self.lookup_struct_field_type(sid, field.as_str(), span, "expr.field")
-                    }
-                    _ => Err(self.type_err(
-                        "expr.field",
-                        span,
-                        "field access requires a struct or module",
-                    )),
+                let mut chain = RawVec::<(RawStr, Span)>::new();
+                if chain
+                    .push_work(self.work, self.core, (*field, span))
+                    .is_none()
+                {
+                    return Err(oom(self.core, span));
                 }
+                let mut cur = target.as_ref();
+                while let ExprKind::Field {
+                    target: t,
+                    field: f,
+                } = &cur.kind
+                {
+                    self.wpool.tick(self.core, cur.span)?;
+                    if chain
+                        .push_work(self.work, self.core, (*f, cur.span))
+                        .is_none()
+                    {
+                        return Err(oom(self.core, cur.span));
+                    }
+                    cur = t.as_ref();
+                }
+                let mut cur_ty = self.check_expr(cur, None)?;
+                let mut cur_span = cur.span;
+                for &(f, fspan) in chain.as_slice().iter().rev() {
+                    let node = self
+                        .wpool
+                        .unwrap_perm(cur_ty, self.env, self.work, self.core, cur_span)?;
+                    cur_ty = match node {
+                        WorkTypeNode::Module(slot_idx) => {
+                            let Some(menv) = self.env.get_module(slot_idx) else {
+                                return Err(self.type_err("expr.module", fspan, "unknown module"));
+                            };
+                            let h = fnv1a_bytes(f.as_bytes());
+                            let Some(vb) =
+                                menv.exports_vals.get_by(h, |k| k.as_str() == f.as_str())
+                            else {
+                                use std::fmt::Write as _;
+                                let mname = menv.name;
+                                let names = menv.export_val_names;
+                                let out = self.core.error.begin_msg(
+                                    "expr.module",
+                                    ErrorKind::Type,
+                                    fspan,
+                                );
+                                let _ = write!(
+                                    out,
+                                    "module '{}' has no export '{}'",
+                                    mname.as_str(),
+                                    f.as_str()
+                                );
+                                crate::diagnostic::write_available(
+                                    out,
+                                    "exports",
+                                    names.as_slice().iter().map(|s| s.as_str()),
+                                );
+                                return Err(ErrRecorded);
+                            };
+                            self.wpool.alloc_node(
+                                self.work,
+                                self.core,
+                                WorkTypeNode::Perm(vb.ty),
+                                fspan,
+                            )?
+                        }
+                        WorkTypeNode::Schema(sid) => {
+                            self.lookup_struct_field_type(sid, f.as_str(), fspan, "expr.field")?
+                        }
+                        _ => {
+                            return Err(self.type_err(
+                                "expr.field",
+                                fspan,
+                                "field access requires a struct or module",
+                            ));
+                        }
+                    };
+                    cur_span = fspan;
+                }
+                Ok(cur_ty)
             }
             ExprKind::Index { target, index } => {
-                let tt = self.check_expr(target.as_ref(), None)?;
-                let ti = self.check_expr(index.as_ref(), Some(WTY_I64))?;
-                self.wpool.unify(
-                    ti,
-                    WTY_I64,
-                    self.env,
-                    self.work,
-                    self.core,
-                    index.span,
-                    "expr.index",
-                )?;
-                match self
-                    .wpool
-                    .unwrap_perm(tt, self.env, self.work, self.core, target.span)?
+                let mut indices = RawVec::<(&Expr, Span)>::new();
+                if indices
+                    .push_work(self.work, self.core, (index.as_ref(), span))
+                    .is_none()
                 {
-                    WorkTypeNode::List(elem) | WorkTypeNode::Array(elem) => Ok(elem),
-                    WorkTypeNode::Perm(TY_TEXT) => Ok(WTY_CHAR),
-                    _ => Err(self.type_err(
-                        "expr.index",
-                        target.span,
-                        "indexing requires list, array, or text",
-                    )),
+                    return Err(oom(self.core, span));
                 }
+                let mut cur = target.as_ref();
+                while let ExprKind::Index {
+                    target: t,
+                    index: i,
+                } = &cur.kind
+                {
+                    self.wpool.tick(self.core, cur.span)?;
+                    if indices
+                        .push_work(self.work, self.core, (i.as_ref(), cur.span))
+                        .is_none()
+                    {
+                        return Err(oom(self.core, cur.span));
+                    }
+                    cur = t.as_ref();
+                }
+                let mut cur_ty = self.check_expr(cur, None)?;
+                let mut cur_span = cur.span;
+                for &(idx_expr, ispan) in indices.as_slice().iter().rev() {
+                    let ti = self.check_expr(idx_expr, Some(WTY_I64))?;
+                    self.wpool.unify(
+                        ti,
+                        WTY_I64,
+                        self.env,
+                        self.work,
+                        self.core,
+                        idx_expr.span,
+                        "expr.index",
+                    )?;
+                    cur_ty = match self
+                        .wpool
+                        .unwrap_perm(cur_ty, self.env, self.work, self.core, cur_span)?
+                    {
+                        WorkTypeNode::List(elem) | WorkTypeNode::Array(elem) => elem,
+                        WorkTypeNode::Perm(TY_TEXT) => WTY_CHAR,
+                        _ => {
+                            return Err(self.type_err(
+                                "expr.index",
+                                cur_span,
+                                "indexing requires list, array, or text",
+                            ));
+                        }
+                    };
+                    cur_span = ispan;
+                }
+                Ok(cur_ty)
             }
             ExprKind::With { target, fields } => {
                 let tt = self.check_expr(target.as_ref(), expected)?;
@@ -1224,124 +1360,8 @@ impl<'a> TypeChecker<'a, '_> {
                 }
                 Ok(tt)
             }
-            ExprKind::Let(l) => {
-                let l = l.as_ref();
-                let saved = self.scopes.len();
-                let res = (|| -> Result<WorkTypeId, ErrRecorded> {
-                    for &(bname, ref bexpr) in l.bindings.as_slice() {
-                        let bty = self.check_expr(bexpr, None)?;
-                        if self
-                            .scopes
-                            .push_work(
-                                self.work,
-                                self.core,
-                                ScopeBinding {
-                                    name: bname,
-                                    ty: bty,
-                                },
-                            )
-                            .is_none()
-                        {
-                            return Err(oom(self.core, bexpr.span));
-                        }
-                    }
-                    let body = l.body.as_slice();
-                    for e in &body[..body.len().saturating_sub(1)] {
-                        let _ = self.check_expr(e, None)?;
-                    }
-                    match body.last() {
-                        Some(last) => self.check_expr(last, expected),
-                        None => Ok(WTY_VOID),
-                    }
-                })();
-                self.scopes.truncate(saved);
-                res
-            }
-            ExprKind::Fn(f) => {
-                let f = f.as_ref();
-                let (exp_params, exp_ret) = match expected {
-                    Some(e) => match self
-                        .wpool
-                        .unwrap_perm(e, self.env, self.work, self.core, span)?
-                    {
-                        WorkTypeNode::Fn { params, ret } if params.len() == f.params.len() => {
-                            (Some(params), Some(ret))
-                        }
-                        _ => (None, None),
-                    },
-                    None => (None, None),
-                };
-                let saved = self.scopes.len();
-                let res = (|| -> Result<WorkTypeId, ErrRecorded> {
-                    let mut p_tys = RawVec::new();
-                    for (i, p) in f.params.as_slice().iter().enumerate() {
-                        let exp_pi = exp_params.map(|ps| ps.as_slice()[i]);
-                        let pty = match (p.ty, exp_pi) {
-                            (Some(tb), Some(ep)) => {
-                                let t = self.resolve_type_expr(tb.as_ref())?;
-                                self.wpool.unify(
-                                    t, ep, self.env, self.work, self.core, tb.span, "expr.fn",
-                                )?;
-                                t
-                            }
-                            (Some(tb), None) => self.resolve_type_expr(tb.as_ref())?,
-                            (None, Some(ep)) => ep,
-                            (None, None) => self.wpool.fresh_var(self.work, self.core, span)?,
-                        };
-                        if p_tys.push_work(self.work, self.core, pty).is_none()
-                            || self
-                                .scopes
-                                .push_work(
-                                    self.work,
-                                    self.core,
-                                    ScopeBinding {
-                                        name: p.name,
-                                        ty: pty,
-                                    },
-                                )
-                                .is_none()
-                        {
-                            return Err(oom(self.core, span));
-                        }
-                    }
-                    let ret_exp = match (f.ret_ty, exp_ret) {
-                        (Some(rb), Some(er)) => {
-                            let t = self.resolve_type_expr(rb.as_ref())?;
-                            self.wpool
-                                .unify(t, er, self.env, self.work, self.core, rb.span, "expr.fn")?;
-                            Some(t)
-                        }
-                        (Some(rb), None) => Some(self.resolve_type_expr(rb.as_ref())?),
-                        (None, Some(er)) => Some(er),
-                        (None, None) => None,
-                    };
-                    let body = f.body.as_slice();
-                    for e in &body[..body.len().saturating_sub(1)] {
-                        let _ = self.check_expr(e, None)?;
-                    }
-                    let body_ty = match body.last() {
-                        Some(last) => self.check_expr(last, ret_exp)?,
-                        None => WTY_VOID,
-                    };
-                    let final_ret = match ret_exp {
-                        Some(re) => self.wpool.coerce_to_expected(
-                            body_ty, re, self.env, self.work, self.core, span, "expr.fn",
-                        )?,
-                        None => body_ty,
-                    };
-                    self.wpool.alloc_node(
-                        self.work,
-                        self.core,
-                        WorkTypeNode::Fn {
-                            params: p_tys,
-                            ret: final_ret,
-                        },
-                        span,
-                    )
-                })();
-                self.scopes.truncate(saved);
-                res
-            }
+            ExprKind::Let(l) => self.check_let_chain(l.as_ref(), expected),
+            ExprKind::Fn(f) => self.check_fn_chain(f.as_ref(), expected, span),
             ExprKind::If {
                 cond,
                 then_branch,
@@ -1482,22 +1502,290 @@ impl<'a> TypeChecker<'a, '_> {
                 }
             }
             ExprKind::Def(_) => {
-                Err(self.type_err("expr.def", span, "def is only allowed at top level"))
+                if self.opts.frozen {
+                    Err(self.core.err_str(
+                        "env.frozen",
+                        ErrorKind::Parse,
+                        span,
+                        "def is only allowed at top level",
+                    ))
+                } else {
+                    Err(self.core.err_str(
+                        "expr.def",
+                        ErrorKind::Parse,
+                        span,
+                        "def is only allowed at top level",
+                    ))
+                }
             }
-            ExprKind::DefSchema(_) => Err(self.type_err(
-                "type.defschema",
-                span,
-                "defschema is only allowed at top level",
-            )),
+            ExprKind::DefSchema(_) => {
+                if self.opts.frozen {
+                    Err(self.core.err_str(
+                        "env.frozen",
+                        ErrorKind::Parse,
+                        span,
+                        "defschema is only allowed at top level",
+                    ))
+                } else {
+                    Err(self.core.err_str(
+                        "type.defschema",
+                        ErrorKind::Parse,
+                        span,
+                        "defschema is only allowed at top level",
+                    ))
+                }
+            }
             ExprKind::Defn(_) => {
-                Err(self.type_err("expr.defn", span, "defn is only allowed at top level"))
+                if self.opts.frozen {
+                    Err(self.core.err_str(
+                        "env.frozen",
+                        ErrorKind::Parse,
+                        span,
+                        "defn is only allowed at top level",
+                    ))
+                } else {
+                    Err(self.core.err_str(
+                        "expr.defn",
+                        ErrorKind::Parse,
+                        span,
+                        "defn is only allowed at top level",
+                    ))
+                }
             }
-            ExprKind::Import { .. } | ExprKind::Export { .. } => Err(self.type_err(
-                "expr.module",
-                span,
-                "import/export is only allowed at top level",
-            )),
+            ExprKind::Import { .. } | ExprKind::Export { .. } => {
+                if self.opts.frozen {
+                    Err(self.core.err_str(
+                        "env.frozen",
+                        ErrorKind::Parse,
+                        span,
+                        "import/export is only allowed at top level",
+                    ))
+                } else {
+                    Err(self.core.err_str(
+                        "expr.module",
+                        ErrorKind::Parse,
+                        span,
+                        "import/export is only allowed at top level",
+                    ))
+                }
+            }
         }
+    }
+
+    #[inline(never)]
+    fn check_let_chain(
+        &mut self,
+        first: &crate::ast::LetExpr,
+        expected: Option<WorkTypeId>,
+    ) -> Result<WorkTypeId, ErrRecorded> {
+        let saved = self.scopes.len();
+        let res = (|| -> Result<WorkTypeId, ErrRecorded> {
+            let mut cur = first;
+            loop {
+                for &(bname, ref bexpr) in cur.bindings.as_slice() {
+                    let bty = self.check_expr(bexpr, None)?;
+                    if self
+                        .scopes
+                        .push_work(
+                            self.work,
+                            self.core,
+                            ScopeBinding {
+                                name: bname,
+                                ty: bty,
+                            },
+                        )
+                        .is_none()
+                    {
+                        return Err(oom(self.core, bexpr.span));
+                    }
+                }
+                let body = cur.body.as_slice();
+                for e in &body[..body.len().saturating_sub(1)] {
+                    let _ = self.check_expr(e, None)?;
+                }
+                match body.last() {
+                    Some(last) => {
+                        if let ExprKind::Let(next_l) = &last.kind {
+                            self.wpool.tick(self.core, last.span)?;
+                            cur = next_l.as_ref();
+                            continue;
+                        }
+                        return self.check_expr(last, expected);
+                    }
+                    None => return Ok(WTY_VOID),
+                }
+            }
+        })();
+        self.scopes.truncate(saved);
+        res
+    }
+
+    #[inline(never)]
+    fn check_fn_chain(
+        &mut self,
+        first: &crate::ast::FnExpr,
+        expected: Option<WorkTypeId>,
+        first_span: Span,
+    ) -> Result<WorkTypeId, ErrRecorded> {
+        let saved = self.scopes.len();
+        let res = (|| -> Result<WorkTypeId, ErrRecorded> {
+            let mut frames = RawVec::<(RawVec<WorkTypeId>, Option<WorkTypeId>, Span)>::new();
+            let mut cur = first;
+            let mut cur_exp = expected;
+            let mut cur_span = first_span;
+            let mut inner_ty = loop {
+                let (exp_params, exp_ret) = match cur_exp {
+                    Some(e) => match self
+                        .wpool
+                        .unwrap_perm(e, self.env, self.work, self.core, cur_span)?
+                    {
+                        WorkTypeNode::Fn { params, ret } if params.len() == cur.params.len() => {
+                            (Some(params), Some(ret))
+                        }
+                        _ => (None, None),
+                    },
+                    None => (None, None),
+                };
+                let mut p_tys = RawVec::new();
+                for (i, p) in cur.params.as_slice().iter().enumerate() {
+                    let exp_pi = exp_params.map(|ps| ps.as_slice()[i]);
+                    let pty = match (p.ty, exp_pi) {
+                        (Some(tb), Some(ep)) => {
+                            let t = self.resolve_type_expr(tb.as_ref())?;
+                            self.wpool
+                                .unify(t, ep, self.env, self.work, self.core, tb.span, "expr.fn")?;
+                            t
+                        }
+                        (Some(tb), None) => self.resolve_type_expr(tb.as_ref())?,
+                        (None, Some(ep)) => ep,
+                        (None, None) => self.wpool.fresh_var(self.work, self.core, cur_span)?,
+                    };
+                    if p_tys.push_work(self.work, self.core, pty).is_none()
+                        || self
+                            .scopes
+                            .push_work(
+                                self.work,
+                                self.core,
+                                ScopeBinding {
+                                    name: p.name,
+                                    ty: pty,
+                                },
+                            )
+                            .is_none()
+                    {
+                        return Err(oom(self.core, cur_span));
+                    }
+                }
+                let ret_exp = match (cur.ret_ty, exp_ret) {
+                    (Some(rb), Some(er)) => {
+                        let t = self.resolve_type_expr(rb.as_ref())?;
+                        self.wpool
+                            .unify(t, er, self.env, self.work, self.core, rb.span, "expr.fn")?;
+                        Some(t)
+                    }
+                    (Some(rb), None) => Some(self.resolve_type_expr(rb.as_ref())?),
+                    (None, Some(er)) => Some(er),
+                    (None, None) => None,
+                };
+                if frames
+                    .push_work(self.work, self.core, (p_tys, ret_exp, cur_span))
+                    .is_none()
+                {
+                    return Err(oom(self.core, cur_span));
+                }
+                let body = cur.body.as_slice();
+                for e in &body[..body.len().saturating_sub(1)] {
+                    let _ = self.check_expr(e, None)?;
+                }
+                match body.last() {
+                    Some(last) => {
+                        if let ExprKind::Fn(next_f) = &last.kind {
+                            self.wpool.tick(self.core, last.span)?;
+                            cur = next_f.as_ref();
+                            cur_exp = ret_exp;
+                            cur_span = last.span;
+                            continue;
+                        }
+                        break self.check_expr(last, ret_exp)?;
+                    }
+                    None => break WTY_VOID,
+                }
+            };
+            while let Some((p_tys, ret_exp, fspan)) = frames.pop() {
+                let final_ret = match ret_exp {
+                    Some(re) => self.wpool.coerce_to_expected(
+                        inner_ty, re, self.env, self.work, self.core, fspan, "expr.fn",
+                    )?,
+                    None => inner_ty,
+                };
+                inner_ty = self.wpool.alloc_node(
+                    self.work,
+                    self.core,
+                    WorkTypeNode::Fn {
+                        params: p_tys,
+                        ret: final_ret,
+                    },
+                    fspan,
+                )?;
+            }
+            Ok(inner_ty)
+        })();
+        self.scopes.truncate(saved);
+        res
+    }
+
+    #[inline(never)]
+    fn check_list_chain(
+        &mut self,
+        first_items: &[Expr],
+        expected: Option<WorkTypeId>,
+        first_span: Span,
+    ) -> Result<WorkTypeId, ErrRecorded> {
+        // 単一要素の入れ子リスト `[[[...x...]]]` を反復処理して小スタック消費を抑える。
+        if first_items.len() != 1 || !matches!(first_items[0].kind, ExprKind::List(_)) {
+            return self.check_list_elements(first_items, expected, first_span);
+        }
+        let mut wraps = RawVec::<(Option<WorkTypeId>, Span)>::new();
+        let mut cur_items = first_items;
+        let mut cur_exp = expected;
+        let mut cur_span = first_span;
+        let mut inner_ty = loop {
+            if cur_items.len() == 1
+                && let ExprKind::List(next_items) = &cur_items[0].kind
+            {
+                self.wpool.tick(self.core, cur_items[0].span)?;
+                let elem_exp = self.expected_list_elem(cur_exp, cur_span)?;
+                if wraps
+                    .push_work(self.work, self.core, (elem_exp, cur_span))
+                    .is_none()
+                {
+                    return Err(oom(self.core, cur_span));
+                }
+                cur_span = cur_items[0].span;
+                cur_items = next_items.as_slice();
+                cur_exp = elem_exp;
+                continue;
+            }
+            break self.check_list_elements(cur_items, cur_exp, cur_span)?;
+        };
+        while let Some((elem_exp, lspan)) = wraps.pop() {
+            let elem = match elem_exp {
+                Some(ee) => self.wpool.coerce_to_expected(
+                    inner_ty,
+                    ee,
+                    self.env,
+                    self.work,
+                    self.core,
+                    lspan,
+                    "expr.list",
+                )?,
+                None => inner_ty,
+            };
+            inner_ty =
+                self.wpool
+                    .alloc_node(self.work, self.core, WorkTypeNode::List(elem), lspan)?;
+        }
+        Ok(inner_ty)
     }
 
     pub(super) fn check_list_elements(
@@ -1616,6 +1904,16 @@ impl<'a> TypeChecker<'a, '_> {
                 span,
             );
         }
+        if self.opts.module_name.is_none()
+            && let Some(slot_idx) = self.env.lookup_root_import(name)
+        {
+            return self.wpool.alloc_node(
+                self.work,
+                self.core,
+                WorkTypeNode::Module(slot_idx),
+                span,
+            );
+        }
         if self.opts.frozen
             && let Some((slot_idx, _)) = self.env.lookup_module(name)
         {
@@ -1626,7 +1924,63 @@ impl<'a> TypeChecker<'a, '_> {
                 span,
             );
         }
-        Err(self.type_err("expr.name", span, "undefined variable"))
+        use std::fmt::Write as _;
+        let out = self
+            .core
+            .error
+            .begin_msg("expr.name", ErrorKind::Type, span);
+        let _ = write!(out, "unknown name '{name}'");
+        let scopes_iter = self.scopes.as_slice().iter().map(|b| b.name.as_str());
+        let defs_iter = self.local_defs.as_slice().iter().map(|d| d.name.as_str());
+        let defns_iter = self.local_defns.as_slice().iter().map(|d| d.name.as_str());
+        let imports_iter = self
+            .local_imports
+            .as_slice()
+            .iter()
+            .map(|(n, _, _)| n.as_str());
+        let builtins_iter = BuiltinId::ALL
+            .iter()
+            .map(|b| b.name())
+            .chain(std::iter::once("pi"));
+        if self.opts.module_name.is_none() {
+            let root_vals = self.env.iter_root_val_names();
+            if self.opts.frozen {
+                let mods = self.env.iter_module_names();
+                crate::diagnostic::write_suggest(
+                    out,
+                    name,
+                    scopes_iter
+                        .chain(defs_iter)
+                        .chain(defns_iter)
+                        .chain(imports_iter)
+                        .chain(root_vals)
+                        .chain(builtins_iter)
+                        .chain(mods),
+                );
+            } else {
+                crate::diagnostic::write_suggest(
+                    out,
+                    name,
+                    scopes_iter
+                        .chain(defs_iter)
+                        .chain(defns_iter)
+                        .chain(imports_iter)
+                        .chain(root_vals)
+                        .chain(builtins_iter),
+                );
+            }
+        } else {
+            crate::diagnostic::write_suggest(
+                out,
+                name,
+                scopes_iter
+                    .chain(defs_iter)
+                    .chain(defns_iter)
+                    .chain(imports_iter)
+                    .chain(builtins_iter),
+            );
+        }
+        Err(ErrRecorded)
     }
 
     fn lookup_struct_field_type(
@@ -1636,10 +1990,14 @@ impl<'a> TypeChecker<'a, '_> {
         span: Span,
         rule: &'static str,
     ) -> Result<WorkTypeId, ErrRecorded> {
+        use std::fmt::Write as _;
         match sid {
             WorkSchemaId::Perm(pid) => {
                 let def = *self.env.get_schema(pid);
-                let SchemaKind::Struct { fields, .. } = def.kind else {
+                let SchemaKind::Struct {
+                    type_name, fields, ..
+                } = def.kind
+                else {
                     return Err(self.type_err(rule, span, "target is not a struct"));
                 };
                 for &(fname, fty) in fields.as_slice() {
@@ -1652,13 +2010,23 @@ impl<'a> TypeChecker<'a, '_> {
                         );
                     }
                 }
-                Err(self.type_err(rule, span, "unknown struct field"))
+                let out = self.core.error.begin_msg(rule, ErrorKind::Type, span);
+                let _ = write!(out, "{} has no field '{field}'", type_name.as_str());
+                crate::diagnostic::write_available(
+                    out,
+                    "fields",
+                    fields.as_slice().iter().map(|(f, _)| f.as_str()),
+                );
+                Err(ErrRecorded)
             }
             WorkSchemaId::Local(lidx) => {
                 let kind = self.wpool.local_schemas.as_slice()[lidx as usize]
                     .kind
                     .expect("local schema resolved");
-                let LocalSchemaKind::Struct { fields, .. } = kind else {
+                let LocalSchemaKind::Struct {
+                    type_name, fields, ..
+                } = kind
+                else {
                     return Err(self.type_err(rule, span, "target is not a struct"));
                 };
                 for &(fname, fty) in fields.as_slice() {
@@ -1666,7 +2034,14 @@ impl<'a> TypeChecker<'a, '_> {
                         return Ok(fty);
                     }
                 }
-                Err(self.type_err(rule, span, "unknown struct field"))
+                let out = self.core.error.begin_msg(rule, ErrorKind::Type, span);
+                let _ = write!(out, "{} has no field '{field}'", type_name.as_str());
+                crate::diagnostic::write_available(
+                    out,
+                    "fields",
+                    fields.as_slice().iter().map(|(f, _)| f.as_str()),
+                );
+                Err(ErrRecorded)
             }
         }
     }
@@ -1735,9 +2110,6 @@ impl<'a> TypeChecker<'a, '_> {
             let Some((idx, efty)) = found else {
                 return Err(self.type_err("expr.field", fexpr.span, "unknown struct field"));
             };
-            if seen.as_slice()[idx] {
-                return Err(self.type_err("expr.field", fexpr.span, "duplicate struct field"));
-            }
             seen.as_mut_slice()[idx] = true;
             let actual = self.check_expr(fexpr, Some(efty))?;
             let _ = self.wpool.coerce_to_expected(
@@ -2414,6 +2786,7 @@ impl<'a> TypeChecker<'a, '_> {
         if let Some(mname) = mod_name_perm {
             let mut exports_types = RawMap::new();
             let mut exports_vals = RawMap::new();
+            let mut export_val_names = RawVec::<RawStr>::new();
             let should_export = |name: &str, has_exp: bool, list: &[(RawStr, Span)]| -> bool {
                 !has_exp || list.iter().any(|(n, _)| n.as_str() == name)
             };
@@ -2470,6 +2843,12 @@ impl<'a> TypeChecker<'a, '_> {
                     {
                         return Err(oom(self.core, info.span));
                     }
+                    if export_val_names
+                        .push_perm(self.perm, self.core, name_p)
+                        .is_none()
+                    {
+                        return Err(oom(self.core, info.span));
+                    }
                 }
             }
 
@@ -2494,8 +2873,17 @@ impl<'a> TypeChecker<'a, '_> {
                     {
                         return Err(oom(self.core, info.span));
                     }
+                    if export_val_names
+                        .push_perm(self.perm, self.core, name_p)
+                        .is_none()
+                    {
+                        return Err(oom(self.core, info.span));
+                    }
                 }
             }
+            export_val_names
+                .as_mut_slice()
+                .sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
 
             let _ = self.env.define_module(
                 self.perm,
@@ -2504,6 +2892,7 @@ impl<'a> TypeChecker<'a, '_> {
                     name: mname,
                     exports_types,
                     exports_vals,
+                    export_val_names,
                 },
                 Span::default(),
             )?;
@@ -2540,6 +2929,11 @@ impl<'a> TypeChecker<'a, '_> {
                     vb,
                     info.span,
                 )?;
+            }
+            for i in 0..self.local_imports.len() {
+                let (iname, islot, ispan) = self.local_imports.as_slice()[i];
+                self.env
+                    .define_root_import(self.perm, self.core, iname.as_str(), islot, ispan)?;
             }
         }
         Ok(())

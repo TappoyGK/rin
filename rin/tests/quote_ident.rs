@@ -9,6 +9,10 @@ use rin::ffi::{
 };
 use rin::{Builder, ErrorKind, HeapAllocator, Limits, Schema, Value, ValueTag, eval};
 
+fn eval_datum_list(src: &str) -> Value {
+    eval(&format!("(def _dl (list datum) {src}) _dl")).unwrap()
+}
+
 #[test]
 fn lex_char_vs_quote_and_unicode_escapes() {
     // 文字リテラルの各行（評価・rin fmt 双方）
@@ -104,7 +108,7 @@ fn lex_char_vs_quote_and_unicode_escapes() {
 
     // 文字リテラルの直後に記号や識別子が続く場合は次のトークンとして読まれる
     assert_eq!(
-        eval("(list \\a\\b \\u{41}'foo \\('x \\u'y \\newline'z)").unwrap(),
+        eval_datum_list("(list \\a\\b \\u{41}'foo \\('x \\u'y \\newline'z)"),
         Value::list(vec![
             Value::Char('a'),
             Value::Char('b'),
@@ -119,15 +123,15 @@ fn lex_char_vs_quote_and_unicode_escapes() {
         ])
     );
     assert_eq!(
-        eval("(let (x 1) (list \\(x))").unwrap(),
+        eval("(def _x i64 1) (def _xs (list datum) (list \\(_x)) _xs").unwrap(),
         Value::list(vec![Value::Char('('), Value::Int(1)])
     );
     assert_eq!(
-        eval("(let (x 1) (list \\u{41}x))").unwrap(),
+        eval("(def _x i64 1) (def _xs (list datum) (list \\u{41}_x)) _xs").unwrap(),
         Value::list(vec![Value::Char('A'), Value::Int(1)])
     );
     assert_eq!(
-        eval("(let (a 1) (list \\日 \\é'x \\😀a))").unwrap(),
+        eval("(def _a i64 1) (def _xs (list datum) (list \\日 \\é'x \\😀_a)) _xs").unwrap(),
         Value::list(vec![
             Value::Char('日'),
             Value::Char('é'),
@@ -146,7 +150,7 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     // `'` は quote だけに使われる（評価・rin fmt 双方）
     assert_eq!(
         eval("'('a 'b)").unwrap(),
-        eval("[['quote 'a] ['quote 'b]]").unwrap()
+        eval_datum_list("[['quote 'a] ['quote 'b]]")
     );
     assert_eq!(eval("'\nfoo").unwrap(), Value::ident("foo"));
     assert!(rin::fmt::format("'\nfoo").is_ok());
@@ -154,11 +158,11 @@ fn lex_char_vs_quote_and_unicode_escapes() {
     assert!(rin::fmt::format("'`'`,x").is_ok());
     assert_eq!(
         eval("'['a 'b]").unwrap(),
-        eval("['list ['quote 'a] ['quote 'b]]").unwrap()
+        eval_datum_list("['list ['quote 'a] ['quote 'b]]")
     );
     assert_eq!(
         eval("(def x 1) ``(a ',',x)").unwrap(),
-        eval("['quasiquote ['a ['quote ['unquote ['quote 1]]]]]").unwrap()
+        eval_datum_list("['quasiquote ['a ['quote ['unquote ['quote 1]]]]]")
     );
     let err = eval("(def x 1) `(a ',',x)").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Parse);
@@ -264,11 +268,16 @@ fn quote_literals_sugar_normalization_and_canonical_eval() {
     }
 
     // 正規 S 式形式は通常のソース構文としても評価できる
+    let schemas = "\
+        (defschema Point (struct Point (x i64) (y i64))) \
+        (defschema Empty (struct Empty)) \
+        (defschema Point1 (struct Point1 (x i64))) \
+        (defschema Color (variant Color (Red) (Rgb i64))) ";
     for (sugar, canonical) in [
         ("[1 2 3]", "(list 1 2 3)"),
         ("Point { x: 10 y: 20 }", "(struct Point (x 10) (y 20))"),
-        ("Point {}", "(struct Point)"),
-        ("Point { x: 10 }.x", "(field (struct Point (x 10)) x)"),
+        ("Empty {}", "(struct Empty)"),
+        ("Point1 { x: 10 }.x", "(field (struct Point1 (x 10)) x)"),
         ("[10 20 30][1]", "(index (list 10 20 30) 1)"),
         ("some(42)", "(some 42)"),
         ("ok(1)", "(ok 1)"),
@@ -279,11 +288,11 @@ fn quote_literals_sugar_normalization_and_canonical_eval() {
             "(with Point { x: 1 y: 2 } { x: 9 })",
             "(with (struct Point (x 1) (y 2)) (x 9))",
         ),
-        ("(with Point { x: 1 } {})", "(with (struct Point (x 1)))"),
+        ("(with Point1 { x: 1 } {})", "(with (struct Point1 (x 1)))"),
     ] {
         assert_eq!(
-            eval(sugar).unwrap(),
-            eval(canonical).unwrap(),
+            eval(&format!("{schemas}{sugar}")).unwrap(),
+            eval(&format!("{schemas}{canonical}")).unwrap(),
             "eval {sugar} vs {canonical}"
         );
     }
@@ -297,7 +306,7 @@ fn quasiquote_unquote_splicing_and_nesting() {
     );
     assert_eq!(
         eval("(let (xs [1 2]) `[0 ,@xs 3])").unwrap(),
-        eval("['list 0 1 2 3]").unwrap()
+        eval_datum_list("['list 0 1 2 3]")
     );
     assert_eq!(
         eval("(let (xs []) `(a ,@xs b))").unwrap(),
@@ -305,49 +314,49 @@ fn quasiquote_unquote_splicing_and_nesting() {
     );
     assert_eq!(
         eval("(let (v 7) `(with p { x: ,v }))").unwrap(),
-        eval("['with 'p ['x 7]]").unwrap()
+        eval_datum_list("['with 'p ['x 7]]")
     );
     assert_eq!(
         eval("(let (x 10) (quasiquote (a (unquote x) (unquote_splicing [20 30]))))").unwrap(),
-        eval("['a 10 20 30]").unwrap()
+        eval_datum_list("['a 10 20 30]")
     );
 
     // 入れ子 quasiquote
     assert_eq!(
         eval("``(a ,(+ 1 2) ,,(+ 1 2))").unwrap(),
-        eval("['quasiquote ['a ['unquote ['+ 1 2]] ['unquote 3]]]").unwrap()
+        eval_datum_list("['quasiquote ['a ['unquote ['+ 1 2]] ['unquote 3]]]")
     );
 
     // quasiquote の中の quote は深さを変えない
     assert_eq!(
         eval("(let (x 1) `(a '(b ,x)))").unwrap(),
-        eval("['a ['quote ['b 1]]]").unwrap()
+        eval_datum_list("['a ['quote ['b 1]]]")
     );
     // quote の中の quasiquote 内の unquote / unquote_splicing は評価せずデータとして残す
     assert_eq!(
         eval("'(a `(b ,x))").unwrap(),
-        eval("['a ['quasiquote ['b ['unquote 'x]]]]").unwrap()
+        eval_datum_list("['a ['quasiquote ['b ['unquote 'x]]]]")
     );
     assert_eq!(
         eval("(quote (quasiquote (a (unquote b))))").unwrap(),
-        eval("['quasiquote ['a ['unquote 'b]]]").unwrap()
+        eval_datum_list("['quasiquote ['a ['unquote 'b]]]")
     );
     assert_eq!(
         eval("'(a `(b ,@xs))").unwrap(),
-        eval("['a ['quasiquote ['b ['unquote_splicing 'xs]]]]").unwrap()
+        eval_datum_list("['a ['quasiquote ['b ['unquote_splicing 'xs]]]]")
     );
     // 前置記号の `'` と `` ` `` を括弧なしで続けても quote 内は評価されない
     assert_eq!(
         eval("(def x 1) '`'`,x").unwrap(),
-        eval("['quasiquote ['quote ['quasiquote ['unquote 'x]]]]").unwrap()
+        eval_datum_list("['quasiquote ['quote ['quasiquote ['unquote 'x]]]]")
     );
     assert_eq!(
-        eval("(defn boom () (/ 1 0)) '`'`,(boom)").unwrap(),
-        eval("['quasiquote ['quote ['quasiquote ['unquote ['boom]]]]]").unwrap()
+        eval("(defn boom () -> i64 (/ 1 0)) '`'`,(boom)").unwrap(),
+        eval_datum_list("['quasiquote ['quote ['quasiquote ['unquote ['boom]]]]]")
     );
     assert_eq!(
         eval("(def x 1) '`'(a `(b ,x))").unwrap(),
-        eval("['quasiquote ['quote ['a ['quasiquote ['b ['unquote 'x]]]]]]").unwrap()
+        eval_datum_list("['quasiquote ['quote ['a ['quasiquote ['b ['unquote 'x]]]]]]")
     );
     // バッククォートの文字リテラルは `\` 始まり
     assert_eq!(eval("\\`").unwrap(), Value::Char('`'));
@@ -365,9 +374,9 @@ fn quasiquote_unquote_splicing_and_nesting() {
     assert_eq!(err.kind, ErrorKind::Parse);
     assert_eq!(err.rule(), "src.syntax");
 
-    // リスト以外を `,@` で展開すると実行時エラー
+    // リスト以外を `,@` で展開すると静的型エラー
     let err = eval("`(1 ,@42 2)").unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.kind, ErrorKind::Type);
     assert_eq!(err.rule(), "expr.quasiquote");
 
     // リスト要素位置以外での `,@` は構文エラー
@@ -391,10 +400,10 @@ fn ident_operations_conversions_match_schema_and_ffi() {
         eval("['a 'b 'c]").unwrap()
     );
 
-    // string との比較は実行時エラー
+    // text との比較は静的型エラー
     for bad in ["(== 'foo \"foo\")", "(!= 'foo \"foo\")", "(< 'foo \"foo\")"] {
         let err = eval(bad).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Runtime, "{bad}: {err}");
+        assert_eq!(err.kind, ErrorKind::Type, "{bad}: {err}");
         assert_eq!(err.rule(), "op.cmp", "{bad}: {err}");
     }
 
@@ -432,7 +441,9 @@ fn ident_operations_conversions_match_schema_and_ffi() {
     assert!(b.val_ident("123").is_err());
     b.release_val(iv);
 
-    let err = b.bind("bad_id", &Value::ident("1 bad'")).unwrap_err();
+    let err = b
+        .bind("bad_id", "ident", &Value::ident("1 bad'"))
+        .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Runtime);
     assert_eq!(err.rule(), "host.value");
     // 深い経路（depth >= 32）でも Value::Ident を検査する
@@ -440,7 +451,7 @@ fn ident_operations_conversions_match_schema_and_ffi() {
     for _ in 0..35 {
         deep = Value::some(deep);
     }
-    let err = b.bind("bad_deep", &deep).unwrap_err();
+    let err = b.bind("bad_deep", "datum", &deep).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Runtime);
     assert_eq!(err.rule(), "host.value");
 
@@ -503,10 +514,12 @@ fn tuple_syntax_and_display_roundtrip() {
     // Display 往復（Value と ValueRef の両方）
     let mut alloc = HeapAllocator;
     let mut b = Builder::new(Limits::default(), &mut alloc);
+    let schema_prefix = "(defschema P (struct P (x i64) (y i64))) (defschema E (struct E)) ";
+    b.eval(schema_prefix).unwrap();
     for (src, expected_display) in [
         ("[1 2 3]", "[1 2 3]"),
         ("P { x: 1 y: 2 }", "P { x: 1 y: 2 }"),
-        ("P {}", "P {}"),
+        ("E {}", "E {}"),
         ("(tuple 1 2)", "(tuple 1 2)"),
         ("'foo", "'foo"),
         ("\\nul", "\\nul"),
@@ -551,9 +564,13 @@ fn tuple_syntax_and_display_roundtrip() {
             "\"🏴\u{e0067}\u{e0062}\u{e007f}\"",
         ),
     ] {
-        let v = eval(src).unwrap();
+        let v = eval(&format!("{schema_prefix}{src}")).unwrap();
         assert_eq!(v.to_string(), expected_display, "Value Display {src}");
-        assert_eq!(eval(&v.to_string()).unwrap(), v, "Value roundtrip {src}");
+        assert_eq!(
+            eval(&format!("{schema_prefix}{v}")).unwrap(),
+            v,
+            "Value roundtrip {src}"
+        );
 
         let vr = b.eval_ref(src).unwrap();
         assert_eq!(vr.to_string(), expected_display, "ValueRef Display {src}");

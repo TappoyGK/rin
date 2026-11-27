@@ -1,7 +1,7 @@
 /// スキーマの型式 AST。
 #[derive(Debug, Clone)]
 pub(crate) enum TypeExpr {
-    Any,
+    Datum,
     Void,
     I64,
     F64,
@@ -30,7 +30,7 @@ pub(crate) enum TypeExpr {
 pub(super) fn has_type_children(ty: &TypeExpr) -> bool {
     !matches!(
         ty,
-        TypeExpr::Any
+        TypeExpr::Datum
             | TypeExpr::Void
             | TypeExpr::I64
             | TypeExpr::F64

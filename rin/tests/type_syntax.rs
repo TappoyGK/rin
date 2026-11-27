@@ -14,7 +14,12 @@ fn error_kind_type_and_ffi_mapping() {
 
 #[test]
 fn defschema_syntax_and_placement() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module("game", "(defschema HitCtx (struct HitCtx (atk i64)))")
+        .unwrap();
     let src = r#"
+(import game)
 (defschema Element (variant Element (Plain) (Fire) (Frost) (Custom text)))
 (defschema HitCtx (struct HitCtx (atk i64) (element Element)))
 (defschema OpenCtx (open_struct OpenCtx (id i64) (tags (list text))))
@@ -28,7 +33,7 @@ fn defschema_syntax_and_placement() {
   (u void)))
 1
 "#;
-    assert_eq!(eval(src).unwrap(), Value::Int(1));
+    assert_eq!(b.eval(src).unwrap(), Value::Int(1));
 
     // 小文字始まりのスキーマ名は構文エラー
     let err = eval("(defschema foo (struct Foo (x i64)))").unwrap_err();
@@ -46,7 +51,7 @@ fn defschema_syntax_and_placement() {
     assert_eq!(err.rule(), "schema.tuple");
 
     // 式の中の defschema は構文エラー
-    let err = eval("(defn f () (defschema Inner (struct Inner (x i64))) 1)").unwrap_err();
+    let err = eval("(defn f () -> i64 (defschema Inner (struct Inner (x i64))) 1)").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Parse);
     assert_eq!(err.rule(), "type.defschema");
 
@@ -70,8 +75,7 @@ fn typed_defn_fn_and_def_syntax_and_eval() {
 (def pred (fn (i64) bool) (fn ((n i64)) -> bool (> n 0)))
 (def ho (fn ((fn (i64) bool)) i64) (fn (f) (if (f 1) 100 0)))
 (defn add ((a i64) (b i64)) -> i64 (+ a b))
-(defn untyped (a b) (+ a b))
-(tuple x (len xs) (len plain) (ho pred) (add 3 4) (untyped 5 6))
+(tuple x (len xs) (len plain) (ho pred) (add 3 4))
 "#;
     assert_eq!(
         eval(src).unwrap(),
@@ -81,15 +85,19 @@ fn typed_defn_fn_and_def_syntax_and_eval() {
             Value::Int(2),
             Value::Int(100),
             Value::Int(7),
-            Value::Int(11),
         ])
     );
+
+    // 型注釈のない defn は静的型エラー
+    let err = eval("(defn untyped (a b) (+ a b))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Type);
+    assert_eq!(err.rule(), "expr.defn");
 }
 
 #[test]
 fn datum_type_patterns_and_module_variant_pattern() {
     let src = r#"
-(defn classify (d)
+(defn classify ((d datum)) -> i64
   (match d
     (i64(n) (+ n 1))
     (f64(_) 2)
@@ -98,8 +106,7 @@ fn datum_type_patterns_and_module_variant_pattern() {
     (text(_) 6)
     (ident(_) 7)
     (list(xs) (+ 100 (len xs)))
-    (none 0)
-    (_ -1)))
+    (none 0)))
 [(classify 10) (classify 1.5) (classify true) (classify false)
  (classify \a) (classify "hi") (classify 'sym) (classify '(a 1 2)) (classify none)]
 "#;
@@ -118,14 +125,67 @@ fn datum_type_patterns_and_module_variant_pattern() {
         ])
     );
 
-    // モジュール修飾バリアントパターンが構文解析・実行できる
+    // モジュール修飾バリアントパターンが型検査・実行できる
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module(
+        "game",
+        "(defschema Element (variant Element (Plain) (Fire))) (defn fire () -> Element Element.Fire)",
+    )
+    .unwrap();
     let src_mod_pat = r#"
-(match Element.Fire
+(import game)
+(match (game.fire)
   (game.Element.Fire 1)
-  (game.Element.Plain 2)
-  (_ 0))
+  (game.Element.Plain 2))
 "#;
-    assert_eq!(eval(src_mod_pat).unwrap(), Value::Int(1));
+    assert_eq!(b.eval(src_mod_pat).unwrap(), Value::Int(1));
+}
+
+#[test]
+fn host_boundary_type_validation() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.eval("(defschema Ctx (struct Ctx (atk i64)))").unwrap();
+    b.eval("(defn dmg ((ctx Ctx) (mult i64)) -> i64 (* ctx.atk mult))")
+        .unwrap();
+
+    // bind の型不一致は type.boundary
+    let err = b.bind("bad", "i64", &Value::text("oops")).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // 正常な bind
+    b.bind("base", "i64", &Value::Int(10)).unwrap();
+
+    let mut m = b.freeze().unwrap();
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("atk".to_string(), Value::Int(7));
+    let ctx = Value::structure("Ctx", fields);
+    assert_eq!(
+        m.call("dmg", &[ctx.clone(), Value::Int(3)]).unwrap(),
+        Value::Int(21)
+    );
+
+    // call の引数型不一致は type.boundary
+    let err = m.call("dmg", &[Value::Int(7), Value::Int(3)]).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // eval_with の値型不一致は type.boundary
+    let err = m
+        .eval_with("(+ x base)", &[("x", "i64", Value::Bool(true))])
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // eval_with の正常動作（永続 TypeEnv を汚染しない）
+    assert_eq!(
+        m.eval_with("(+ x base)", &[("x", "i64", Value::Int(5))])
+            .unwrap(),
+        Value::Int(15)
+    );
+    assert_eq!(m.eval("x").unwrap_err().kind, ErrorKind::Type);
 }
 
 #[test]

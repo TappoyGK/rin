@@ -7,12 +7,13 @@ use rin::{Builder, ErrorKind, HeapAllocator, Limits};
 fn preparation_memory_scales_with_source_size() {
     for n in [100, 1000, 10_000] {
         let source = (0..n)
-            .map(|i| format!("(defn f{i:08} (x) (+ x {i}))\n"))
+            .map(|i| format!("(defn f{i:08} ((x i64)) -> i64 (+ x {i}))\n"))
             .collect::<String>();
         let mut alloc = HeapAllocator;
         let mut machine = Builder::new(
             Limits {
                 steps: 0,
+                memory_bytes: 64 * 1024 * 1024,
                 ..Limits::default()
             },
             &mut alloc,

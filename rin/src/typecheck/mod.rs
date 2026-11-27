@@ -7,6 +7,7 @@
 // STEP 3 の評価パイプライン統合まではテストからのみ参照される項目があるため抑制。
 #![allow(dead_code, unused_imports)]
 
+mod boundary;
 mod builtins;
 mod checker;
 #[cfg(test)]
@@ -14,6 +15,10 @@ mod tests;
 mod types;
 mod work_types;
 
+pub(crate) use boundary::{
+    check_rval_against_type, check_rval_against_type_expr, reject_fn_in_perm_type,
+    validate_boundary_type_expr,
+};
 pub(crate) use checker::{CheckOptions, check_program_work, resolve_type_expr_perm};
 pub(crate) use types::{
     FnSig, ModuleTypeEnv, PermTypeNode, SchemaDef, SchemaId, SchemaKind, TY_BOOL, TY_CHAR,

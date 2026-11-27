@@ -7,7 +7,7 @@
 **入力：**
 
 ```rin
-(defn double_all (xs)
+(defn double_all ((xs (list i64))) -> (list i64)
   (match (car xs)
     (none [])
     (some(h) (cons (* h 2) (double_all (cdr xs))))))

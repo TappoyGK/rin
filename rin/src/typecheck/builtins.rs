@@ -32,21 +32,51 @@ impl<'a> TypeChecker<'_, 'a> {
                         "arithmetic operator requires at least 2 arguments",
                     ));
                 }
-                let t0 = self.check_expr(&args[0], expected)?;
-                self.require_numeric(t0, args[0].span, "op.arith")?;
-                for arg in &args[1..] {
-                    let ti = self.check_expr(arg, Some(t0))?;
-                    self.wpool
-                        .unify(ti, t0, self.env, self.work, self.core, arg.span, "op.arith")?;
+                let op_name = b.name();
+                let mut pending = RawVec::<&Expr>::new();
+                for arg in args.iter().rev() {
+                    if pending.push_work(self.work, self.core, arg).is_none() {
+                        return Err(oom(self.core, arg.span));
+                    }
                 }
-                Ok(t0)
+                let mut common_ty: Option<WorkTypeId> = None;
+                let mut first_span = span;
+                while let Some(arg) = pending.pop() {
+                    if let ExprKind::Call { callee, args: sub } = &arg.kind
+                        && let ExprKind::Ident(cn) = callee.as_ref().kind
+                        && cn.as_str() == op_name
+                        && sub.len() >= 2
+                    {
+                        self.wpool.tick(self.core, arg.span)?;
+                        for sa in sub.as_slice().iter().rev() {
+                            if pending.push_work(self.work, self.core, sa).is_none() {
+                                return Err(oom(self.core, sa.span));
+                            }
+                        }
+                        continue;
+                    }
+                    let ti = self.check_expr(arg, common_ty.or(expected))?;
+                    match common_ty {
+                        None => {
+                            common_ty = Some(ti);
+                            first_span = arg.span;
+                        }
+                        Some(t0) => {
+                            self.wpool.unify(
+                                ti, t0, self.env, self.work, self.core, arg.span, "op.arith",
+                            )?;
+                        }
+                    }
+                }
+                let res = common_ty.unwrap();
+                self.require_numeric(res, first_span, "op.arith")?;
+                Ok(res)
             }
             BuiltinId::Sub => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.type_err("op.arith", span, "'-' takes 1 or 2 arguments"));
                 }
                 let t0 = self.check_expr(&args[0], expected)?;
-                self.require_numeric(t0, args[0].span, "op.arith")?;
                 if args.len() == 2 {
                     let t1 = self.check_expr(&args[1], Some(t0))?;
                     self.wpool.unify(
@@ -59,6 +89,7 @@ impl<'a> TypeChecker<'_, 'a> {
                         "op.arith",
                     )?;
                 }
+                self.require_numeric(t0, args[0].span, "op.arith")?;
                 Ok(t0)
             }
             BuiltinId::Div | BuiltinId::Rem => {
@@ -70,7 +101,6 @@ impl<'a> TypeChecker<'_, 'a> {
                     ));
                 }
                 let t0 = self.check_expr(&args[0], expected)?;
-                self.require_numeric(t0, args[0].span, "op.arith")?;
                 let t1 = self.check_expr(&args[1], Some(t0))?;
                 self.wpool.unify(
                     t1,
@@ -81,6 +111,7 @@ impl<'a> TypeChecker<'_, 'a> {
                     args[1].span,
                     "op.arith",
                 )?;
+                self.require_numeric(t0, args[0].span, "op.arith")?;
                 Ok(t0)
             }
 
@@ -1027,6 +1058,7 @@ impl<'a> TypeChecker<'_, 'a> {
             .unwrap_perm(exp, self.env, self.work, self.core, span)?
         {
             WorkTypeNode::List(elem) => Ok(Some(elem)),
+            WorkTypeNode::Perm(TY_DATUM) => Ok(Some(WTY_DATUM)),
             _ => Ok(None),
         }
     }

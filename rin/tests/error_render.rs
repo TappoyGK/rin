@@ -87,8 +87,8 @@ fn controls_are_escaped_using_the_same_width_for_the_caret() {
 
 #[test]
 fn module_sources_follow_caller_locations() {
-    let ma = ";; ma\n(defn fail () (/ 1 0))";
-    let mb = ";; mb\n(import ma)\n(defn run () (+ 1 (ma.fail)))";
+    let ma = ";; ma\n(defn fail () -> i64 (/ 1 0))";
+    let mb = ";; mb\n(import ma)\n(defn run () -> i64 (+ 1 (ma.fail)))";
     let root = "(import mb)\n(mb.run)";
     let mut alloc = HeapAllocator;
     let mut machine = Builder::new(Limits::default(), &mut alloc);
@@ -107,16 +107,16 @@ fn module_sources_follow_caller_locations() {
     });
     assert_eq!(requests, [Some("ma".into()), Some("mb".into()), None]);
     assert_eq!(rendered.matches(" |\n").count(), 3);
-    assert!(rendered.contains("2 | (defn fail () (/ 1 0))"));
-    assert!(rendered.contains("3 | (defn run () (+ 1 (ma.fail)))"));
+    assert!(rendered.contains("2 | (defn fail () -> i64 (/ 1 0))"));
+    assert!(rendered.contains("3 | (defn run () -> i64 (+ 1 (ma.fail)))"));
     assert!(rendered.contains("2 | (mb.run)"));
     let single = error.render(ma);
-    assert!(single.contains("2 | (defn fail () (/ 1 0))"));
+    assert!(single.contains("2 | (defn fail () -> i64 (/ 1 0))"));
     assert!(!single.contains("3 |"));
     assert_eq!(single.matches(" |\n").count(), 1);
     assert_eq!(error.render_with(|_| None), error.to_string());
     let partial = error.render_with(|module| (module == Some("mb")).then_some(mb));
-    assert!(partial.contains("3 | (defn run () (+ 1 (ma.fail)))"));
+    assert!(partial.contains("3 | (defn run () -> i64 (+ 1 (ma.fail)))"));
     assert_eq!(partial.matches(" |\n").count(), 1);
 }
 
@@ -124,7 +124,7 @@ fn module_sources_follow_caller_locations() {
 fn host_tail_builtin_and_compressed_frames_keep_their_meaning() {
     let mut alloc = HeapAllocator;
     let mut machine = Builder::new(Limits::default(), &mut alloc);
-    let source = "(defn fail (x) (/ x 0))\n(defn tail (x) (fail x))";
+    let source = "(defn fail ((x i64)) -> i64 (/ x 0))\n(defn tail ((x i64)) -> i64 (fail x))";
     machine.load_module("ma", source).unwrap();
     let mut machine = machine.freeze().unwrap();
     let error = machine.call_in("ma", "tail", &[Value::Int(1)]).unwrap_err();
@@ -140,7 +140,8 @@ fn host_tail_builtin_and_compressed_frames_keep_their_meaning() {
     let error = eval(source).unwrap_err();
     assert!(error.render(source).contains("called by map at 1:1"));
     assert_eq!(error.render(source).matches(" |\n").count(), 2);
-    let source = "(defn recur (n) (if (== n 0) (/ 1 0) (+ 1 (recur (- n 1)))))\n(recur 10)";
+    let source =
+        "(defn recur ((n i64)) -> i64 (if (== n 0) (/ 1 0) (+ 1 (recur (- n 1)))))\n(recur 10)";
     let error = eval(source).unwrap_err();
     assert!(error.render(source).contains("×10"));
     assert_eq!(error.render_with(|_| None), error.to_string());
@@ -177,9 +178,9 @@ fn writer_output_and_failures() {
 
 #[test]
 fn gutter_uses_only_visible_lines_and_resolves_each_position_once() {
-    let ma = "(defn fail () (/ 1 0))";
+    let ma = "(defn fail () -> i64 (/ 1 0))";
     let mb = format!(
-        "(import ma)\n{}(defn run () (+ 1 (ma.fail)))",
+        "(import ma)\n{}(defn run () -> i64 (+ 1 (ma.fail)))",
         "\n".repeat(8)
     );
     let root = format!("(import mb)\n{}(mb.run)", "\n".repeat(98));

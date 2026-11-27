@@ -67,7 +67,8 @@ fn template_interpolation_escapes_and_errors() {
         Value::text("outer=inner=4")
     );
     assert_eq!(
-        eval("\"p=${Point { x: 10 y: 20 }.x}\"").unwrap(),
+        eval("(defschema Point (struct Point (x i64) (y i64))) \"p=${Point { x: 10 y: 20 }.x}\"")
+            .unwrap(),
         Value::text("p=10")
     );
 
@@ -104,16 +105,16 @@ fn template_interpolation_escapes_and_errors() {
         assert_eq!(ferr.kind, ErrorKind::Lex, "fmt {bad_nl:?}: {ferr}");
     }
 
-    // 埋め込めない型は expr.template の実行時エラー
+    // 埋め込めない型は expr.template の静的型エラー
     for bad_val in [
         "\"${[1 2]}\"",
         "\"${none}\"",
         "\"${some(1)}\"",
-        "\"${Point { x: 1 }}\"",
+        "(defschema Point (struct Point (x i64))) \"${Point { x: 1 }}\"",
         "\"${(tuple 1 2)}\"",
     ] {
         let err = eval(bad_val).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Runtime, "{bad_val}: {err}");
+        assert_eq!(err.kind, ErrorKind::Type, "{bad_val}: {err}");
         assert_eq!(err.rule(), "expr.template", "{bad_val}: {err}");
     }
 
@@ -125,7 +126,7 @@ fn template_interpolation_escapes_and_errors() {
 
     // 埋め込めない型のエラー位置はその埋め込み式自体を指す
     let err = eval("(def xs [1]) \"aaa ${1} ${xs}\"").unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.kind, ErrorKind::Type);
     assert_eq!(err.rule(), "expr.template");
     assert_eq!(err.at.line, 1);
     assert_eq!(err.at.col, 26);
@@ -260,8 +261,10 @@ fn text_type_name_len_index_slice_compare_and_sharing() {
         },
         &mut alloc2,
     );
-    m.eval(&format!("(defn same () (== \"{long}\" \"{long}\"))"))
-        .unwrap();
+    m.eval(&format!(
+        "(defn same () -> bool (== \"{long}\" \"{long}\"))"
+    ))
+    .unwrap();
     let mut m = m.freeze().unwrap();
     assert_eq!(m.call("same", &[]).unwrap(), Value::Bool(true));
 
@@ -275,8 +278,10 @@ fn text_type_name_len_index_slice_compare_and_sharing() {
         },
         &mut alloc3,
     );
-    m3.eval(&format!("(defn diff () (== \"{long}\" \"{long2}\"))"))
-        .unwrap();
+    m3.eval(&format!(
+        "(defn diff () -> bool (== \"{long}\" \"{long2}\"))"
+    ))
+    .unwrap();
     let mut m3 = m3.freeze().unwrap();
     assert_eq!(m3.call("diff", &[]).unwrap(), Value::Bool(false));
 }

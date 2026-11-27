@@ -20,7 +20,7 @@ impl TypeExpr {
                 DebugItem::Quoted(s) => write!(f, "{s:?}")?,
                 DebugItem::Bool(b) => write!(f, "{b:?}")?,
                 DebugItem::Ty(cur) => match cur {
-                    TypeExpr::Any => f.write_str("Any")?,
+                    TypeExpr::Datum => f.write_str("Datum")?,
                     TypeExpr::Void => f.write_str("Void")?,
                     TypeExpr::I64 => f.write_str("I64")?,
                     TypeExpr::F64 => f.write_str("F64")?,

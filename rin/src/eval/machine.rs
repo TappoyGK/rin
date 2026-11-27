@@ -31,10 +31,10 @@ impl<'a> Builder<'a> {
         self.inner.math_fma
     }
 
-    /// ホストの値を大域変数として束縛する（既存名・組み込み名・読み込み済みモジュール名との衝突はエラー）。
+    /// ホストの値を型式 `type_expr` 付きで大域変数として束縛する（既存名・組み込み名・読み込み済みモジュール名との衝突はエラー）。
     #[cfg(feature = "std-value")]
-    pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
-        self.inner.bind(name, value)
+    pub fn bind(&mut self, name: &str, type_expr: &str, value: &Value) -> Result<(), Error> {
+        self.inner.bind(name, type_expr, value)
     }
 
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
@@ -112,11 +112,15 @@ impl<'a> Machine<'a> {
         self.eval_with(source, &[])
     }
 
-    /// 凍結した環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する。
+    /// 凍結した環境で、この 1 回の評価にだけ有効な型式付き初期束縛 `bindings` を与えてソースを評価する。
     ///
     /// 評価の成否にかかわらず、大域環境・読み込み済みモジュールは変更せず、一時束縛は終了時に解放する。
     #[cfg(feature = "std-value")]
-    pub fn eval_with(&mut self, source: &str, bindings: &[(&str, Value)]) -> Result<Value, Error> {
+    pub fn eval_with(
+        &mut self,
+        source: &str,
+        bindings: &[(&str, &str, Value)],
+    ) -> Result<Value, Error> {
         self.inner.eval_frozen(source, bindings)
     }
 
@@ -156,12 +160,13 @@ impl<'a> EnvState<'a> {
             syms: SymTable::new(),
             globals: EnvSlots::new(),
             modules: ModuleTable::new(),
+            type_env: TypeEnv::new(),
             last_result: RVal::Void,
         }
     }
 
     #[cfg(feature = "std-value")]
-    pub(super) fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
+    pub(super) fn bind(&mut self, name: &str, type_expr: &str, value: &Value) -> Result<(), Error> {
         if self.modules.get_val(name).is_some() {
             return Err(Error::new(
                 "expr.def",
@@ -198,11 +203,60 @@ impl<'a> EnvState<'a> {
             .pool
             .import(value, Span::default())
             .map_err(|_| self.pool.core.error.to_owned_error())?;
+        let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
+        let tid = match (|| {
+            let te = parse_type_expr_work(type_expr, &mut self.pool.work, &mut self.pool.core)?;
+            let tid = resolve_type_expr_perm(
+                &te,
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )?;
+            reject_fn_in_perm_type(
+                tid,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                Span::default(),
+            )?;
+            check_rval_against_type(rval, tid, &self.type_env, &mut self.pool, Span::default())?;
+            Ok::<_, ErrRecorded>(tid)
+        })() {
+            Ok::<_, ErrRecorded>(tid) => tid,
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                self.pool.release_val(rval);
+                return Err(self.pool.core.error.to_owned_error());
+            }
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        if self
+            .type_env
+            .define_root_val(
+                &mut self.pool.perm,
+                &mut self.pool.core,
+                name,
+                ValBinding {
+                    ty: tid,
+                    fn_sig: None,
+                },
+                Span::default(),
+            )
+            .is_err()
+        {
+            self.type_env.rollback(type_snap);
+            self.pool.release_val(rval);
+            return Err(self.pool.core.error.to_owned_error());
+        }
         if self
             .globals
             .set(&mut self.pool, id, rval, Span::default())
             .is_err()
         {
+            self.type_env.rollback(type_snap);
             self.pool.release_val(rval);
             return Err(self.pool.core.error.to_owned_error());
         }
@@ -212,9 +266,26 @@ impl<'a> EnvState<'a> {
     #[cfg(feature = "std-value")]
     pub(super) fn eval_building(&mut self, source: &str) -> Result<Value, Error> {
         let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
         let res = (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: false,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: true,
+                    extra_bindings: &[],
+                    extra_binding_exprs: &[],
+                },
+            )?;
             let chunk = compile_program(
                 exprs.as_slice(),
                 None,
@@ -229,7 +300,10 @@ impl<'a> EnvState<'a> {
         self.pool.work.rewind(&mut self.pool.core, mark);
         let last = match res {
             Ok(v) => v,
-            Err(_) => return Err(self.pool.core.error.to_owned_error()),
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                return Err(self.pool.core.error.to_owned_error());
+            }
         };
         let exported = self.pool.export(last);
         self.pool.release_val(last);
@@ -240,7 +314,7 @@ impl<'a> EnvState<'a> {
     pub(super) fn eval_frozen(
         &mut self,
         source: &str,
-        bindings: &[(&str, Value)],
+        bindings: &[(&str, &str, Value)],
     ) -> Result<Value, Error> {
         let outer_mark = self.pool.work.mark(&self.pool.core);
         let res = self.eval_frozen_inner(source, bindings);
@@ -253,12 +327,28 @@ impl<'a> EnvState<'a> {
     fn eval_frozen_inner(
         &mut self,
         source: &str,
-        bindings: &[(&str, Value)],
+        bindings: &[(&str, &str, Value)],
     ) -> Result<Value, Error> {
         if bindings.is_empty() {
             let res = (|| {
                 let exprs =
                     parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+                check_program_work(
+                    exprs.as_slice(),
+                    &mut self.type_env,
+                    &mut self.pool.perm,
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    CheckOptions {
+                        frozen: true,
+                        strict_defn_annotations: true,
+                        module_name: None,
+                        test_mode: false,
+                        commit: false,
+                        extra_bindings: &[],
+                        extra_binding_exprs: &[],
+                    },
+                )?;
                 let chunk = compile_program(
                     exprs.as_slice(),
                     None,
@@ -278,9 +368,49 @@ impl<'a> EnvState<'a> {
             self.pool.release_val(last);
             return Ok(exported);
         }
+        let mut extra_exprs = RawVec::<(&str, crate::ast::TypeExpr)>::new();
+        for (bname, bty, _) in bindings {
+            let te = match parse_type_expr_work(bty, &mut self.pool.work, &mut self.pool.core) {
+                Ok(te) => te,
+                Err(_) => return Err(self.pool.core.error.to_owned_error()),
+            };
+            if validate_boundary_type_expr(
+                &te,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )
+            .is_err()
+            {
+                return Err(self.pool.core.error.to_owned_error());
+            }
+            if extra_exprs
+                .push_work(&mut self.pool.work, &mut self.pool.core, (*bname, te))
+                .is_none()
+            {
+                let _ = self.pool.core.err_oom(Span::default());
+                return Err(self.pool.core.error.to_owned_error());
+            }
+        }
         let (chunk, used) = match (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: true,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: false,
+                    extra_bindings: &[],
+                    extra_binding_exprs: extra_exprs.as_slice(),
+                },
+            )?;
             compile_program_with_bindings(
                 exprs.as_slice(),
                 None,
@@ -301,9 +431,27 @@ impl<'a> EnvState<'a> {
                 let mut used_vals = [RVal::Void; 8];
                 let mut extra_objs = [RVal::Void; 8];
                 let mut extra_len = 0usize;
-                for (idx, (_, value)) in bindings.iter().enumerate() {
+                for (idx, (_, _, value)) in bindings.iter().enumerate() {
                     match self.pool.import(value, Span::default()) {
                         Ok(rval) => {
+                            if check_rval_against_type_expr(
+                                rval,
+                                &extra_exprs.as_slice()[idx].1,
+                                &self.type_env,
+                                &mut self.pool,
+                                Span::default(),
+                            )
+                            .is_err()
+                            {
+                                self.pool.release_val(rval);
+                                for &v in &used_vals[..count] {
+                                    self.pool.release_val(v);
+                                }
+                                for &v in &extra_objs[..extra_len] {
+                                    self.pool.release_val(v);
+                                }
+                                return Err(self.pool.core.error.to_owned_error());
+                            }
                             if let Some(slot) =
                                 indices[..count].iter().position(|&b| b as usize == idx)
                             {
@@ -362,9 +510,27 @@ impl<'a> EnvState<'a> {
 
                 // `used_slice` は参照された束縛の添字列（厳密降順）。
                 let mut next_slot = used_slice.len();
-                for (idx, (_, value)) in bindings.iter().enumerate() {
+                for (idx, (_, _, value)) in bindings.iter().enumerate() {
                     match self.pool.import(value, Span::default()) {
                         Ok(rval) => {
+                            if check_rval_against_type_expr(
+                                rval,
+                                &extra_exprs.as_slice()[idx].1,
+                                &self.type_env,
+                                &mut self.pool,
+                                Span::default(),
+                            )
+                            .is_err()
+                            {
+                                self.pool.release_val(rval);
+                                for &v in used_vals.as_slice() {
+                                    self.pool.release_val(v);
+                                }
+                                for &v in extra_objs.as_slice() {
+                                    self.pool.release_val(v);
+                                }
+                                return Err(self.pool.core.error.to_owned_error());
+                            }
                             if next_slot > 0 && used_slice[next_slot - 1] as usize == idx {
                                 next_slot -= 1;
                                 used_vals.as_mut_slice()[next_slot] = rval;
@@ -424,6 +590,38 @@ impl<'a> EnvState<'a> {
         body: &[crate::ast::Expr],
     ) -> (Vec<crate::test::CheckFailure>, Result<(), Error>) {
         let mark = self.pool.work.mark(&self.pool.core);
+        let mut combined = RawVec::<crate::ast::Expr>::new();
+        for &e in setup.iter().chain(body.iter()) {
+            if combined
+                .push_work(&mut self.pool.work, &mut self.pool.core, e)
+                .is_none()
+            {
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                let _ = self.pool.core.err_oom(Span::default());
+                return (Vec::new(), Err(self.pool.core.error.to_owned_error()));
+            }
+        }
+        if check_program_work(
+            combined.as_slice(),
+            &mut self.type_env,
+            &mut self.pool.perm,
+            &mut self.pool.work,
+            &mut self.pool.core,
+            CheckOptions {
+                frozen: false,
+                strict_defn_annotations: true,
+                module_name: None,
+                test_mode: true,
+                commit: false,
+                extra_bindings: &[],
+                extra_binding_exprs: &[],
+            },
+        )
+        .is_err()
+        {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            return (Vec::new(), Err(self.pool.core.error.to_owned_error()));
+        }
         let chunk = match compile_program_parts(
             setup,
             body,
@@ -472,16 +670,31 @@ impl<'a> EnvState<'a> {
             write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
             return Err(self.pool.core.error.to_owned_error());
         };
-        self.call_rval(callee, args, frozen)
+        let fn_sig = self
+            .type_env
+            .lookup_root_val(fn_name)
+            .and_then(|vb| vb.fn_sig);
+        self.call_rval(callee, fn_sig, args, frozen)
     }
 
     #[cfg(feature = "std-value")]
     pub(super) fn call_rval(
         &mut self,
         callee: RVal,
+        fn_sig: Option<FnSig>,
         args: &[Value],
         frozen: bool,
     ) -> Result<Value, Error> {
+        if let Some(sig) = fn_sig
+            && sig.params.len() != args.len()
+        {
+            return Err(Error::new(
+                "type.boundary",
+                ErrorKind::Runtime,
+                Span::default(),
+                "wrong number of arguments",
+            ));
+        }
         let mark = self.pool.work.mark(&self.pool.core);
         let mut inline_args = [RVal::Void; 4];
         let mut overflow_args = RawVec::new();
@@ -547,6 +760,19 @@ impl<'a> EnvState<'a> {
         } else {
             overflow_args.as_slice()
         };
+        if let Some(sig) = fn_sig {
+            for (&rv, &(_, pty)) in r_args.iter().zip(sig.params.as_slice()) {
+                if check_rval_against_type(rv, pty, &self.type_env, &mut self.pool, Span::default())
+                    .is_err()
+                {
+                    for &v in r_args {
+                        self.pool.release_val(v);
+                    }
+                    self.pool.work.rewind(&mut self.pool.core, mark);
+                    return Err(self.pool.core.error.to_owned_error());
+                }
+            }
+        }
         self.pool.retain_val(callee);
         let res = {
             let mut runner = self.runner(None, frozen);

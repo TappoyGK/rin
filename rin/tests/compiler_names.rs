@@ -86,15 +86,16 @@ fn many_globals_and_repeated_string_constants_keep_their_numbers() {
 fn cached_symbol_numbers_reject_redefinitions_and_allow_new_names() {
     let mut alloc = HeapAllocator;
     let mut m = Builder::new(Limits::default(), &mut alloc);
-    m.eval("(defn first () 1) (defn second () 2)").unwrap();
+    m.eval("(defn first () -> i64 1) (defn second () -> i64 2)")
+        .unwrap();
     for _ in 0..2 {
         assert_eq!(m.eval("(first)").unwrap(), Value::Int(1));
         assert_eq!(m.eval("(second)").unwrap(), Value::Int(2));
     }
-    let err = m.eval("(defn second () 3)").unwrap_err();
+    let err = m.eval("(defn second () -> i64 3)").unwrap_err();
     assert_eq!(err.rule(), "expr.defn");
     assert_eq!(m.eval("(second)").unwrap(), Value::Int(2));
     assert!(m.eval("(later)").is_err());
-    m.eval("(defn later () 4)").unwrap();
+    m.eval("(defn later () -> i64 4)").unwrap();
     assert_eq!(m.eval("(later)").unwrap(), Value::Int(4));
 }

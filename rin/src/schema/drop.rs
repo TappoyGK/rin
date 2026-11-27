@@ -38,7 +38,7 @@ pub(super) fn drop_deep_type(ty: &mut TypeExpr) {
 
 fn take_type_children(ty: &mut TypeExpr, next: &mut Option<TypeExpr>, work: &mut Vec<TypeExpr>) {
     match ty {
-        TypeExpr::Any
+        TypeExpr::Datum
         | TypeExpr::Void
         | TypeExpr::I64
         | TypeExpr::F64
@@ -48,11 +48,11 @@ fn take_type_children(ty: &mut TypeExpr, next: &mut Option<TypeExpr>, work: &mut
         | TypeExpr::Ident
         | TypeExpr::Ref(_) => {}
         TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {
-            push_type_if_non_leaf(std::mem::replace(&mut **t, TypeExpr::Any), next, work);
+            push_type_if_non_leaf(std::mem::replace(&mut **t, TypeExpr::Void), next, work);
         }
         TypeExpr::Result(a, b) => {
-            push_type_if_non_leaf(std::mem::replace(&mut **a, TypeExpr::Any), next, work);
-            push_type_if_non_leaf(std::mem::replace(&mut **b, TypeExpr::Any), next, work);
+            push_type_if_non_leaf(std::mem::replace(&mut **a, TypeExpr::Void), next, work);
+            push_type_if_non_leaf(std::mem::replace(&mut **b, TypeExpr::Void), next, work);
         }
         TypeExpr::Tuple(elems) => {
             for t in std::mem::take(elems) {

@@ -325,18 +325,25 @@ impl WorkTypePool {
         Ok(matches!(self.get(id), WorkTypeNode::Perm(TY_I64 | TY_F64)))
     }
 
-    /// `datum` 期待位置への暗黙受け入れ判定（6 基本型または `datum`）。
+    /// `datum` 期待位置への暗黙受け入れ判定（6 基本型・`datum`・およびそれらの `list`）。
     pub(crate) fn is_datum_compatible(
         &mut self,
         id: WorkTypeId,
         core: &mut AllocCore<'_>,
         span: Span,
     ) -> Result<bool, ErrRecorded> {
-        let id = self.resolve(id, core, span)?;
-        Ok(matches!(
-            self.get(id),
-            WorkTypeNode::Perm(TY_DATUM | TY_I64 | TY_F64 | TY_BOOL | TY_CHAR | TY_TEXT | TY_IDENT)
-        ))
+        let mut cur = id;
+        loop {
+            self.tick(core, span)?;
+            cur = self.resolve(cur, core, span)?;
+            match self.get(cur) {
+                WorkTypeNode::Perm(
+                    TY_DATUM | TY_I64 | TY_F64 | TY_BOOL | TY_CHAR | TY_TEXT | TY_IDENT,
+                ) => return Ok(true),
+                WorkTypeNode::List(inner) => cur = inner,
+                _ => return Ok(false),
+            }
+        }
     }
 
     /// 出現検査（無限型の構築を防ぐ、非再帰スタック実装）。

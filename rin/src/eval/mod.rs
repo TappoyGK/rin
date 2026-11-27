@@ -26,8 +26,13 @@ use crate::error::Error;
 use crate::error::{ErrRecorded, ErrorKind, ErrorRef, Limits, Span};
 use crate::math::MathFma;
 use crate::mem::{AllocCore, MemoryConfig, RawMap, RawStr, RawVec, WorkArena, fnv1a_bytes};
-use crate::parser::parse_program_work;
+use crate::parser::{parse_program_work, parse_type_expr_work};
 use crate::pool::{Obj, Pool, RVal};
+use crate::typecheck::{
+    CheckOptions, FnSig, TypeEnv, ValBinding, check_program_work, check_rval_against_type,
+    check_rval_against_type_expr, reject_fn_in_perm_type, resolve_type_expr_perm,
+    validate_boundary_type_expr,
+};
 #[cfg(feature = "std-value")]
 use crate::value::Value;
 use crate::value_ref::{Val, ValueRef};
@@ -36,7 +41,11 @@ use crate::value_ref::{Val, ValueRef};
 ///
 /// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
 #[cfg(feature = "std-value")]
-pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
+pub fn eval_with(
+    source: &str,
+    bindings: &[(&str, &str, Value)],
+    limits: Limits,
+) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
 }
@@ -47,13 +56,13 @@ pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Re
 #[cfg(feature = "std-value")]
 pub fn eval_with_allocator(
     source: &str,
-    bindings: &[(&str, Value)],
+    bindings: &[(&str, &str, Value)],
     limits: Limits,
     alloc: &mut dyn Allocator,
 ) -> Result<Value, Error> {
     let mut builder = Builder::new(limits, alloc);
-    for (k, v) in bindings {
-        builder.bind(k, v)?;
+    for (k, ty, v) in bindings {
+        builder.bind(k, ty, v)?;
     }
     builder.eval(source)
 }
@@ -300,6 +309,7 @@ pub(super) struct EnvState<'a> {
     syms: SymTable,
     globals: EnvSlots,
     modules: ModuleTable,
+    type_env: TypeEnv,
     last_result: RVal,
 }
 

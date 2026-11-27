@@ -34,9 +34,10 @@ Rin は次のものを含まない。
 
 ### 2.2 要件を表す言い方
 
-- 「〜は字句エラーである」：字句解析が入力を受け付けず、位置と理由を返す。
-- 「〜は構文エラーである」：構文解析またはコンパイルが入力を受け付けず、位置と理由を返す。
-- 「〜は実行時エラーである」：評価器が実行を中断し、位置と理由を返す。
+- 「〜は字句エラーである」：字句解析が入力を受け付けず、位置と理由を返す（`ErrorKind::Lex`）。
+- 「〜は構文エラーである」：構文解析またはコンパイルが入力を受け付けず、位置と理由を返す（`ErrorKind::Parse`）。
+- 「〜は型エラーである」：静的型検査が入力を受け付けず、位置と理由を返す（`ErrorKind::Type`）。
+- 「〜は実行時エラーである」：評価器が実行を中断し、位置と理由を返す（`ErrorKind::Runtime`）。
 
 ## 3. 字句
 
@@ -105,23 +106,30 @@ true false none some ok err inf nan
 
 ## 4. 値と型
 
-**[type.dynamic]** Rin は動的型付け言語であり、すべての値は自身の型を保持する。
+**[type.static]** Rin は静的型付け言語であり、ソースの実行前に双方向型検査を行う。未実行の分岐や関数本体を含め、型不一致・未定義名・非網羅な `match`・到達不能な `match` 枝は実行前に型エラー（`ErrorKind::Type`）として報告する。型検査器の作業量は入力の AST・型式節数に比例する固定上限（`64 × max(N, 1)`）および `Limits::memory_bytes` で制限し、上限超過時は `TooManySteps` / `TooMuchMemory` を返す。
 
 **[type.numeric]** 数値型は 64 ビット符号付き整数 `i64` と 64 ビット浮動小数点数 `f64` の 2 種類のみとする。整数と浮動小数点数の暗黙の変換は行わない。
 
 **[type.builtin]** 組み込みの値と型は次のとおりである。
 
-- `void`：値を持たない結果（`def`、`defn`、`when` の戻り値）
+- `void`：値を持たない結果（`def`、`defn`、`defschema`、`when` の戻り値）
 - `i64`、`f64`、`bool`、`char`、`text`
 - `ident`：不変の識別子名値（UTF-8 文字列と同じ内部表現。`'foo` のように表記する）
+- `datum`：動的なデータ表現（`i64`・`f64`・`bool`・`char`・`text`・`ident`・`none`・要素が `datum` の `list`）。`quote` / `quasiquote` が返す型であり、期待型が `datum` の位置では対応する値型から暗黙に昇格する
 - `list`：コンスセルからなる不変の連結リスト `[e1 e2 ...]` / `(list e1 e2 ...)`（`cons`、`car`、`cdr`、`len`、`is_empty` は O(1) で末尾を共有する）
 - `array`：連続メモリ上に配置された固定長配列（`list->array` で生成し、`arr[i]`・`len`・`get` を O(1) で実行でき、FFI 境界との受け渡しに適する）
 - `tuple`：2 要素以上の組 `(tuple e1 e2 ...)`
-- `struct`：名前と名前付きフィールドを持つ複合値 `Name { field: expr ... }` / `(struct Name (field expr) ...)`
-- `variant`：型名とバリアント名（および任意のペイロード 1 つ）を持つ値 `Type.Variant` / `Type.Variant(expr)` / `(variant Type Variant)` / `(variant Type Variant expr)`
+- `struct`：名前と名前付きフィールドを持つ複合値 `Name { field: expr ... }` / `(struct Name (field expr) ...)`（事前に `defschema` で定義する）
+- `variant`：型名とバリアント名（および任意のペイロード 1 つ）を持つ値 `Type.Variant` / `Type.Variant(expr)` / `(variant Type Variant)` / `(variant Type Variant expr)`（事前に `defschema` で定義する）
 - `option`：`none` または `some(expr)` / `(some expr)`
 - `result`：`ok(expr)` / `(ok expr)` または `err(expr)` / `(err expr)`
 - `fn`：関数値（ユーザー定義関数・無名関数・組み込み関数）
+
+**[type.defschema]** `(defschema Name SchemaBody)` は、大文字始まりの名前 `Name` で構造体・開放構造体・バリアント型または型エイリアスを定義する。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。同一環境内の重複定義や循環エイリアス、未定義型の参照はエラーである。
+
+**[type.expr]** 型式は `void`・`i64`・`f64`・`bool`・`char`・`text`・`ident`・`datum`、名前付き型（`Name` / `mod.Name`）、および `(list T)`・`(array T)`・`(option T)`・`(result T E)`・`(tuple T1 T2 ...)`・`(fn (P1 P2 ...) R)` とする。`any` 型は提供せず、型式としての使用は構文エラーである。
+
+**[type.boundary]** ホスト境界（`Builder::bind` / `bind_val` / `rin_bind`、`Machine::eval_with` / `eval_with_vals` / `rin_eval_with`、`Machine::call` / `call_in` / `rin_call` / `rin_call_in`）でホストから渡された値は、宣言された型式または関数仮引数型と実行時に照合する。型式に `fn` 型を含めること（ホストから関数値を渡せない）や、実行時の値が型と一致しない場合は `[type.boundary]` の実行時エラー（位置は `0:0`）を返す。
 
 **[value.display]** 値の表示（`Value`・`ValueRef` の `Display`）は型ごとに次の形式とし、関数値・`void`・`array`・`f64`（および `f64` を含む値）を除くデータ値はそのまま Rin のソースとして読み直したときに元の値と等しくなる表現を用いる。
 
@@ -155,7 +163,7 @@ true false none some ok err inf nan
 
 **[expr.def]** `(def name expr)` は、`expr` を評価した値を現在のトップレベル環境（大域環境またはモジュール環境）の名前 `name` に束縛し、`void` を返す。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。同じ環境に同名の束縛がある場合、組み込み名と同名の場合、または大域環境において読み込み済みのモジュール名（`import` の有無を問わない）と同名の場合は、`[expr.def]` の実行時エラーである。ホスト API（`Builder::bind` / `bind_val` / `rin_bind`）による大域束縛も同じ重複・衝突規則に従う（位置は `0:0`）。読み込み段階のトップレベル評価（`Builder::eval` / `rin_build`）が途中で失敗した場合、その評価中に追加した大域束縛（`def`・`defn`・`import`）は追加のメモリ確保なしで取り消される（永続領域への追記は `[eval.limits]` に従う）。`let`・仮引数・パターン束縛・`eval_with` の初期束縛など局所束縛によるシャドーイングは許可する。
 
-**[expr.defn]** `(defn name (p1 p2 ...) body...)` は、仮引数 `p1, p2, ...` と本体 `body...` を持つ関数を定義し、現在のトップレベル環境の名前 `name` に束縛して `void` を返す。`defn` で定義した関数は、自身を含む大域環境・モジュール環境の名前を参照して再帰呼び出しできる。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。`[expr.def]` と同じく、同一環境での同名再定義・組み込み名の上書き・大域環境における読み込み済みモジュール名との衝突は、`[expr.defn]` の実行時エラーである。
+**[expr.defn]** `(defn name ((p1 T1) (p2 T2) ...) -> RetType body...)` は、型注釈付きの仮引数と戻り値型・本体 `body...` を持つ関数を定義し、現在のトップレベル環境の名前 `name` に束縛して `void` を返す。すべての仮引数型と戻り値型 `-> RetType` は必須であり、省略した場合は型エラーである。`defn` で定義した関数は、自身を含む大域環境・モジュール環境の名前を参照して再帰呼び出しできる。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。`[expr.def]` と同じく、同一環境での同名再定義・組み込み名の上書き・大域環境における読み込み済みモジュール名との衝突は、`[expr.defn]` の実行時エラーである。
 
 **[expr.fn]** `(fn (p1 p2 ...) body...)` は、現在のレキシカル環境を捕捉する無名関数値を返す。本体は 1 つ以上の式を持ち、順に評価して最後の式の値を返す。
 

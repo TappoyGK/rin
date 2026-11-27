@@ -33,8 +33,8 @@ const SHALLOW_COMPILE_DEPTH: usize = 3;
 #[derive(Clone, Copy)]
 pub(crate) enum InitialBindingNames<'a> {
     #[cfg(feature = "std-value")]
-    Values(&'a [(&'a str, crate::Value)]),
-    Vals(&'a [(&'a str, crate::Val)]),
+    Values(&'a [(&'a str, &'a str, crate::Value)]),
+    Vals(&'a [(&'a str, &'a str, crate::Val)]),
 }
 
 impl<'a> InitialBindingNames<'a> {

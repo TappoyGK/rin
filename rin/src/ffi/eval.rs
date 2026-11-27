@@ -21,13 +21,14 @@ const STACK_FFI_ARGS: usize = 16;
 pub unsafe extern "C" fn rin_bind(
     machine: *mut Rin,
     name: *const c_char,
+    type_expr: *const c_char,
     val: *const RinValue,
 ) -> bool {
     // SAFETY: 呼び出し側が machine の有効性と排他的アクセスを保証する。
     let Some(m) = (unsafe { begin_operation(machine) }) else {
         return false;
     };
-    if name.is_null() || val.is_null() {
+    if name.is_null() || type_expr.is_null() || val.is_null() {
         m.record_host_error("null pointer argument");
         return false;
     }
@@ -36,10 +37,14 @@ pub unsafe extern "C" fn rin_bind(
         m.record_host_error("invalid UTF-8 binding name");
         return false;
     };
+    let Ok(ty_str) = unsafe { CStr::from_ptr(type_expr) }.to_str() else {
+        m.record_host_error("invalid UTF-8 type expression");
+        return false;
+    };
     // SAFETY: 呼び出し側が有効な `RinValue` を保証する。
     let v = unsafe { (*val).0 };
     let err_recorded = match m.state.as_mut().expect("Rin state present") {
-        RinState::Building(b) => match b.bind_val(key, v) {
+        RinState::Building(b) => match b.bind_val(key, ty_str, v) {
             Ok(()) => return true,
             Err(e) => {
                 m.last_error.set_from_ref(e);
@@ -164,12 +169,16 @@ unsafe fn eval_frozen_inner(
         if binding_count > 0 {
             let raw_bindings = unsafe { std::slice::from_raw_parts(bindings, binding_count) };
             for b in raw_bindings {
-                if b.name.is_null() || b.value.is_null() {
+                if b.name.is_null() || b.type_expr.is_null() || b.value.is_null() {
                     m.record_host_error("null pointer argument");
                     return RinEvalResult::failure();
                 }
                 if unsafe { CStr::from_ptr(b.name) }.to_str().is_err() {
                     m.record_host_error("invalid UTF-8 binding name");
+                    return RinEvalResult::failure();
+                }
+                if unsafe { CStr::from_ptr(b.type_expr) }.to_str().is_err() {
+                    m.record_host_error("invalid UTF-8 type expression");
                     return RinEvalResult::failure();
                 }
             }
@@ -183,12 +192,13 @@ unsafe fn eval_frozen_inner(
         return RinEvalResult::failure();
     }
 
-    let mut stack_buf: [(&str, Val); STACK_FFI_ARGS] = [("", Val::void()); STACK_FFI_ARGS];
-    let mut heap_ptr: Option<(NonNull<(&str, Val)>, Layout)> = None;
-    let slice_mut: &mut [(&str, Val)] = if binding_count <= STACK_FFI_ARGS {
+    type BindingEntry<'b> = (&'b str, &'b str, Val);
+    let mut stack_buf: [BindingEntry<'_>; STACK_FFI_ARGS] = [("", "", Val::void()); STACK_FFI_ARGS];
+    let mut heap_ptr: Option<(NonNull<BindingEntry<'_>>, Layout)> = None;
+    let slice_mut: &mut [BindingEntry<'_>] = if binding_count <= STACK_FFI_ARGS {
         &mut stack_buf[..binding_count]
     } else {
-        let Some(layout) = Layout::array::<(&str, Val)>(binding_count).ok() else {
+        let Some(layout) = Layout::array::<BindingEntry<'_>>(binding_count).ok() else {
             m.record_simple_error(
                 "eval.limits",
                 RinErrorKind::TooMuchMemory,
@@ -207,12 +217,12 @@ unsafe fn eval_frozen_inner(
             );
             return RinEvalResult::failure();
         };
-        let p = raw.cast::<(&str, Val)>();
+        let p = raw.cast::<(&str, &str, Val)>();
         heap_ptr = Some((p, layout));
         // SAFETY: `p` は `binding_count` 個分確保済み。すぐ下で全要素初期化する。
         unsafe {
             for i in 0..binding_count {
-                p.as_ptr().add(i).write(("", Val::void()));
+                p.as_ptr().add(i).write(("", "", Val::void()));
             }
             std::slice::from_raw_parts_mut(p.as_ptr(), binding_count)
         }
@@ -223,8 +233,8 @@ unsafe fn eval_frozen_inner(
         // SAFETY: binding_count > 0 かつ bindings 非 NULL。
         let raw_bindings = unsafe { std::slice::from_raw_parts(bindings, binding_count) };
         for (i, b) in raw_bindings.iter().enumerate() {
-            if b.name.is_null() || b.value.is_null() {
-                for &(_, v) in &slice_mut[..filled] {
+            if b.name.is_null() || b.type_expr.is_null() || b.value.is_null() {
+                for &(_, _, v) in &slice_mut[..filled] {
                     m.state_mut().release_val(v);
                 }
                 if let Some((p, layout)) = heap_ptr {
@@ -235,7 +245,7 @@ unsafe fn eval_frozen_inner(
                 return RinEvalResult::failure();
             }
             let Ok(name) = unsafe { CStr::from_ptr(b.name) }.to_str() else {
-                for &(_, v) in &slice_mut[..filled] {
+                for &(_, _, v) in &slice_mut[..filled] {
                     m.state_mut().release_val(v);
                 }
                 if let Some((p, layout)) = heap_ptr {
@@ -245,10 +255,21 @@ unsafe fn eval_frozen_inner(
                 m.record_host_error("invalid UTF-8 binding name");
                 return RinEvalResult::failure();
             };
+            let Ok(ty_str) = unsafe { CStr::from_ptr(b.type_expr) }.to_str() else {
+                for &(_, _, v) in &slice_mut[..filled] {
+                    m.state_mut().release_val(v);
+                }
+                if let Some((p, layout)) = heap_ptr {
+                    let mut calloc = m.alloc;
+                    unsafe { calloc.dealloc(p.cast::<u8>(), layout) };
+                }
+                m.record_host_error("invalid UTF-8 type expression");
+                return RinEvalResult::failure();
+            };
             let v = unsafe { (*b.value).0 };
             // 前回の `last_result` をそのまま引数に渡しても安全にするため retain する。
             m.state_mut().retain_val(v);
-            slice_mut[i] = (name, v);
+            slice_mut[i] = (name, ty_str, v);
             filled += 1;
         }
     }
@@ -265,7 +286,7 @@ unsafe fn eval_frozen_inner(
         RinState::Building(_) => unreachable!(),
     };
 
-    for &(_, v) in &slice_mut[..filled] {
+    for &(_, _, v) in &slice_mut[..filled] {
         m.state_mut().release_val(v);
     }
     if let Some((p, layout)) = heap_ptr {

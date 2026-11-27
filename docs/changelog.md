@@ -4,6 +4,8 @@
 
 ## 未リリース
 
+- **言語・API の破壊的変更（静的型付けへの移行・`defschema` の言語統合・`defn` 型注釈必須化）**: Rin を静的型付け言語へ移行し、言語構文に `defschema`・型注釈（`def` / `defn` / `fn`）・`datum` 型および型パターン（`i64(n)` 等）・モジュール修飾バリアントパターンを導入した。すべての `defn` で仮引数型と戻り値型 `-> Type` を必須とし、実行前の双方向型検査（`ErrorKind::Type` / `RIN_ERR_TYPE`、`match` 網羅性・到達不能性検査、未実行分岐の型検査を含む）を `WorkArena` 上でゼロヒープに実行する。スキーマ DSL から `any` を廃止して `datum` を追加し、ホスト境界 API（`Builder::bind` / `bind_val`、`Machine::eval_with` / `eval_with_vals`、`eval_with` / `eval_with_allocator`、C FFI `rin_bind` / `RinBinding`）に型式引数を追加して `[type.boundary]` の実行時検証を導入した（[PR #83](https://github.com/TappoyGK/rin/pull/83)）。
+
 - **言語・API の破壊的変更（`eval_with` のレキシカルスコープ化と同名再定義・モジュール再読込の廃止）**: `Machine::eval_with` / `eval_with_vals` / `rin_eval_with` の初期束縛を動的スコープから評価するソース最外側のレキシカル束縛へ変更し、評価するソースとそこで生成されたクロージャからのみ参照できるようにした（凍結済みの既存関数・クロージャからは参照されない）。また、読み込み段階（`Builder` / `rin_build` / `rin_bind` / `rin_load`）における同一環境での同名再定義・組み込み名の上書き・大域束縛と読み込み済みモジュール名の衝突・読み込み済みモジュールの再読込をすべて実行時エラー（`[expr.def]` / `[expr.defn]` / `[expr.module]`）とし、`Builder::eval` / `rin_build` が途中で失敗した際はその評価で追加した大域束縛・`import` を追加確保なしでロールバックするようにした（同一環境での同じモジュールの再 `import` と、失敗した `load_module` の再試行、`let`・仮引数・初期束縛によるシャドーイングは引き続き許可する）（[PR #81](https://github.com/TappoyGK/rin/pull/81)）。
 
 - **構文追加（複数行文字列リテラル `"""..."""`）**: 閉じ `"""` の行頭空白（スペース・タブ）を基準にインデントを自動除去し、通常の `text` リテラルと同じエスケープおよび `${式}` テンプレート埋め込み（式内の複数行記述を含む）に対応する複数行文字列リテラル `"""..."""` を追加した。`rin fmt` は開始 `"""` から閉じ `"""` までの原文と閉じ行の字下げを保持する（[PR #79](https://github.com/TappoyGK/rin/pull/79)）。

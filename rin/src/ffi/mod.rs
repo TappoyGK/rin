@@ -217,6 +217,7 @@ unsafe fn begin_operation<'a>(machine: *mut Rin) -> Option<&'a mut Rin> {
 #[derive(Clone, Copy)]
 pub struct RinBinding {
     pub name: *const c_char,
+    pub type_expr: *const c_char,
     pub value: *const RinValue,
 }
 

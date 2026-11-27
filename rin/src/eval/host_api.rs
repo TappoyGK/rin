@@ -8,7 +8,12 @@ impl EnvState<'_> {
         ValueRef::new(v.0, &self.pool)
     }
 
-    pub(super) fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>> {
+    pub(super) fn bind_val(
+        &mut self,
+        name: &str,
+        type_expr: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'_>> {
         if self.modules.get_val(name).is_some() {
             self.pool.core.err_fmt(
                 "expr.def",
@@ -45,10 +50,57 @@ impl EnvState<'_> {
             );
             return Err(self.pool.core.error.as_ref());
         }
+        let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
+        let tid = match (|| {
+            let te = parse_type_expr_work(type_expr, &mut self.pool.work, &mut self.pool.core)?;
+            let tid = resolve_type_expr_perm(
+                &te,
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )?;
+            reject_fn_in_perm_type(
+                tid,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                Span::default(),
+            )?;
+            check_rval_against_type(val.0, tid, &self.type_env, &mut self.pool, Span::default())?;
+            Ok::<_, ErrRecorded>(tid)
+        })() {
+            Ok::<_, ErrRecorded>(tid) => tid,
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Err(self.pool.core.error.as_ref());
+            }
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        if self
+            .type_env
+            .define_root_val(
+                &mut self.pool.perm,
+                &mut self.pool.core,
+                name,
+                ValBinding {
+                    ty: tid,
+                    fn_sig: None,
+                },
+                Span::default(),
+            )
+            .is_err()
+        {
+            self.type_env.rollback(type_snap);
+            return Err(self.pool.core.error.as_ref());
+        }
         self.pool.retain_val(val.0);
         match self.globals.set(&mut self.pool, id, val.0, Span::default()) {
             Ok(_) => Ok(()),
             Err(_) => {
+                self.type_env.rollback(type_snap);
                 self.pool.release_val(val.0);
                 Err(self.pool.core.error.as_ref())
             }
@@ -58,9 +110,26 @@ impl EnvState<'_> {
     pub(super) fn eval_building_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.clear_last_result();
         let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
         let res = (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: false,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: true,
+                    extra_bindings: &[],
+                    extra_binding_exprs: &[],
+                },
+            )?;
             let chunk = compile_program(
                 exprs.as_slice(),
                 None,
@@ -78,14 +147,17 @@ impl EnvState<'_> {
                 self.set_last_result(v);
                 Ok(ValueRef::new(self.last_result, &self.pool))
             }
-            Err(_) => Err(self.pool.core.error.as_ref()),
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                Err(self.pool.core.error.as_ref())
+            }
         }
     }
 
     pub(super) fn eval_frozen_ref(
         &mut self,
         source: &str,
-        bindings: &[(&str, Val)],
+        bindings: &[(&str, &str, Val)],
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.clear_last_result();
         let outer_mark = self.pool.work.mark(&self.pool.core);
@@ -104,12 +176,28 @@ impl EnvState<'_> {
     fn eval_frozen_vals_inner(
         &mut self,
         source: &str,
-        bindings: &[(&str, Val)],
+        bindings: &[(&str, &str, Val)],
     ) -> Result<RVal, ErrRecorded> {
         if bindings.is_empty() {
             let chunk = {
                 let exprs =
                     parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+                check_program_work(
+                    exprs.as_slice(),
+                    &mut self.type_env,
+                    &mut self.pool.perm,
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    CheckOptions {
+                        frozen: true,
+                        strict_defn_annotations: true,
+                        module_name: None,
+                        test_mode: false,
+                        commit: false,
+                        extra_bindings: &[],
+                        extra_binding_exprs: &[],
+                    },
+                )?;
                 compile_program(
                     exprs.as_slice(),
                     None,
@@ -122,9 +210,48 @@ impl EnvState<'_> {
             let mut runner = self.runner(None, true);
             return runner.run_top_chunk(&chunk);
         }
+        let mut extra_exprs = RawVec::<(&str, crate::ast::TypeExpr)>::new();
+        for &(bname, bty, bval) in bindings {
+            let te = parse_type_expr_work(bty, &mut self.pool.work, &mut self.pool.core)?;
+            validate_boundary_type_expr(
+                &te,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )?;
+            check_rval_against_type_expr(
+                bval.0,
+                &te,
+                &self.type_env,
+                &mut self.pool,
+                Span::default(),
+            )?;
+            if extra_exprs
+                .push_work(&mut self.pool.work, &mut self.pool.core, (bname, te))
+                .is_none()
+            {
+                return Err(self.pool.core.err_oom(Span::default()));
+            }
+        }
         let (chunk, used) = {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: true,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: false,
+                    extra_bindings: &[],
+                    extra_binding_exprs: extra_exprs.as_slice(),
+                },
+            )?;
             compile_program_with_bindings(
                 exprs.as_slice(),
                 None,
@@ -140,7 +267,7 @@ impl EnvState<'_> {
                 let mut vals = [RVal::Void; 8];
                 let count = len as usize;
                 for i in 0..count {
-                    vals[i] = bindings[indices[i] as usize].1.0;
+                    vals[i] = bindings[indices[i] as usize].2.0;
                 }
                 let mut runner = self.runner(None, true);
                 runner.run_top_chunk_with_locals(&chunk, &vals[..count])
@@ -158,7 +285,7 @@ impl EnvState<'_> {
                         let _ = vals.push_work(
                             &mut self.pool.work,
                             &mut self.pool.core,
-                            bindings[idx as usize].1.0,
+                            bindings[idx as usize].2.0,
                         );
                     }
                 }
@@ -189,7 +316,11 @@ impl EnvState<'_> {
             write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
             return Err(self.pool.core.error.as_ref());
         };
-        self.call_rval_vals_ref(callee, args, frozen)
+        let fn_sig = self
+            .type_env
+            .lookup_root_val(fn_name)
+            .and_then(|vb| vb.fn_sig);
+        self.call_rval_vals_ref(callee, fn_sig, args, frozen)
     }
 
     pub(super) fn call_in_vals_ref(
@@ -227,15 +358,46 @@ impl EnvState<'_> {
             );
             return Err(self.pool.core.error.as_ref());
         };
-        self.call_rval_vals_ref(callee, args, frozen)
+        let fn_sig = self.type_env.lookup_module(mod_name).and_then(|(_, menv)| {
+            menv.exports_vals
+                .get_by(fnv1a_bytes(fn_name.as_bytes()), |k| k.as_str() == fn_name)
+                .and_then(|vb| vb.fn_sig)
+        });
+        self.call_rval_vals_ref(callee, fn_sig, args, frozen)
     }
 
     fn call_rval_vals_ref(
         &mut self,
         callee: RVal,
+        fn_sig: Option<FnSig>,
         args: &[Val],
         frozen: bool,
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
+        if let Some(sig) = fn_sig {
+            let params = sig.params.as_slice();
+            if params.len() != args.len() {
+                self.pool.core.err_str(
+                    "type.boundary",
+                    ErrorKind::Runtime,
+                    Span::default(),
+                    "wrong number of arguments",
+                );
+                return Err(self.pool.core.error.as_ref());
+            }
+            for (arg, &(_, pty)) in args.iter().zip(params) {
+                if check_rval_against_type(
+                    arg.0,
+                    pty,
+                    &self.type_env,
+                    &mut self.pool,
+                    Span::default(),
+                )
+                .is_err()
+                {
+                    return Err(self.pool.core.error.as_ref());
+                }
+            }
+        }
         let mark = self.pool.work.mark(&self.pool.core);
         let mut r_args = RawVec::new();
         for &arg in args {
@@ -374,9 +536,9 @@ impl_val_constructors!(Builder);
 impl_val_constructors!(Machine);
 
 impl Builder<'_> {
-    /// マシン上で構築した [`Val`] を大域変数として束縛する（システムヒープ不使用）。
-    pub fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>> {
-        self.inner.bind_val(name, val)
+    /// マシン上で構築した [`Val`] を型式 `type_expr` 付きで大域変数として束縛する（システムヒープ不使用）。
+    pub fn bind_val(&mut self, name: &str, type_expr: &str, val: Val) -> Result<(), ErrorRef<'_>> {
+        self.inner.bind_val(name, type_expr, val)
     }
 
     /// モジュールを読み込み、失敗時は借用エラー [`ErrorRef`] を返す。
@@ -416,11 +578,11 @@ impl Machine<'_> {
         self.inner.eval_frozen_ref(source, &[])
     }
 
-    /// 凍結した環境で一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
+    /// 凍結した環境で型式付き一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
     pub fn eval_with_vals(
         &mut self,
         source: &str,
-        bindings: &[(&str, Val)],
+        bindings: &[(&str, &str, Val)],
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.inner.eval_frozen_ref(source, bindings)
     }

@@ -51,7 +51,7 @@ int main(void) {
     Rin *m = rin_new(rin_limits_default(), alloc);
     assert(m != NULL);
 
-    RinEvalResult lr = rin_load(m, "base", "(defn make_card (c) Card { id: \"ember\" cost: (- c 1) })");
+    RinEvalResult lr = rin_load(m, "base", "(defschema Card (struct Card (id text) (cost i64))) (defn make_card ((c i64)) -> Card Card { id: \"ember\" cost: (- c 1) })");
     assert(lr.ok && lr.value == NULL);
     assert(rin_last_error(m) == NULL);
 
@@ -68,7 +68,7 @@ int main(void) {
     assert(cost == 3);
     rin_drop(m, cost_v);
 
-    RinEvalResult failed = rin_load(m, "broken", "(defn fail () (/ 1 0)) (fail)");
+    RinEvalResult failed = rin_load(m, "broken", "(defn fail () -> i64 (/ 1 0)) (fail)");
     assert(!failed.ok && failed.value == NULL);
     const RinError *error = rin_last_error(m);
     assert(error != NULL && error->kind == RIN_ERR_RUNTIME);
@@ -93,7 +93,7 @@ int main(void) {
     assert(success.ok && success.value != NULL && rin_last_error(m) == NULL);
     RinValue *bx = rin_int(m, 10);
     RinValue *by = rin_int(m, 32);
-    RinBinding binds[2] = { { "x", bx }, { "y", by } };
+    RinBinding binds[2] = { { "x", "i64", bx }, { "y", "i64", by } };
     RinEvalResult with_res = rin_eval_with(m, "(+ x y)", binds, 2);
     rin_drop(m, bx);
     rin_drop(m, by);
