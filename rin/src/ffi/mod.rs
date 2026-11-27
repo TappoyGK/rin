@@ -37,7 +37,7 @@ pub enum RinTag {
     Float = 2,
     Bool = 3,
     Char = 4,
-    Str = 5,
+    Text = 5,
     List = 6,
     Array = 7,
     Tuple = 8,

@@ -141,14 +141,14 @@ fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
 
     // 一時束縛が実行時エラーやメモリ超過になっても解放される。
     let err = machine
-        .eval_with("(/ x 0)", &[("tmp", Value::str("hello"))])
+        .eval_with("(/ x 0)", &[("tmp", Value::text("hello"))])
         .unwrap_err();
     assert_eq!(err.rule(), "op.arith");
     assert_eq!(machine.live_bytes(), baseline);
 
-    let big = Value::str("a".repeat(20_000));
+    let big = Value::text("a".repeat(20_000));
     let mem_err = machine
-        .eval_with("x", &[("small", Value::str("ok")), ("big", big)])
+        .eval_with("x", &[("small", Value::text("ok")), ("big", big)])
         .unwrap_err();
     assert_eq!(mem_err.kind, ErrorKind::TooMuchMemory);
     assert_eq!(machine.live_bytes(), baseline);

@@ -44,7 +44,7 @@ fn take_type_children(ty: &mut TypeExpr, next: &mut Option<TypeExpr>, work: &mut
         | TypeExpr::F64
         | TypeExpr::Bool
         | TypeExpr::Char
-        | TypeExpr::String
+        | TypeExpr::Text
         | TypeExpr::Ident
         | TypeExpr::Ref(_) => {}
         TypeExpr::List(t) | TypeExpr::Array(t) | TypeExpr::Option(t) => {

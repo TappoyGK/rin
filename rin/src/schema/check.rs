@@ -118,9 +118,7 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
             TypeExpr::F64 => expect_match(matches!(value, Value::Float(_)), "f64", value, &path)?,
             TypeExpr::Bool => expect_match(matches!(value, Value::Bool(_)), "bool", value, &path)?,
             TypeExpr::Char => expect_match(matches!(value, Value::Char(_)), "char", value, &path)?,
-            TypeExpr::String => {
-                expect_match(matches!(value, Value::Str(_)), "string", value, &path)?
-            }
+            TypeExpr::Text => expect_match(matches!(value, Value::Text(_)), "text", value, &path)?,
             TypeExpr::Ident => {
                 expect_match(matches!(value, Value::Ident(_)), "ident", value, &path)?
             }

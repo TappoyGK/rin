@@ -209,12 +209,12 @@ fn failure_cleanup() {
         ]);
         let mut alloc = HeapAllocator;
         let mut m = Builder::new(Limits::default(), &mut alloc);
-        m.bind("keep", &Value::str("retained")).unwrap();
+        m.bind("keep", &Value::text("retained")).unwrap();
         let before = m.live_bytes();
         for _ in 0..3 {
             assert_eq!(m.bind("bad", &bad).unwrap_err().kind, ErrorKind::Runtime);
             assert_eq!(m.live_bytes(), before);
-            assert!(m.eval("keep").unwrap() == Value::str("retained"));
+            assert!(m.eval("keep").unwrap() == Value::text("retained"));
         }
         // メモリ上限を変えて、子の変換途中・親の確保失敗を通す。
         for budget in [0, 40, 100, 500, 4000, 8000] {
@@ -383,7 +383,7 @@ fn shallow_and_iterative_paths_agree() {
                 shape,
                 depth,
                 Value::array(vec![
-                    Value::str("allocated sibling"),
+                    Value::text("allocated sibling"),
                     Value::Builtin("invalid"),
                 ]),
             );

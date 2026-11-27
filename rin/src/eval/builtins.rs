@@ -228,7 +228,7 @@ impl Runner<'_, '_> {
                     return Err(self.err_runtime_fmt(
                         "fn.convert",
                         span,
-                        format_args!("'text->ident' expects string, got {tname}"),
+                        format_args!("'text->ident' expects text, got {tname}"),
                     ));
                 };
                 let Obj::Str(os) = *self.pool.get(id) else {
@@ -236,7 +236,7 @@ impl Runner<'_, '_> {
                     return Err(self.err_runtime_fmt(
                         "fn.convert",
                         span,
-                        format_args!("'text->ident' expects string, got {tname}"),
+                        format_args!("'text->ident' expects text, got {tname}"),
                     ));
                 };
                 let len = os.len();

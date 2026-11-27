@@ -57,6 +57,65 @@ impl Parser<'_, '_, '_> {
                     combined,
                 ))
             }
+            ParseFrame::Template {
+                start,
+                mut parts,
+                mut max_child,
+            } => {
+                if parts.push_work(self.work, self.core, expr).is_none() {
+                    return Err(self.oom(expr.span));
+                }
+                max_child = max_child.max(depth);
+                let next = self.peek();
+                match next.kind {
+                    WorkTokenKind::TemplateMid(s) => {
+                        self.advance()?;
+                        if !s.is_empty()
+                            && parts
+                                .push_work(
+                                    self.work,
+                                    self.core,
+                                    Expr::new(next.span, ExprKind::Str(s)),
+                                )
+                                .is_none()
+                        {
+                            return Err(self.oom(next.span));
+                        }
+                        self.push_frame(
+                            ParseFrame::Template {
+                                start,
+                                parts,
+                                max_child,
+                            },
+                            start,
+                        )?;
+                        Ok(NextStep::StartExpr)
+                    }
+                    WorkTokenKind::TemplateEnd(s) => {
+                        self.advance()?;
+                        if !s.is_empty()
+                            && parts
+                                .push_work(
+                                    self.work,
+                                    self.core,
+                                    Expr::new(next.span, ExprKind::Str(s)),
+                                )
+                                .is_none()
+                        {
+                            return Err(self.oom(next.span));
+                        }
+                        Ok(NextStep::HaveExpr(
+                            Expr::new(start, ExprKind::Template(parts)),
+                            1 + max_child,
+                        ))
+                    }
+                    _ => Err(self.parse_err(
+                        "src.syntax",
+                        next.span,
+                        "expected '}' to close template interpolation",
+                    )),
+                }
+            }
             ParseFrame::List {
                 start,
                 mut items,

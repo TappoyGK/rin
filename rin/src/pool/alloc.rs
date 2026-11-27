@@ -58,9 +58,15 @@ impl Pool<'_> {
         };
         // SAFETY: `block.actual_size >= s.len()`。
         unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), block.ptr.as_ptr(), s.len()) };
+        let char_len = if s.is_ascii() {
+            s.len()
+        } else {
+            s.chars().count()
+        };
         Ok(ObjStr {
             ptr: block.ptr,
             len: s.len(),
+            char_len,
             block_size: block.actual_size,
         })
     }
@@ -148,6 +154,7 @@ impl Pool<'_> {
             ObjStr {
                 ptr: block.ptr,
                 len: src.len,
+                char_len: src.char_len,
                 block_size: block.actual_size,
             }
         };
@@ -171,6 +178,7 @@ impl Pool<'_> {
             ObjStr {
                 ptr: block.ptr,
                 len: src.len,
+                char_len: src.char_len,
                 block_size: block.actual_size,
             }
         };

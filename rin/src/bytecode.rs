@@ -135,6 +135,7 @@ pub(crate) struct Chunk {
     pub spans: RawVec<Span>,
     pub tick_spans: RawVec<Span>,
     pub strings: RawVec<RawStr>,
+    pub str_objs: RawVec<crate::pool::ObjId>,
     pub floats: RawVec<f64>,
     pub structs: RawVec<StructDesc>,
     pub patterns: RawVec<Pattern>,
@@ -299,16 +300,20 @@ impl Chunk {
         let protos =
             RawVec::from_slice_exact_perm(&mut pool.perm, &mut pool.core, self.protos.as_slice())?;
 
-        let strings = if self.strings.is_empty() {
-            RawVec::new()
+        let (strings, str_objs) = if self.strings.is_empty() {
+            (RawVec::new(), RawVec::new())
         } else {
             let mut v = RawVec::new();
+            let mut objs = RawVec::new();
             v.reserve_perm(&mut pool.perm, &mut pool.core, self.strings.len())?;
+            objs.reserve_perm(&mut pool.perm, &mut pool.core, self.strings.len())?;
             for &s in self.strings.as_slice() {
                 let raw = RawStr::from_perm(&mut pool.perm, &mut pool.core, s.as_str())?;
                 v.push_perm(&mut pool.perm, &mut pool.core, raw)?;
+                let id = pool.intern_perm_str(raw)?;
+                objs.push_perm(&mut pool.perm, &mut pool.core, id)?;
             }
-            v
+            (v, objs)
         };
 
         let structs = if self.structs.is_empty() {
@@ -381,6 +386,7 @@ impl Chunk {
             spans,
             tick_spans,
             strings,
+            str_objs,
             floats,
             structs,
             patterns,
@@ -453,6 +459,7 @@ pub(crate) enum Op {
 
     MakeList(u32),
     MakeListSplice(u32),
+    FormatTemplate(u32),
     MakeTuple(u32),
     MakeStruct(u32),
     WithCheckStruct,

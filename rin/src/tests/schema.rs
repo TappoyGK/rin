@@ -7,7 +7,7 @@ fn schema_validation_strict_open_recursive_and_ffi() {
     let s = Schema::parse(
         r#"
         (defschema Element (variant Element (Plain) (Fire) (Frost)))
-        (defschema Card (struct Card (id string) (cost i64) (element Element)))
+        (defschema Card (struct Card (id text) (cost i64) (element Element)))
         (list Card)
         "#,
     )
@@ -21,7 +21,7 @@ fn schema_validation_strict_open_recursive_and_ffi() {
     assert!(s.check(&extra_field).is_err());
 
     let open_s =
-        Schema::parse("(list (open_struct Card (id string) (cost i64) (element any)))").unwrap();
+        Schema::parse("(list (open_struct Card (id text) (cost i64) (element any)))").unwrap();
     assert!(open_s.check(&extra_field).is_ok());
 
     let rec = Schema::parse(

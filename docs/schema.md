@@ -8,7 +8,7 @@ Rin の値（`Value`）がホスト側の期待する形に適合するかを検
 
 ```rin
 (defschema Element (variant Element (Plain) (Fire) (Frost)))
-(defschema Card (struct Card (id string) (cost i64) (element Element)))
+(defschema Card (struct Card (id text) (cost i64) (element Element)))
 (list Card)
 ```
 
@@ -20,7 +20,7 @@ Rin の値（`Value`）がホスト側の期待する形に適合するかを検
 
 ### 2.1 プリミティブ・ワイルドカード
 
-- `void`、`i64`、`f64`、`bool`、`char`、`string`、`ident`
+- `void`、`i64`、`f64`、`bool`、`char`、`text`、`ident`
 - `any`：任意の型・値を受け入れる。
 
 ### 2.2 コンテナ・合成型

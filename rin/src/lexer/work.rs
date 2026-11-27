@@ -24,6 +24,9 @@ pub(crate) enum WorkTokenKind {
     Int(i64),
     Float(f64),
     Str(RawStr),
+    TemplateStart(RawStr),
+    TemplateMid(RawStr),
+    TemplateEnd(RawStr),
     Char(char),
     Eof,
 }
@@ -93,11 +96,26 @@ impl Lexer<'_> {
             }
             b'{' => {
                 self.bump();
+                if self.template_depth > 0 {
+                    let top = &mut self.template_braces[self.template_depth - 1];
+                    *top = top.saturating_add(1);
+                }
                 WorkTokenKind::LBrace
             }
             b'}' => {
-                self.bump();
-                WorkTokenKind::RBrace
+                if self.template_depth > 0 {
+                    let top = &mut self.template_braces[self.template_depth - 1];
+                    if *top > 0 {
+                        *top -= 1;
+                        self.bump();
+                        WorkTokenKind::RBrace
+                    } else {
+                        self.lex_work_string_segment(span, true, work, core)?
+                    }
+                } else {
+                    self.bump();
+                    WorkTokenKind::RBrace
+                }
             }
             b'.' => {
                 self.bump();
@@ -120,7 +138,7 @@ impl Lexer<'_> {
                 self.bump();
                 WorkTokenKind::Quasiquote
             }
-            b'"' => WorkTokenKind::Str(self.lex_work_string(span, work, core)?),
+            b'"' => self.lex_work_string_segment(span, false, work, core)?,
             b'\'' => {
                 self.bump();
                 WorkTokenKind::Quote
@@ -170,6 +188,7 @@ impl Lexer<'_> {
             b't' => Ok('\t'),
             b'\\' => Ok('\\'),
             b'"' => Ok('"'),
+            b'$' => Ok('$'),
             b'0' => Ok('\0'),
             b'u' => self.lex_work_unicode_escape(span, core),
             _ => {
@@ -353,14 +372,24 @@ impl Lexer<'_> {
         }
     }
 
-    fn lex_work_string(
+    fn lex_work_string_segment(
         &mut self,
         span: Span,
+        resuming: bool,
         work: &mut WorkArena,
         core: &mut AllocCore<'_>,
-    ) -> Result<RawStr, ErrRecorded> {
-        self.bump(); // 開始の '"'
+    ) -> Result<WorkTokenKind, ErrRecorded> {
+        self.bump(); // 開始の '"' または再開の '}'
         let mut buf = RawVec::<u8>::new();
+        let finish_str = |buf: &RawVec<u8>| -> RawStr {
+            if buf.is_empty() {
+                return RawStr::empty();
+            }
+            let slice = buf.as_slice();
+            // SAFETY: すべてのバイトは有効な UTF-8 として追加済み。
+            let ptr = std::ptr::NonNull::new(slice.as_ptr() as *mut u8).unwrap();
+            unsafe { RawStr::from_raw_utf8(ptr, slice.len()) }
+        };
         loop {
             let Some(b) = self.bump() else {
                 return Err(core.err_str(
@@ -372,13 +401,38 @@ impl Lexer<'_> {
             };
             match b {
                 b'"' => {
-                    if buf.is_empty() {
-                        return Ok(RawStr::empty());
+                    let s = finish_str(&buf);
+                    if resuming {
+                        self.template_depth -= 1;
+                        return Ok(WorkTokenKind::TemplateEnd(s));
                     }
-                    let slice = buf.as_slice();
-                    // SAFETY: すべてのバイトは有効な UTF-8 として追加済み。
-                    let ptr = std::ptr::NonNull::new(slice.as_ptr() as *mut u8).unwrap();
-                    return Ok(unsafe { RawStr::from_raw_utf8(ptr, slice.len()) });
+                    return Ok(WorkTokenKind::Str(s));
+                }
+                b'\n' | b'\r' => {
+                    return Err(core.err_str(
+                        "src.string",
+                        ErrorKind::Lex,
+                        span,
+                        "raw newline is not allowed in string literal",
+                    ));
+                }
+                b'$' if self.peek() == Some(b'{') => {
+                    self.bump(); // '{'
+                    let s = finish_str(&buf);
+                    if resuming {
+                        return Ok(WorkTokenKind::TemplateMid(s));
+                    }
+                    if self.template_depth >= self.template_braces.len() {
+                        return Err(core.err_str(
+                            "src.nesting-limit",
+                            ErrorKind::Parse,
+                            span,
+                            "template nesting too deep",
+                        ));
+                    }
+                    self.template_braces[self.template_depth] = 0;
+                    self.template_depth += 1;
+                    return Ok(WorkTokenKind::TemplateStart(s));
                 }
                 b'\\' => {
                     let ch = self.lex_work_escape(span, core)?;

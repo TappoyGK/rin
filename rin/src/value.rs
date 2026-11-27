@@ -119,7 +119,7 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Char(char),
-    Str(Rc<String>),
+    Text(Rc<String>),
     Ident(Rc<String>),
     List(Rc<ListNode>),
     Array(Rc<ValueItems>),
@@ -151,8 +151,8 @@ impl Value {
         Self::Err(Rc::new(value.into()))
     }
 
-    pub fn str(s: impl Into<String>) -> Self {
-        Self::Str(Rc::new(s.into()))
+    pub fn text(s: impl Into<String>) -> Self {
+        Self::Text(Rc::new(s.into()))
     }
 
     pub fn ident(s: impl Into<String>) -> Self {
@@ -206,7 +206,7 @@ impl Value {
             let own = match v {
                 Value::Void | Value::None | Value::Builtin(_) => 8,
                 Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) => 16,
-                Value::Str(s) | Value::Ident(s) => 24 + s.len(),
+                Value::Text(s) | Value::Ident(s) => 24 + s.len(),
                 Value::List(xs) => {
                     work.extend(xs.iter());
                     24
@@ -249,7 +249,7 @@ impl Value {
             Value::Float(_) => "f64",
             Value::Bool(_) => "bool",
             Value::Char(_) => "char",
-            Value::Str(_) => "string",
+            Value::Text(_) => "text",
             Value::Ident(_) => "ident",
             Value::List(_) => "list",
             Value::Array(_) => "array",
@@ -278,7 +278,7 @@ fn equal(a: &Value, b: &Value, depth: usize) -> bool {
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Char(a), Value::Char(b)) => a == b,
-        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Text(a), Value::Text(b)) => a == b,
         (Value::Ident(a), Value::Ident(b)) => a == b,
         (Value::Builtin(a), Value::Builtin(b)) => a == b,
         _ => equal_nested(a, b, depth),
@@ -358,7 +358,7 @@ fn equal_deep(a: &Value, b: &Value) -> bool {
             (Value::Float(a), Value::Float(b)) if a == b => {}
             (Value::Bool(a), Value::Bool(b)) if a == b => {}
             (Value::Char(a), Value::Char(b)) if a == b => {}
-            (Value::Str(a), Value::Str(b)) if a == b => {}
+            (Value::Text(a), Value::Text(b)) if a == b => {}
             (Value::Ident(a), Value::Ident(b)) if a == b => {}
             (Value::Builtin(a), Value::Builtin(b)) if a == b => {}
             (Value::List(a), Value::List(b)) => {

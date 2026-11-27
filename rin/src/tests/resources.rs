@@ -129,7 +129,7 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
     let big_list = format!("[{}]", vec!["s"; 200].join(" "));
     let err = m.eval(&big_list).unwrap_err();
     assert_eq!(err.kind, ErrorKind::TooMuchMemory);
-    assert_eq!(m.eval("s").unwrap(), Value::str("hello"));
+    assert_eq!(m.eval("s").unwrap(), Value::text("hello"));
 
     // 再現 2: memory_bytes 上限で失敗した load_module が大域環境を壊さない。
     let mut alloc2 = HeapAllocator;
@@ -145,7 +145,7 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
     let merr = m2.load_module("m", &big_mod).unwrap_err();
     assert_eq!(merr.kind, ErrorKind::TooMuchMemory);
     m2.eval(r#"(def t "xyz")"#).unwrap();
-    assert_eq!(m2.eval("t").unwrap(), Value::str("xyz"));
+    assert_eq!(m2.eval("t").unwrap(), Value::text("xyz"));
 }
 
 #[test]

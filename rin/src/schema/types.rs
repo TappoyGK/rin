@@ -7,7 +7,7 @@ pub(crate) enum TypeExpr {
     F64,
     Bool,
     Char,
-    String,
+    Text,
     Ident,
     List(Box<TypeExpr>),
     Array(Box<TypeExpr>),
@@ -36,7 +36,7 @@ pub(super) fn has_type_children(ty: &TypeExpr) -> bool {
             | TypeExpr::F64
             | TypeExpr::Bool
             | TypeExpr::Char
-            | TypeExpr::String
+            | TypeExpr::Text
             | TypeExpr::Ident
             | TypeExpr::Ref(_)
     )

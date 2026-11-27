@@ -42,7 +42,7 @@ impl Pool<'_> {
                 }
                 Value::list(items)
             }
-            Obj::Str(s) => Value::str(s.as_str()),
+            Obj::Str(s) => Value::text(s.as_str()),
             Obj::Ident(s) => Value::ident(s.as_str()),
             Obj::Array(xs) => Value::array(
                 xs.iter()
@@ -144,7 +144,7 @@ impl Pool<'_> {
                         format_args!("cannot import '{name}'"),
                     )
                 }),
-            Value::Str(s) => self.alloc_str(s.as_str(), span).map(RVal::Obj),
+            Value::Text(s) => self.alloc_str(s.as_str(), span).map(RVal::Obj),
             Value::Ident(s) => {
                 if !crate::lexer::is_valid_ident(s.as_str()) {
                     return Err(self.core.err_fmt(

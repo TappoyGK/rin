@@ -35,6 +35,153 @@ impl Runner<'_, '_> {
         self.stack_push(RVal::Void, span)
     }
 
+    pub(super) fn exec_format_template(&mut self, n: u32, span: Span) -> Result<(), ErrRecorded> {
+        let count = n as usize;
+        let start = self.stack.len() - count;
+        let mark = self.pool.work.mark(&self.pool.core);
+        let mut buf = RawVec::<u8>::new();
+
+        struct WorkFmt<'a, 'b> {
+            buf: &'a mut RawVec<u8>,
+            work: &'a mut crate::mem::WorkArena,
+            core: &'a mut crate::mem::AllocCore<'b>,
+            oom: bool,
+        }
+        impl std::fmt::Write for WorkFmt<'_, '_> {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                if self.oom {
+                    return Err(std::fmt::Error);
+                }
+                if self
+                    .buf
+                    .extend_from_slice_work(self.work, self.core, s.as_bytes())
+                    .is_none()
+                {
+                    self.oom = true;
+                    return Err(std::fmt::Error);
+                }
+                Ok(())
+            }
+        }
+
+        let mut bad_type: Option<&'static str> = None;
+        let mut oom = false;
+        for i in 0..count {
+            let val = self.stack.as_slice()[start + i];
+            match val {
+                RVal::Int(v) => {
+                    let mut wf = WorkFmt {
+                        buf: &mut buf,
+                        work: &mut self.pool.work,
+                        core: &mut self.pool.core,
+                        oom: false,
+                    };
+                    let _ = write!(&mut wf, "{v}");
+                    if wf.oom {
+                        oom = true;
+                        break;
+                    }
+                }
+                RVal::Float(x) => {
+                    struct FloatFmt(f64);
+                    impl std::fmt::Display for FloatFmt {
+                        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                            crate::lexer::write_rin_float(f, self.0)
+                        }
+                    }
+                    let mut wf = WorkFmt {
+                        buf: &mut buf,
+                        work: &mut self.pool.work,
+                        core: &mut self.pool.core,
+                        oom: false,
+                    };
+                    let _ = write!(&mut wf, "{}", FloatFmt(x));
+                    if wf.oom {
+                        oom = true;
+                        break;
+                    }
+                }
+                RVal::Bool(b) => {
+                    let s = if b { "true" } else { "false" };
+                    if buf
+                        .extend_from_slice_work(
+                            &mut self.pool.work,
+                            &mut self.pool.core,
+                            s.as_bytes(),
+                        )
+                        .is_none()
+                    {
+                        oom = true;
+                        break;
+                    }
+                }
+                RVal::Char(c) => {
+                    let mut tmp = [0u8; 4];
+                    let bytes = c.encode_utf8(&mut tmp).as_bytes();
+                    if buf
+                        .extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, bytes)
+                        .is_none()
+                    {
+                        oom = true;
+                        break;
+                    }
+                }
+                RVal::Obj(id) => match *self.pool.get(id) {
+                    Obj::Str(s) | Obj::Ident(s) => {
+                        let bytes = s.as_str().as_bytes();
+                        if buf
+                            .extend_from_slice_work(&mut self.pool.work, &mut self.pool.core, bytes)
+                            .is_none()
+                        {
+                            oom = true;
+                            break;
+                        }
+                    }
+                    _ => {
+                        bad_type = Some(val.type_name(self.pool));
+                        break;
+                    }
+                },
+                _ => {
+                    bad_type = Some(val.type_name(self.pool));
+                    break;
+                }
+            }
+        }
+
+        if let Some(tname) = bad_type {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.release_stack_from(start);
+            return Err(self.err_runtime_fmt(
+                "expr.template",
+                span,
+                format_args!(
+                    "cannot interpolate value of type '{tname}' in template (expected i64, f64, bool, char, text, or ident)"
+                ),
+            ));
+        }
+        if oom {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.release_stack_from(start);
+            return Err(self.pool.core.err_oom(span));
+        }
+
+        let out_bytes = buf.len();
+        if !self.try_charge(out_bytes) {
+            self.pool.work.rewind(&mut self.pool.core, mark);
+            self.release_stack_from(start);
+            return self.step_limit_result(span);
+        }
+
+        // SAFETY: `buf` には有効な UTF-8 バイト列のみ追記している。
+        let text = unsafe { std::str::from_utf8_unchecked(buf.as_slice()) };
+        let res = self.pool.alloc_str(text, span);
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        self.release_stack_from(start);
+        let obj = res?;
+        self.stack_push(RVal::Obj(obj), span)
+    }
+
     pub(super) fn exec_make_list_splice(
         &mut self,
         chunk: &Chunk,
@@ -442,6 +589,24 @@ impl Runner<'_, '_> {
                 let v = arr[idx as usize];
                 self.pool.retain_val(v);
                 Ok(v)
+            }
+        } else if let RVal::Obj(id) = list_val
+            && let Obj::Str(s) = *self.pool.get(id)
+        {
+            if idx < 0 || (idx as usize) >= s.char_len() {
+                Err(self.err_runtime_fmt(
+                    "expr.index",
+                    span,
+                    format_args!("index {idx} out of range (length {})", s.char_len()),
+                ))
+            } else {
+                let idx_u = idx as usize;
+                if !s.is_ascii() && !self.try_charge(idx_u + 1) {
+                    self.pool.release_val(list_val);
+                    return self.step_limit_result(span);
+                }
+                let (ch, _) = s.char_at(idx_u).unwrap();
+                Ok(RVal::Char(ch))
             }
         } else if !self.is_list(list_val) {
             let tname = list_val.type_name(self.pool);

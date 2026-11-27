@@ -88,6 +88,21 @@ pub(crate) fn compile_program_parts<'a, 'p>(
     }
     let mut finished = compiler.scopes.pop().unwrap();
     finished.chunk.local_count = finished.max_slots;
+    if !frozen && !finished.chunk.strings.is_empty() {
+        let mut objs = RawVec::new();
+        for &s in finished.chunk.strings.as_slice() {
+            let Some(raw) = RawStr::from_perm(&mut pool.perm, &mut pool.core, s.as_str()) else {
+                return Err(pool.core.err_oom(Span::default()));
+            };
+            let Some(id) = pool.intern_perm_str(raw) else {
+                return Err(pool.core.err_oom(Span::default()));
+            };
+            if objs.push_work(&mut pool.work, &mut pool.core, id).is_none() {
+                return Err(pool.core.err_oom(Span::default()));
+            }
+        }
+        finished.chunk.str_objs = objs;
+    }
     Ok(finished.chunk)
 }
 

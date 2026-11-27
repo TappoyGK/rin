@@ -12,7 +12,10 @@ fn line_comments_end_at_newline_or_eof() {
 
 #[test]
 fn comment_markers_inside_literals_are_preserved() {
-    assert_eq!(eval(r#""; // ;; ;;;""#).unwrap(), Value::str("; // ;; ;;;"));
+    assert_eq!(
+        eval(r#""; // ;; ;;;""#).unwrap(),
+        Value::text("; // ;; ;;;")
+    );
     assert_eq!(eval("\\;").unwrap(), Value::Char(';'));
 }
 

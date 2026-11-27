@@ -60,7 +60,7 @@ int main(void) {
     RinEvalResult cr = rin_call_in(m, "base", "make_card", args, 1);
     rin_drop(m, arg);
     assert(cr.ok);
-    assert(rin_check_str(m, cr.value, "(struct Card (id string) (cost i64))"));
+    assert(rin_check_str(m, cr.value, "(struct Card (id text) (cost i64))"));
 
     RinValue *cost_v = rin_field(m, cr.value, "cost");
     int64_t cost = 0;

@@ -155,6 +155,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let idx = self.add_string(s.as_str(), span)?;
                 self.emit(Op::Str(idx), span)?;
             }
+            ExprKind::Template(parts) => {
+                let parts = parts.as_slice();
+                let Ok(count) = u32::try_from(parts.len()) else {
+                    return Err(self.fail_parse(
+                        "compile.capacity",
+                        span,
+                        "template literal too large",
+                    ));
+                };
+                for part in parts {
+                    self.compile_expr_shallow(part, false, depth + 1)?;
+                }
+                self.emit(Op::FormatTemplate(count), span)?;
+            }
             ExprKind::None => {
                 self.emit_raw(Op::None, span)?;
             }

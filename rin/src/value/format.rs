@@ -55,7 +55,7 @@ fn format(root: Task<'_>, f: &mut fmt::Formatter<'_>, debug: bool) -> fmt::Resul
                     if debug {
                         write!(f, "Float({n:?})")?
                     } else {
-                        write!(f, "{n}")?
+                        crate::lexer::write_rin_float(f, *n)?
                     }
                 }
                 Value::Bool(b) => {
@@ -72,9 +72,9 @@ fn format(root: Task<'_>, f: &mut fmt::Formatter<'_>, debug: bool) -> fmt::Resul
                         crate::lexer::write_rin_char(f, *c)?
                     }
                 }
-                Value::Str(s) => {
+                Value::Text(s) => {
                     if debug {
-                        write!(f, "Str({s:?})")?
+                        write!(f, "Text({s:?})")?
                     } else {
                         crate::lexer::write_rin_str(f, s)?
                     }
@@ -229,10 +229,10 @@ fn display(value: &Value, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Resu
     match value {
         Value::Void => write!(f, "void"),
         Value::Int(n) => write!(f, "{n}"),
-        Value::Float(x) => write!(f, "{x}"),
+        Value::Float(x) => crate::lexer::write_rin_float(f, *x),
         Value::Bool(b) => write!(f, "{b}"),
         Value::Char(c) => crate::lexer::write_rin_char(f, *c),
-        Value::Str(s) => crate::lexer::write_rin_str(f, s),
+        Value::Text(s) => crate::lexer::write_rin_str(f, s),
         Value::Ident(s) => write!(f, "'{s}"),
         Value::List(xs) => {
             write!(f, "[")?;
@@ -345,7 +345,7 @@ impl fmt::Debug for DebugAt<'_> {
             Value::Float(v) => f.debug_tuple("Float").field(v).finish(),
             Value::Bool(v) => f.debug_tuple("Bool").field(v).finish(),
             Value::Char(v) => f.debug_tuple("Char").field(v).finish(),
-            Value::Str(v) => f.debug_tuple("Str").field(v).finish(),
+            Value::Text(v) => f.debug_tuple("Text").field(v).finish(),
             Value::Ident(v) => f.debug_tuple("Ident").field(v).finish(),
             Value::Builtin(v) => f.debug_tuple("Builtin").field(v).finish(),
             Value::Some(v) => f.debug_tuple("Some").field(&DebugAt(v, d)).finish(),

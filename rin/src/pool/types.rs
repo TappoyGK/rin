@@ -48,7 +48,7 @@ impl RVal {
             RVal::Obj(id) => match pool.get(id) {
                 Obj::Cons { .. } => "list",
                 Obj::Array(_) => "array",
-                Obj::Str(_) => "string",
+                Obj::Str(_) => "text",
                 Obj::Ident(_) => "ident",
                 Obj::Tuple(_) => "tuple",
                 Obj::Struct { .. } => "struct",
@@ -130,11 +130,12 @@ impl<T: Copy> std::ops::Index<usize> for ObjSlice<T> {
     }
 }
 
-/// オブジェクト領域 (`ObjHeap`) 上に確保された UTF-8 文字列。
+/// オブジェクト領域 (`ObjHeap`) または永続領域 (`PermArena`) 上に確保された UTF-8 文字列。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ObjStr {
     pub(super) ptr: NonNull<u8>,
     pub(super) len: usize,
+    pub(super) char_len: usize,
     pub(super) block_size: usize,
 }
 
@@ -143,6 +144,7 @@ impl ObjStr {
         Self {
             ptr: NonNull::dangling(),
             len: 0,
+            char_len: 0,
             block_size: 0,
         }
     }
@@ -150,6 +152,16 @@ impl ObjStr {
     #[inline]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    #[inline]
+    pub fn char_len(&self) -> usize {
+        self.char_len
+    }
+
+    #[inline]
+    pub fn is_ascii(&self) -> bool {
+        self.char_len == self.len
     }
 
     #[inline]
@@ -162,6 +174,44 @@ impl ObjStr {
             let bytes = std::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
             std::str::from_utf8_unchecked(bytes)
         }
+    }
+
+    /// スカラー値単位の添字で `char` を取得する。
+    /// 返り値の 2 要素目は非 ASCII 時の走査スカラー値数（ASCII 時は 0）。
+    pub fn char_at(&self, index: usize) -> Option<(char, usize)> {
+        if index >= self.char_len {
+            return None;
+        }
+        if self.is_ascii() {
+            return Some((self.as_str().as_bytes()[index] as char, 0));
+        }
+        self.as_str().chars().nth(index).map(|c| (c, index + 1))
+    }
+
+    /// スカラー値単位の範囲 `start..end` に対応する部分文字列スライスを返す。
+    pub fn slice_range(&self, start: usize, end: usize) -> Option<&str> {
+        if start > end || end > self.char_len {
+            return None;
+        }
+        if start == end {
+            return Some("");
+        }
+        let s = self.as_str();
+        if self.is_ascii() {
+            return Some(&s[start..end]);
+        }
+        let mut byte_start = 0usize;
+        let mut byte_end = s.len();
+        for (ci, (bi, _)) in s.char_indices().enumerate() {
+            if ci == start {
+                byte_start = bi;
+            }
+            if ci == end {
+                byte_end = bi;
+                break;
+            }
+        }
+        Some(&s[byte_start..byte_end])
     }
 
     #[inline]

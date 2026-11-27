@@ -95,7 +95,7 @@ impl Schema {
                 | TypeExpr::F64
                 | TypeExpr::Bool
                 | TypeExpr::Char
-                | TypeExpr::String
+                | TypeExpr::Text
                 | TypeExpr::Ident => {}
                 TypeExpr::List(inner) | TypeExpr::Array(inner) | TypeExpr::Option(inner) => {
                     stack.push(inner);
@@ -311,7 +311,7 @@ impl SchemaParser {
                                 "f64" => TypeExpr::F64,
                                 "bool" => TypeExpr::Bool,
                                 "char" => TypeExpr::Char,
-                                "string" => TypeExpr::String,
+                                "text" => TypeExpr::Text,
                                 "ident" => TypeExpr::Ident,
                                 _ => TypeExpr::Ref(name),
                             };

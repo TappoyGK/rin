@@ -211,6 +211,11 @@ pub(super) enum ParseFrame {
         is_paren: bool,
         is_quasiquote: bool,
     },
+    Template {
+        start: Span,
+        parts: RawVec<Expr>,
+        max_child: usize,
+    },
     DatumUnquote {
         span: Span,
         is_paren: bool,

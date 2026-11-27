@@ -159,7 +159,7 @@ fn release(mut value: Value, depth: usize) {
             }
         }
         Value::List(xs) => drop(xs), // ListNode の反復解放が部分木全体を処理する。
-        Value::Str(s) | Value::Ident(s) => drop(s),
+        Value::Text(s) | Value::Ident(s) => drop(s),
         Value::Variant { data: None, .. } => {}
         Value::Void
         | Value::None
