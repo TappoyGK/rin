@@ -148,6 +148,71 @@ fn typed_defn_fn_and_def_syntax_and_eval() {
         b.eval("(defn g ((t m.T)) -> i64 t.a) (g (m.mk))").unwrap(),
         Value::Int(3)
     );
+
+    // 型注釈の直後にテンプレート文字列を書ける（再々レビュー指摘 1）
+    assert_eq!(eval("(def s text \"${1}\") s").unwrap(), Value::text("1"));
+    assert_eq!(
+        eval("(def s text \"${'foo}\") s").unwrap(),
+        Value::text("foo")
+    );
+    assert_eq!(
+        eval("(def s text \"a${(+ 1 2)}b\") s").unwrap(),
+        Value::text("a3b")
+    );
+    assert_eq!(
+        eval("(def s text \"\"\"\n  x=${(+ 2 3)}\n  \"\"\") s").unwrap(),
+        Value::text("x=5")
+    );
+    assert!(rin::fmt::format("(def s text \"${1}\")").is_ok());
+
+    // 他モジュールの型を値の位置で構築できる（再々レビュー指摘 2）
+    let mut alloc2 = HeapAllocator;
+    let mut b2 = Builder::new(Limits::default(), &mut alloc2);
+    b2.load_module(
+        "game",
+        r#"
+(defschema Element (variant Element (Plain) (Fire) (Heat i64)))
+(defschema HitResult (struct HitResult (dmg i64) (effect text)))
+"#,
+    )
+    .unwrap();
+    let mod_ctor = r#"
+(import game)
+(def h1 game.HitResult { dmg: 10 effect: "burn" })
+(def h2 (struct game.HitResult (dmg 20) (effect "chill")))
+(def e1 game.Element.Fire)
+(def e2 game.Element.Heat(5))
+(def e3 (variant game.Element Heat 7))
+(tuple
+  h1.dmg
+  h2.dmg
+  (match e1 (game.Element.Fire 1) (game.Element.Plain 0) (game.Element.Heat(n) n))
+  (match e2 (game.Element.Fire 0) (game.Element.Plain 0) (game.Element.Heat(n) n))
+  (match e3 (game.Element.Fire 0) (game.Element.Plain 0) (game.Element.Heat(n) n)))
+"#;
+    assert_eq!(
+        b2.eval(mod_ctor).unwrap(),
+        Value::tuple(vec![
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(1),
+            Value::Int(5),
+            Value::Int(7),
+        ])
+    );
+    // フォーマッタも mod.Type { ... } / mod.Type.Case(x) を冪等に整形できる
+    let fmt_mod =
+        rin::fmt::format("game.HitResult { dmg: 1 effect: \"a\" }\ngame.Element.Heat(5)\n")
+            .unwrap();
+    assert_eq!(rin::fmt::format(&fmt_mod).unwrap(), fmt_mod);
+
+    // 型だけを公開したモジュールで値位置に t.P を書いたときのエラーメッセージ（再々レビュー指摘 4）
+    b2.load_module("t", "(defschema P (struct P (a i64))) (export P)")
+        .unwrap();
+    let err = b2.eval("(import t) t.P").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Type);
+    assert_eq!(err.rule(), "expr.module");
+    assert_eq!(err.message, "'t.P' is a type, not a value");
 }
 
 #[test]

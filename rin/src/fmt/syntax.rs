@@ -76,13 +76,24 @@ impl<'a> Syntax<'a> {
         match &e.kind {
             ExprKind::Field { target, .. } => self.end(target) + 2,
             ExprKind::Index { target, .. } => self.ends[self.end(target)],
-            ExprKind::Struct(_) => self.ends[start + 1],
+            ExprKind::Struct(s) => {
+                self.ends[if s.module.is_some() {
+                    start + 3
+                } else {
+                    start + 1
+                }]
+            }
             ExprKind::Some(_) | ExprKind::Ok(_) | ExprKind::Err(_) => self.ends[start + 1],
             ExprKind::Variant(v) => {
-                if v.data.is_some() {
-                    self.ends[start + 3]
+                let base = if v.module.is_some() {
+                    start + 5
                 } else {
                     start + 3
+                };
+                if v.data.is_some() {
+                    self.ends[base]
+                } else {
+                    base
                 }
             }
             ExprKind::Quote(_) | ExprKind::Quasiquote(_) => self.datum_token_end(start),
@@ -134,6 +145,39 @@ impl<'a> Syntax<'a> {
                     self.ends[pos + 3]
                 } else {
                     pos + 3
+                }
+            } else if !is_upper
+                && self
+                    .tokens
+                    .get(pos + 1)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::Dot)
+                && matches!(
+                    self.tokens.get(pos + 2).map(|(t, _)| &t.kind),
+                    Some(TokenKind::Ident(tn)) if tn.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                )
+            {
+                if self
+                    .tokens
+                    .get(pos + 3)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::LBrace)
+                {
+                    self.ends[pos + 3]
+                } else if self
+                    .tokens
+                    .get(pos + 3)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::Dot)
+                {
+                    if self
+                        .tokens
+                        .get(pos + 5)
+                        .is_some_and(|(t, _)| t.kind == TokenKind::LParen && t.attached)
+                    {
+                        self.ends[pos + 5]
+                    } else {
+                        pos + 5
+                    }
+                } else {
+                    pos + 1
                 }
             } else {
                 pos + 1
@@ -285,7 +329,12 @@ impl<'a> Syntax<'a> {
                 }
             }
             ExprKind::Struct(s) if self.tokens[start].0.kind != TokenKind::LParen => {
-                self.fields(start + 1, s.fields.as_slice())
+                let brace = if s.module.is_some() {
+                    start + 3
+                } else {
+                    start + 1
+                };
+                self.fields(brace, s.fields.as_slice())
             }
             ExprKind::With { target, fields } => {
                 let brace = self.end(target);
@@ -315,8 +364,13 @@ impl<'a> Syntax<'a> {
             ExprKind::Variant(v)
                 if v.data.is_some() && self.tokens[start].0.kind != TokenKind::LParen =>
             {
+                let paren = if v.module.is_some() {
+                    start + 5
+                } else {
+                    start + 3
+                };
                 self.add(
-                    start + 3,
+                    paren,
                     Style::Call,
                     vec![self.range(v.data.as_ref().unwrap())],
                 )
@@ -350,7 +404,8 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
                 a == b
             }
             (ExprKind::Struct(a), ExprKind::Struct(b)) => {
-                a.name == b.name
+                a.module == b.module
+                    && a.name == b.name
                     && a.fields.as_slice().iter().map(|(n, _)| n).eq(b
                         .fields
                         .as_slice()
@@ -363,7 +418,7 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
                 .map(|(n, _)| n)
                 .eq(b.as_slice().iter().map(|(n, _)| n)),
             (ExprKind::Variant(a), ExprKind::Variant(b)) => {
-                a.type_name == b.type_name && a.variant == b.variant
+                a.module == b.module && a.type_name == b.type_name && a.variant == b.variant
             }
             (ExprKind::Field { field: a, .. }, ExprKind::Field { field: b, .. }) => a == b,
             (ExprKind::Def(a), ExprKind::Def(b)) => {

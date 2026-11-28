@@ -178,67 +178,122 @@ impl Parser<'_, '_, '_> {
             .next()
             .is_some_and(|c| c.is_ascii_uppercase());
         if is_upper && self.peek().kind == WorkTokenKind::LBrace {
-            let brace_start = self.peek().span;
-            self.advance()?;
-            if self.peek().kind == WorkTokenKind::RBrace {
-                self.advance()?;
-                let s = self.alloc_box(
-                    StructExpr {
-                        name,
-                        fields: RawVec::new(),
-                    },
-                    span,
-                )?;
-                return Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Struct(s)), 1));
-            }
-            let (key, _) = self.expect_ident("field name")?;
-            self.expect(WorkTokenKind::Colon, "':'")?;
-            let sf = self.alloc_box(
-                StructFieldFrame {
-                    brace_start,
-                    span,
-                    name,
-                    fields: RawVec::new(),
-                    key,
-                    max_child: 0,
-                    sexp: false,
-                },
-                span,
-            )?;
-            self.push_frame(ParseFrame::StructField(sf), span)?;
-            return Ok(NextStep::StartExpr);
+            return self.start_struct_braces(span, None, name);
         }
 
         if is_upper && self.peek().kind == WorkTokenKind::Dot {
-            self.advance()?;
-            let (variant, _) = self.expect_ident("variant name after '.'")?;
-            if self.peek().kind == WorkTokenKind::LParen && self.peek().attached {
-                self.advance()?;
-                self.push_frame(
-                    ParseFrame::VariantData {
-                        span,
-                        type_name: name,
-                        variant,
-                    },
-                    span,
-                )?;
-                return Ok(NextStep::StartExpr);
+            return self.start_variant_dot(span, None, name);
+        }
+
+        // モジュール修飾構造体 (`mod.Type { ... }`) またはバリアント (`mod.Type.Case` / `mod.Type.Case(x)`)。
+        if !is_upper
+            && self.peek().kind == WorkTokenKind::Dot
+            && let Some(WorkToken {
+                kind: WorkTokenKind::Ident(ty_name),
+                ..
+            }) = self.peek_next()?
+            && ty_name
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_uppercase)
+        {
+            let saved_lexer = self.lexer.save_state();
+            let saved_cur = self.cur;
+            let saved_next = self.next;
+            self.advance()?; // '.'
+            self.advance()?; // UpperIdent
+            match self.peek().kind {
+                WorkTokenKind::LBrace => {
+                    return self.start_struct_braces(span, Some(name), ty_name);
+                }
+                WorkTokenKind::Dot => {
+                    return self.start_variant_dot(span, Some(name), ty_name);
+                }
+                _ => {
+                    self.lexer.restore_state(saved_lexer);
+                    self.cur = saved_cur;
+                    self.next = saved_next;
+                }
             }
-            let v = self.alloc_box(
-                VariantExpr {
-                    type_name: name,
-                    variant,
-                    data: None,
-                },
-                span,
-            )?;
-            return Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Variant(v)), 1));
         }
 
         Ok(NextStep::HaveExpr(
             Expr::new(span, ExprKind::Ident(name)),
             1,
         ))
+    }
+
+    fn start_struct_braces(
+        &mut self,
+        span: Span,
+        module: Option<RawStr>,
+        name: RawStr,
+    ) -> Result<NextStep, ErrRecorded> {
+        let brace_start = self.peek().span;
+        self.advance()?;
+        if self.peek().kind == WorkTokenKind::RBrace {
+            self.advance()?;
+            let s = self.alloc_box(
+                StructExpr {
+                    module,
+                    name,
+                    fields: RawVec::new(),
+                },
+                span,
+            )?;
+            return Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Struct(s)), 1));
+        }
+        let (key, _) = self.expect_ident("field name")?;
+        self.expect(WorkTokenKind::Colon, "':'")?;
+        let sf = self.alloc_box(
+            StructFieldFrame {
+                brace_start,
+                span,
+                module,
+                name,
+                fields: RawVec::new(),
+                key,
+                max_child: 0,
+                sexp: false,
+            },
+            span,
+        )?;
+        self.push_frame(ParseFrame::StructField(sf), span)?;
+        Ok(NextStep::StartExpr)
+    }
+
+    fn start_variant_dot(
+        &mut self,
+        span: Span,
+        module: Option<RawStr>,
+        type_name: RawStr,
+    ) -> Result<NextStep, ErrRecorded> {
+        self.advance()?;
+        let (variant, _) = self.expect_ident("variant name after '.'")?;
+        if self.peek().kind == WorkTokenKind::LParen && self.peek().attached {
+            self.advance()?;
+            let vf = self.alloc_box(
+                VariantDataFrame {
+                    span,
+                    module,
+                    type_name,
+                    variant,
+                },
+                span,
+            )?;
+            self.push_frame(ParseFrame::VariantData(vf), span)?;
+            return Ok(NextStep::StartExpr);
+        }
+        let v = self.alloc_box(
+            VariantExpr {
+                module,
+                type_name,
+                variant,
+                data: None,
+            },
+            span,
+        )?;
+        Ok(NextStep::HaveExpr(Expr::new(span, ExprKind::Variant(v)), 1))
     }
 
     /// `(def name ...)` の 2 つ目の要素が型注釈（3 引数形）かどうかを先読みで判定する。
@@ -258,10 +313,11 @@ impl Parser<'_, '_, '_> {
         {
             return Ok(false);
         }
+        // 注意: `WorkLexer.inner.work_braces` が `WorkArena` 上に確保されるため、
+        // ここでは `self.work.rewind` を行わず字句位置とトークン先読み状態のみ復元する。
         let saved_lexer = self.lexer.save_state();
         let saved_cur = self.cur;
         let saved_next = self.next;
-        let saved_mark = self.work.mark(self.core);
         let res = (|| -> Result<bool, ErrRecorded> {
             match self.peek().kind {
                 WorkTokenKind::LParen => {
@@ -282,16 +338,24 @@ impl Parser<'_, '_, '_> {
                 _ => return Ok(false),
             }
             // 後置アクセス（`.field`・隣接 `(...)`・隣接 `[...]`）があれば 1 式の一部として読み飛ばす。
+            // また `mod.Type { ... }` のように `.UpperIdent` の直後に `{` がある場合も 2 引数形とする。
+            let mut saw_dot_upper = false;
             loop {
                 let tok = self.peek();
                 match tok.kind {
                     WorkTokenKind::Dot => {
                         self.advance()?;
-                        if matches!(self.peek().kind, WorkTokenKind::Ident(_)) {
+                        if let WorkTokenKind::Ident(id) = self.peek().kind {
+                            saw_dot_upper =
+                                id.as_bytes().first().is_some_and(u8::is_ascii_uppercase);
                             self.advance()?;
                         }
                     }
+                    WorkTokenKind::LBrace if saw_dot_upper => {
+                        return Ok(false);
+                    }
                     WorkTokenKind::LParen if tok.attached => {
+                        saw_dot_upper = false;
                         self.advance()?;
                         let mut depth = 1usize;
                         while depth > 0 && !self.at_eof() {
@@ -304,6 +368,7 @@ impl Parser<'_, '_, '_> {
                         }
                     }
                     WorkTokenKind::LBracket if tok.attached => {
+                        saw_dot_upper = false;
                         self.advance()?;
                         let mut depth = 1usize;
                         while depth > 0 && !self.at_eof() {
@@ -323,7 +388,6 @@ impl Parser<'_, '_, '_> {
         self.lexer.restore_state(saved_lexer);
         self.cur = saved_cur;
         self.next = saved_next;
-        self.work.rewind(self.core, saved_mark);
         res
     }
 
@@ -609,12 +673,20 @@ impl Parser<'_, '_, '_> {
                 }
                 "variant" => {
                     self.advance()?; // variant
-                    let (type_name, _) = self.expect_ident("type name")?;
+                    let (first, _) = self.expect_ident("type name")?;
+                    let (module, type_name) = if self.peek().kind == WorkTokenKind::Dot {
+                        self.advance()?;
+                        let (tn, _) = self.expect_ident("type name after '.'")?;
+                        (Some(first), tn)
+                    } else {
+                        (None, first)
+                    };
                     let (variant, _) = self.expect_ident("variant name")?;
                     if self.peek().kind == WorkTokenKind::RParen {
                         self.advance()?;
                         let v = self.alloc_box(
                             VariantExpr {
+                                module,
                                 type_name,
                                 variant,
                                 data: None,
@@ -626,23 +698,33 @@ impl Parser<'_, '_, '_> {
                             1,
                         ));
                     }
-                    self.push_frame(
-                        ParseFrame::VariantData {
+                    let vf = self.alloc_box(
+                        VariantDataFrame {
                             span: start,
+                            module,
                             type_name,
                             variant,
                         },
                         start,
                     )?;
+                    self.push_frame(ParseFrame::VariantData(vf), start)?;
                     return Ok(NextStep::StartExpr);
                 }
                 "struct" => {
                     self.advance()?; // struct
-                    let (name, _) = self.expect_ident("struct name")?;
+                    let (first, _) = self.expect_ident("struct name")?;
+                    let (module, name) = if self.peek().kind == WorkTokenKind::Dot {
+                        self.advance()?;
+                        let (sn, _) = self.expect_ident("struct name after '.'")?;
+                        (Some(first), sn)
+                    } else {
+                        (None, first)
+                    };
                     if self.peek().kind == WorkTokenKind::RParen {
                         self.advance()?;
                         let s = self.alloc_box(
                             StructExpr {
+                                module,
                                 name,
                                 fields: RawVec::new(),
                             },
@@ -656,6 +738,7 @@ impl Parser<'_, '_, '_> {
                         StructFieldFrame {
                             brace_start: start,
                             span: start,
+                            module,
                             name,
                             fields: RawVec::new(),
                             key,

@@ -129,7 +129,7 @@ true false none some ok err inf nan
 
 **[type.defschema]** `(defschema Name SchemaBody)` は、大文字始まりの名前 `Name` で構造体・開放構造体・バリアント型を定義する。`SchemaBody` に既存の型名（`Other` または `mod.Other`）を書いた場合は、型エイリアスではなく同じ定義を持つ別の固有型 `Name` を定義する（型エイリアス構文は置かない）。型名は値とは別の名前空間に属し、トップレベルにのみ記述できる（関数本体や式の中に書いた場合は構文エラー）。同一評価単位内での相互再帰と前方参照を許し、同一環境内の重複定義・フィールド名重複・循環する別名定義・未定義型の参照は型エラーである。モジュール内では `(export TypeName)` で型を公開でき（`export` 省略時はモジュール内の全 `defschema` も公開する）、読み込み段階の評価が失敗したときは追加した `defschema` も取り消される。`open_struct` で定義した構造体では、スキーマに宣言されたフィールドのみを参照・更新できる。
 
-**[type.expr]** 型式は `void`・`i64`・`f64`・`bool`・`char`・`text`・`ident`・`datum`、名前付き型（`Name` / `mod.Name`）、および `(list T)`・`(array T)`・`(option T)`・`(result T E)`・`(tuple T1 T2 ...)`・`(fn (P1 P2 ...) R)` とする。`any` 型は提供せず、型式としての使用は構文エラーである。
+**[type.expr]** 型式は `void`・`i64`・`f64`・`bool`・`char`・`text`・`ident`・`datum`、名前付き型（`Name` / `mod.Name`）、および `(list T)`・`(array T)`・`(option T)`・`(result T E)`・`(tuple T1 T2 ...)`・`(fn (P1 P2 ...) R)` とする。上記の形に当てはまらない型式（`any`、未知の小文字の型名、未知の型構築子を含む）は、`[type.expr]` の構文エラーである。名前付き型（`Name` / `mod.Name`）が定義されていない場合は、`[type.defschema]` の型エラーである。
 
 **[type.boundary]** ホスト境界（`Builder::bind` / `bind_val` / `bind_typed` / `rin_bind` / `rin_bind_typed`、`Machine::eval_with` / `eval_with_vals` / `eval_with_typed` / `eval_with_typed_vals` / `rin_eval_with` / `rin_eval_with_typed`、`Machine::call` / `call_in` / `rin_call` / `rin_call_in`）でホストから渡された値は、宣言された型式・事前解決済み型ハンドル・または関数仮引数型と実行時に照合する。型式に `fn` 型を含めること（ホストから関数値を渡せない）、無効な型ハンドルの使用、引数の個数不一致、または実行時の値が型と一致しない場合は `[type.boundary]` の実行時エラー（位置は `0:0`）を返す。
 
@@ -210,9 +210,9 @@ true false none some ok err inf nan
 
 **[expr.tuple]** `(tuple e1 e2 ...)` は、2 要素以上のタプルを構築する。0 要素または 1 要素の `(tuple)` / `(tuple e1)` は構文エラーである。
 
-**[expr.struct]** 先頭が大文字の識別子に `{` が続く `Name { f1: e1 f2: e2 ... }`、または正規 S 式形式 `(struct Name (f1 e1) (f2 e2) ...)` は、`defschema` で定義された構造体値を構築する。未定義型・存在しないフィールド・必須フィールドの欠落・フィールド値の型不一致は型エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
+**[expr.struct]** 先頭が大文字の識別子（またはモジュール修飾の `mod.Name`）に `{` が続く `Name { f1: e1 f2: e2 ... }` / `mod.Name { f1: e1 f2: e2 ... }`、または正規 S 式形式 `(struct Name (f1 e1) (f2 e2) ...)` / `(struct mod.Name (f1 e1) (f2 e2) ...)` は、`defschema` で定義された構造体値を構築する。未定義型・存在しないフィールド・必須フィールドの欠落・フィールド値の型不一致は型エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
 
-**[expr.variant]** 先頭が大文字の識別子に `.` とバリアント名が続く `Type.Variant`、隣接した `(` を伴う `Type.Variant(e)`、または正規 S 式形式 `(variant Type Variant)` / `(variant Type Variant e)` は、`defschema` で定義されたバリアント値を構築する。未定義型・存在しないケース・ペイロードの有無や型の不一致は型エラーである。
+**[expr.variant]** 先頭が大文字の識別子（またはモジュール修飾の `mod.Type`）に `.` とバリアント名が続く `Type.Variant` / `mod.Type.Variant`、隣接した `(` を伴う `Type.Variant(e)` / `mod.Type.Variant(e)`、または正規 S 式形式 `(variant Type Variant)` / `(variant mod.Type Variant)` / `(variant Type Variant e)` / `(variant mod.Type Variant e)` は、`defschema` で定義されたバリアント値を構築する。未定義型・存在しないケース・ペイロードの有無や型の不一致は型エラーである。
 
 **[expr.field]** `expr.field` または正規 S 式形式 `(field expr field)` は、構造体値からフィールド `field` の値を読む。構造体でない場合、または存在しないフィールド（`open_struct` で宣言されていないフィールドを含む）を指定した場合は型エラーである。
 
@@ -482,8 +482,8 @@ Primary    ::= INT | FLOAT | STRING | Template | CHAR
              | "true" | "false" | "none" | "inf" | "nan"
              | "'" Datum | "`" Datum
              | ( "some" | "ok" | "err" ) "(" Expr ")"
-             | UpperIdent "{" ( IDENT ":" Expr )* "}"
-             | UpperIdent "." IDENT ( "(" Expr ")" )?
+             | ( IDENT "." )? UpperIdent "{" ( IDENT ":" Expr )* "}"
+             | ( IDENT "." )? UpperIdent "." IDENT ( "(" Expr ")" )?
              | "[" Expr* "]"
              | SpecialForm
              | "(" Expr Expr* ")"
@@ -500,8 +500,8 @@ SpecialForm ::= "(" "fn" "(" Param* ")" ( "->" TypeExpr )? Expr+ ")"
               | "(" "field" Expr IDENT ")"
               | "(" "index" Expr Expr ")"
               | "(" ( "some" | "ok" | "err" ) Expr ")"
-              | "(" "variant" IDENT IDENT Expr? ")"
-              | "(" "struct" IDENT ( "(" IDENT Expr ")" )* ")"
+              | "(" "variant" ( IDENT "." )? IDENT IDENT Expr? ")"
+              | "(" "struct" ( IDENT "." )? IDENT ( "(" IDENT Expr ")" )* ")"
               | "(" ( "quote" | "quasiquote" ) Datum ")"
 Pattern    ::= "_" | INT | STRING | CHAR | "'" IDENT | "true" | "false" | "none"
              | ( "some" | "ok" | "err" ) "(" ( IDENT | "_" ) ")"

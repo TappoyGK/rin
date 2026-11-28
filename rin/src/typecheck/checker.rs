@@ -1103,12 +1103,12 @@ impl<'a> TypeChecker<'a, '_> {
             }
             ExprKind::Struct(s) => {
                 let s = s.as_ref();
-                let sid = self.lookup_schema_ref(None, s.name, span)?;
+                let sid = self.lookup_schema_ref(s.module, s.name, span)?;
                 self.check_struct_literal(sid, s.fields.as_slice(), span)
             }
             ExprKind::Variant(v) => {
                 let v = v.as_ref();
-                let sid = self.lookup_schema_ref(None, v.type_name, span)?;
+                let sid = self.lookup_schema_ref(v.module, v.type_name, span)?;
                 self.check_variant_literal(
                     sid,
                     v.variant,
@@ -1253,6 +1253,22 @@ impl<'a> TypeChecker<'a, '_> {
                             else {
                                 use std::fmt::Write as _;
                                 let mname = menv.name;
+                                if menv
+                                    .exports_types
+                                    .get_by(h, |k| k.as_str() == f.as_str())
+                                    .is_some()
+                                {
+                                    return Err(self.core.err_fmt(
+                                        "expr.module",
+                                        ErrorKind::Type,
+                                        fspan,
+                                        format_args!(
+                                            "'{}.{}' is a type, not a value",
+                                            mname.as_str(),
+                                            f.as_str()
+                                        ),
+                                    ));
+                                }
                                 let names = menv.export_val_names;
                                 let out = self.core.error.begin_msg(
                                     "expr.module",

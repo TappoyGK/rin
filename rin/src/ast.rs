@@ -19,12 +19,14 @@ impl Expr {
 
 #[derive(Debug, Clone, Copy)]
 pub struct StructExpr {
+    pub module: Option<RawStr>,
     pub name: RawStr,
     pub fields: RawVec<(RawStr, Expr)>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct VariantExpr {
+    pub module: Option<RawStr>,
     pub type_name: RawStr,
     pub variant: RawStr,
     pub data: Option<WorkBox<Expr>>,
