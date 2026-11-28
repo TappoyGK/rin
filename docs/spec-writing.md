@@ -24,7 +24,7 @@ Rin では [言語仕様](spec.md) の `[eval.cost-resources]` に従い、ス�
 | 評価環境・3 領域メモリ管理・コンパイル検査の内部設計 | [内部構成](architecture.md) |
 | ビルド・利用方法・テスト実行方法 | [インタプリタ](../rin/README.md) |
 
-配置の判断順および規範・要約・理由・例の区別は [共通基準 §2・§3](https://github.com/TappoyGK/suzrin/blob/main/docs/spec-writing-common.md#2-正本配置の判断順) に従う。
+配置の判断順および規範・要約・理由・例の区別は [共通基準 §2・§3](https://github.com/TappoyGK/suzrin/blob/main/docs/spec-writing-common.md#2-正本配置の判断順) に従う。Rin では、共通基準の「ツール仕様」は [フォーマッタ仕様](fmt.md) と [テストツール仕様](testing.md) を指す。
 
 ## 3. 規則IDと参照
 
