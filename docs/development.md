@@ -25,7 +25,7 @@ C FFI の外部シンボルには `rin_`（型は `Rin` / `RIN_`）を付ける�
 
 ## コメント・診断・テスト配置
 
-コメント・rustdoc、ターミナル出力と診断、単体テストの配置規約は [共通規約](https://github.com/TappoyGK/suzrin/blob/main/docs/development-common.md#コメントとrustdoc) に従う。
+コメント・rustdoc、ターミナル出力と診断、単体テストの配置規約は [共通規約](https://github.com/TappoyGK/suzrin/blob/main/docs/development-common.md#コメントとrustdoc) に従う。Rin では設計上の理由と経緯をまとまって説明する文書は [内部構成](architecture.md) とする。
 
 ## 整形・リント・確認
 
