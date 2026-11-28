@@ -6,7 +6,7 @@ Suz / Rin 共通の原則（処理量・資源消費の定型文、正本配置�
 
 ## 1. 処理量と資源消費の規定（Rin 固有）
 
-Rin では [言語仕様](spec.md) の `[eval.limits]` に従い、ステップ上限・呼び出し深さ上限・メモリ上限（3 領域 `PermArena` / `ObjHeap` / `WorkArena` の論理使用量）およびステップに計上しない処理（構文解析・型検査・コンパイル・解放・診断）の扱いを明確にする。
+Rin では [言語仕様](spec.md) の `[eval.cost-resources]` に従い、ステップ上限・呼び出し深さ上限・メモリ上限（3 領域 `PermArena` / `ObjHeap` / `WorkArena` の論理使用量）およびステップに計上しない処理（構文解析・型検査・コンパイル・解放・診断）の扱いを明確にする。
 
 記述の定型文（「処理量の上限を定める。」「処理量の上限を定めない。」）と 4 項目の表の書き方は [共通基準 §1](https://github.com/TappoyGK/suzrin/blob/main/docs/spec-writing-common.md#1-処理量と資源消費の規定) に従う。
 
@@ -18,7 +18,7 @@ Rin では [言語仕様](spec.md) の `[eval.limits]` に従い、ステップ�
 | 値検証用スキーマ言語の文法と規則 | [スキーマ仕様](schema.md) |
 | Rust API および C FFI API・所有権・エラー記録 | [API 仕様](api.md) |
 | 整形規則・CLI・AST 保存 | [フォーマッタ仕様](fmt.md) |
-| テスト実行構文・CLI・JSON 出力 | [テストツール仕様](testing.md) |
+| テストの実行・CLI・JSON 出力 | [テストツール仕様](testing.md) |
 | `sin`・`cos` の計算手順・定数・テスト値（Suz との共有正本） | [数学関数の決定的な計算手順](math-spec.md) |
 | 受理・拒否・評価結果の具体例 | [仕様例集](spec-cases.md) |
 | 評価環境・3 領域メモリ管理・コンパイル検査の内部設計 | [内部構成](architecture.md) |
@@ -30,11 +30,10 @@ Rin では [言語仕様](spec.md) の `[eval.limits]` に従い、ステップ�
 
 | 接頭辞 | 定義する文書と役割 |
 |---|---|
-| `src.`・`type.`・`value.`・`expr.`・`op.`・`fn.`・`eval.`・`env.` | [言語仕様](spec.md)：字句・構文・型・値・式・演算・組み込み関数・評価・環境 |
+| `src.`・`type.`・`value.`・`expr.`・`pat.`・`op.`・`fn.`・`eval.`・`env.`・`compile.`・`error.`・`host.` | [言語仕様](spec.md)：字句・構文・型・値・式・パターン・演算・組み込み関数・評価・環境・コンパイル・エラー・ホスト境界 |
 | `schema.` | [スキーマ仕様](schema.md)：スキーマ検証 |
-| `host.` | [API 仕様](api.md)：ホスト引数・C FFI 境界の引数検証 |
 | `fmt.` | [フォーマッタ仕様](fmt.md)：整形・AST 保存 |
-| `test.` | [テストツール仕様](testing.md)：`deftest`・`check`・`rin test` |
+| `test.` | [言語仕様](spec.md)（`[test.deftest]`・`[test.check]`・`[test.result]`）および [テストツール仕様](testing.md)（`[test.modules]`） |
 
 規則IDの改名・移動・参照の扱いは [共通基準 §4](https://github.com/TappoyGK/suzrin/blob/main/docs/spec-writing-common.md#4-規則idの運用原則) に従う。
 

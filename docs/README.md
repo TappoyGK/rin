@@ -23,6 +23,11 @@
 | [仕様の執筆・レビュー基準](spec-writing.md) | 仕様文書の正本配置・規則 ID・確認基準（共通正本：[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin)） |
 | [ソースの開発規約](development.md) | 配置・命名・コメント・診断・テスト・リント規約（共通正本：[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin)） |
 
+### 共有文書の更新
+
+- `CONTRIBUTING.md`・`.github/ISSUE_TEMPLATE.md`・`.github/PULL_REQUEST_TEMPLATE.md`・`docs/pr.md` の正本は [TappoyGK/suzrin](https://github.com/TappoyGK/suzrin) にあり、変更は `suzrin` 側で行ってから `suzrin` の `scripts/sync.py` で各リポジトリへ反映する。
+- `docs/spec-writing.md` と `docs/development.md` の共通部分を変更するときも、[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin) の文書（`docs/spec-writing-common.md`・`docs/development-common.md`）を更新する。
+
 ## リリース
 
 | 文書 | 内容 |
