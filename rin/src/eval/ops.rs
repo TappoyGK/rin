@@ -381,15 +381,6 @@ impl Runner<'_, '_> {
         let [a, b] = args else {
             return Err(self.err_runtime("op.cmp", span, "comparison takes 2 arguments"));
         };
-        let ta = a.type_name(self.pool);
-        let tb = b.type_name(self.pool);
-        if ta != tb {
-            return Err(self.err_runtime_fmt(
-                "op.cmp",
-                span,
-                format_args!("cannot compare {ta} and {tb}"),
-            ));
-        }
         let Some(eq) = self.values_equal(*a, *b) else {
             return self.step_limit_result(span);
         };

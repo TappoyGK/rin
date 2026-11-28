@@ -1,4 +1,6 @@
-use crate::ast::{Datum, DatumKind, Expr, ExprKind, children};
+use crate::ast::{
+    Datum, DatumKind, Expr, ExprKind, Param, SchemaBody, TypeExpr, TypeExprKind, children,
+};
 use crate::lexer::{Token, TokenKind};
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -74,13 +76,24 @@ impl<'a> Syntax<'a> {
         match &e.kind {
             ExprKind::Field { target, .. } => self.end(target) + 2,
             ExprKind::Index { target, .. } => self.ends[self.end(target)],
-            ExprKind::Struct(_) => self.ends[start + 1],
+            ExprKind::Struct(s) => {
+                self.ends[if s.module.is_some() {
+                    start + 3
+                } else {
+                    start + 1
+                }]
+            }
             ExprKind::Some(_) | ExprKind::Ok(_) | ExprKind::Err(_) => self.ends[start + 1],
             ExprKind::Variant(v) => {
-                if v.data.is_some() {
-                    self.ends[start + 3]
+                let base = if v.module.is_some() {
+                    start + 5
                 } else {
                     start + 3
+                };
+                if v.data.is_some() {
+                    self.ends[base]
+                } else {
+                    base
                 }
             }
             ExprKind::Quote(_) | ExprKind::Quasiquote(_) => self.datum_token_end(start),
@@ -132,6 +145,39 @@ impl<'a> Syntax<'a> {
                     self.ends[pos + 3]
                 } else {
                     pos + 3
+                }
+            } else if !is_upper
+                && self
+                    .tokens
+                    .get(pos + 1)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::Dot)
+                && matches!(
+                    self.tokens.get(pos + 2).map(|(t, _)| &t.kind),
+                    Some(TokenKind::Ident(tn)) if tn.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                )
+            {
+                if self
+                    .tokens
+                    .get(pos + 3)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::LBrace)
+                {
+                    self.ends[pos + 3]
+                } else if self
+                    .tokens
+                    .get(pos + 3)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::Dot)
+                {
+                    if self
+                        .tokens
+                        .get(pos + 5)
+                        .is_some_and(|(t, _)| t.kind == TokenKind::LParen && t.attached)
+                    {
+                        self.ends[pos + 5]
+                    } else {
+                        pos + 5
+                    }
+                } else {
+                    pos + 1
                 }
             } else {
                 pos + 1
@@ -196,20 +242,35 @@ impl<'a> Syntax<'a> {
                         .collect(),
                 );
             }
-            ExprKind::Def { value, .. } => self.add(start, Style::Call, vec![self.range(value)]),
+            ExprKind::Def(d) => self.add(start, Style::Call, vec![self.range(&d.value)]),
+            ExprKind::DefSchema(ds) => {
+                self.add(start, Style::Body(2), vec![]);
+                if matches!(
+                    ds.body,
+                    SchemaBody::Struct { .. } | SchemaBody::Variant { .. }
+                ) && self
+                    .tokens
+                    .get(start + 3)
+                    .is_some_and(|(t, _)| t.kind == TokenKind::LParen)
+                {
+                    self.add(start + 3, Style::Body(2), vec![]);
+                }
+            }
             ExprKind::Defn(d) => {
                 self.add(start + 3, Style::Params, vec![]);
+                let head = if d.ret_ty.is_some() { 5 } else { 3 };
                 self.add(
                     start,
-                    Style::Body(3),
+                    Style::Body(head),
                     d.body.as_slice().iter().map(|e| self.range(e)).collect(),
                 );
             }
             ExprKind::Fn(f) => {
                 self.add(start + 2, Style::Params, vec![]);
+                let head = if f.ret_ty.is_some() { 4 } else { 2 };
                 self.add(
                     start,
-                    Style::Body(2),
+                    Style::Body(head),
                     f.body.as_slice().iter().map(|e| self.range(e)).collect(),
                 );
             }
@@ -268,7 +329,12 @@ impl<'a> Syntax<'a> {
                 }
             }
             ExprKind::Struct(s) if self.tokens[start].0.kind != TokenKind::LParen => {
-                self.fields(start + 1, s.fields.as_slice())
+                let brace = if s.module.is_some() {
+                    start + 3
+                } else {
+                    start + 1
+                };
+                self.fields(brace, s.fields.as_slice())
             }
             ExprKind::With { target, fields } => {
                 let brace = self.end(target);
@@ -298,8 +364,13 @@ impl<'a> Syntax<'a> {
             ExprKind::Variant(v)
                 if v.data.is_some() && self.tokens[start].0.kind != TokenKind::LParen =>
             {
+                let paren = if v.module.is_some() {
+                    start + 5
+                } else {
+                    start + 3
+                };
                 self.add(
-                    start + 3,
+                    paren,
                     Style::Call,
                     vec![self.range(v.data.as_ref().unwrap())],
                 )
@@ -333,7 +404,8 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
                 a == b
             }
             (ExprKind::Struct(a), ExprKind::Struct(b)) => {
-                a.name == b.name
+                a.module == b.module
+                    && a.name == b.name
                     && a.fields.as_slice().iter().map(|(n, _)| n).eq(b
                         .fields
                         .as_slice()
@@ -346,18 +418,28 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
                 .map(|(n, _)| n)
                 .eq(b.as_slice().iter().map(|(n, _)| n)),
             (ExprKind::Variant(a), ExprKind::Variant(b)) => {
-                a.type_name == b.type_name && a.variant == b.variant
+                a.module == b.module && a.type_name == b.type_name && a.variant == b.variant
             }
             (ExprKind::Field { field: a, .. }, ExprKind::Field { field: b, .. }) => a == b,
-            (ExprKind::Def { name: a, .. }, ExprKind::Def { name: b, .. })
-            | (ExprKind::Import { name: a }, ExprKind::Import { name: b }) => a == b,
+            (ExprKind::Def(a), ExprKind::Def(b)) => {
+                a.name == b.name && opt_type_equivalent(a.ty.as_deref(), b.ty.as_deref())
+            }
+            (ExprKind::DefSchema(a), ExprKind::DefSchema(b)) => {
+                a.name == b.name && schema_body_equivalent(&a.body, &b.body)
+            }
+            (ExprKind::Import { name: a }, ExprKind::Import { name: b }) => a == b,
             (ExprKind::Export { names: a }, ExprKind::Export { names: b }) => {
                 a.as_slice() == b.as_slice()
             }
             (ExprKind::Defn(a), ExprKind::Defn(b)) => {
-                a.name == b.name && a.params.as_slice() == b.params.as_slice()
+                a.name == b.name
+                    && params_equivalent(a.params.as_slice(), b.params.as_slice())
+                    && opt_type_equivalent(a.ret_ty.as_deref(), b.ret_ty.as_deref())
             }
-            (ExprKind::Fn(a), ExprKind::Fn(b)) => a.params.as_slice() == b.params.as_slice(),
+            (ExprKind::Fn(a), ExprKind::Fn(b)) => {
+                params_equivalent(a.params.as_slice(), b.params.as_slice())
+                    && opt_type_equivalent(a.ret_ty.as_deref(), b.ret_ty.as_deref())
+            }
             (ExprKind::Let(a), ExprKind::Let(b)) => a
                 .bindings
                 .as_slice()
@@ -389,6 +471,136 @@ pub(super) fn equivalent(a: &[Expr], b: &[Expr]) -> bool {
             return false;
         }
         work.extend(left.iter().copied().zip(right.iter().copied()));
+    }
+    true
+}
+
+fn opt_type_equivalent(a: Option<&TypeExpr>, b: Option<&TypeExpr>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => type_expr_equivalent(a, b),
+        _ => false,
+    }
+}
+
+fn params_equivalent(a: &[Param], b: &[Param]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.name == y.name && opt_type_equivalent(x.ty.as_deref(), y.ty.as_deref()))
+}
+
+fn schema_body_equivalent(a: &SchemaBody, b: &SchemaBody) -> bool {
+    match (a, b) {
+        (
+            SchemaBody::Struct {
+                open: oa,
+                type_name: na,
+                fields: fa,
+            },
+            SchemaBody::Struct {
+                open: ob,
+                type_name: nb,
+                fields: fb,
+            },
+        ) => {
+            oa == ob
+                && na == nb
+                && fa.len() == fb.len()
+                && fa
+                    .as_slice()
+                    .iter()
+                    .zip(fb.as_slice())
+                    .all(|((ka, ta), (kb, tb))| ka == kb && type_expr_equivalent(ta, tb))
+        }
+        (
+            SchemaBody::Variant {
+                type_name: na,
+                cases: ca,
+            },
+            SchemaBody::Variant {
+                type_name: nb,
+                cases: cb,
+            },
+        ) => {
+            na == nb
+                && ca.len() == cb.len()
+                && ca.as_slice().iter().zip(cb.as_slice()).all(|(x, y)| {
+                    x.name == y.name
+                        && opt_type_equivalent(x.payload.as_deref(), y.payload.as_deref())
+                })
+        }
+        (
+            SchemaBody::CloneOf {
+                module: ma,
+                name: na,
+            },
+            SchemaBody::CloneOf {
+                module: mb,
+                name: nb,
+            },
+        ) => ma == mb && na == nb,
+        _ => false,
+    }
+}
+
+fn type_expr_equivalent(a: &TypeExpr, b: &TypeExpr) -> bool {
+    let mut stack = vec![(a, b)];
+    while let Some((a, b)) = stack.pop() {
+        if std::mem::discriminant(&a.kind) != std::mem::discriminant(&b.kind) {
+            return false;
+        }
+        match (&a.kind, &b.kind) {
+            (TypeExprKind::List(x), TypeExprKind::List(y))
+            | (TypeExprKind::Array(x), TypeExprKind::Array(y))
+            | (TypeExprKind::Option(x), TypeExprKind::Option(y)) => {
+                stack.push((x.as_ref(), y.as_ref()));
+            }
+            (
+                TypeExprKind::Result { ok: oa, err: ea },
+                TypeExprKind::Result { ok: ob, err: eb },
+            ) => {
+                stack.push((oa.as_ref(), ob.as_ref()));
+                stack.push((ea.as_ref(), eb.as_ref()));
+            }
+            (TypeExprKind::Tuple(xs), TypeExprKind::Tuple(ys)) => {
+                let xs = xs.as_slice();
+                let ys = ys.as_slice();
+                if xs.len() != ys.len() {
+                    return false;
+                }
+                stack.extend(xs.iter().zip(ys.iter()));
+            }
+            (
+                TypeExprKind::Fn {
+                    params: pa,
+                    ret: ra,
+                },
+                TypeExprKind::Fn {
+                    params: pb,
+                    ret: rb,
+                },
+            ) => {
+                let pa = pa.as_slice();
+                let pb = pb.as_slice();
+                if pa.len() != pb.len() {
+                    return false;
+                }
+                stack.extend(pa.iter().zip(pb.iter()));
+                stack.push((ra.as_ref(), rb.as_ref()));
+            }
+            (
+                TypeExprKind::Named {
+                    module: ma,
+                    name: na,
+                },
+                TypeExprKind::Named {
+                    module: mb,
+                    name: nb,
+                },
+            ) if ma != mb || na != nb => return false,
+            _ => {}
+        }
     }
     true
 }
@@ -447,6 +659,25 @@ mod tests {
             ("(export x)", "(export y)"),
             ("(match x (some(a) a) (_ 0))", "(match x (some(b) a) (_ 0))"),
             ("(match x (1 2 3) (_ 4))", "(match x (1 2) (_ 3 4))"),
+            ("(def x i64 1)", "(def x f64 1)"),
+            ("(def x i64 1)", "(def x 1)"),
+            ("(defn f ((x i64)) -> i64 x)", "(defn f ((x f64)) -> i64 x)"),
+            ("(defn f ((x i64)) -> i64 x)", "(defn f ((x i64)) -> f64 x)"),
+            ("(fn ((x i64)) -> i64 x)", "(fn (x) x)"),
+            (
+                "(defschema P (struct P (x i64)))",
+                "(defschema P (open_struct P (x i64)))",
+            ),
+            (
+                "(defschema P (struct P (x i64)))",
+                "(defschema P (struct P (x f64)))",
+            ),
+            (
+                "(defschema E (variant E (A) (B i64)))",
+                "(defschema E (variant E (A) (B text)))",
+            ),
+            ("(defschema A B)", "(defschema A C)"),
+            ("(match d (i64(n) n) (_ 0))", "(match d (f64(n) n) (_ 0))"),
         ] {
             assert!(
                 !equivalent(

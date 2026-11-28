@@ -15,6 +15,7 @@ pub enum RinErrorKind {
     TooDeep = 4,
     TooMuchMemory = 5,
     Host = 6,
+    Type = 7,
 }
 
 impl From<ErrorKind> for RinErrorKind {
@@ -22,6 +23,7 @@ impl From<ErrorKind> for RinErrorKind {
         match kind {
             ErrorKind::Lex => Self::Lex,
             ErrorKind::Parse => Self::Parse,
+            ErrorKind::Type => Self::Type,
             ErrorKind::Runtime => Self::Runtime,
             ErrorKind::TooManySteps => Self::TooManySteps,
             ErrorKind::TooDeep => Self::TooDeep,

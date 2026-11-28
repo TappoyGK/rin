@@ -78,7 +78,8 @@ fn runtime_error_preserves_prior_failures_and_other_tests_run() {
         &[],
         Limits::default(),
     );
-    assert_eq!(r.tests[0].error.as_ref().unwrap().rule(), "op.cmp");
+    assert_eq!(r.tests[0].error.as_ref().unwrap().kind, ErrorKind::Type);
+    assert_eq!(r.tests[0].error.as_ref().unwrap().rule(), "test.check");
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn test_syntax_is_rejected_outside_its_context() {
         "(deftest \"x\" (check true false))",
         "(deftest \"x\" (if false (deftest \"nested\") 1))",
         "(deftest \"x\") (deftest \"x\")",
-        "(defn helper () (check true))",
+        "(defn helper () -> void (check true))",
         "(deftest \"x\" (let (f check) (f true)))",
     ] {
         let r = run(&[("bad", source)], &[], Limits::default());
@@ -116,7 +117,7 @@ fn test_syntax_is_rejected_outside_its_context() {
 #[test]
 fn modules_are_loaded_by_dependency_and_errors_have_sources() {
     let modules = [
-        ("a", "(import b) (defn double (x) (+ x b.n))"),
+        ("a", "(import b) (defn double ((x i64)) -> i64 (+ x b.n))"),
         ("b", "(def n 3)"),
     ];
     let r = run(
@@ -139,7 +140,7 @@ fn modules_are_loaded_by_dependency_and_errors_have_sources() {
     }
     let r = run(
         &[("t", "(import m) (deftest \"error\" (m.fail))")],
-        &[("m", "(defn fail () (/ 1 0))")],
+        &[("m", "(defn fail () -> i64 (/ 1 0))")],
         Limits::default(),
     );
     assert_eq!(r.tests[0].error.as_ref().unwrap().module(), Some("m"));
@@ -187,7 +188,7 @@ fn depth_and_memory_limits_are_errors() {
     let r = run(
         &[(
             "depth",
-            "(defn f (x) (+ 1 (f x))) (deftest \"depth\" (f 0))",
+            "(defn f ((x i64)) -> i64 (+ 1 (f x))) (deftest \"depth\" (f 0))",
         )],
         &[],
         Limits {
@@ -216,7 +217,7 @@ fn test_form_names_can_be_bound_as_ordinary_values() {
         r#"(deftest "x" (let (check 1) (check_eq check 1)))"#,
         r#"(deftest "y" (let (f (fn (check) check)) (check_eq (f 2) 2)))"#,
         r#"(deftest "capture" (let (check 3 f (fn () check)) (check_eq (f) 3)))"#,
-        r#"(deftest "match" (match some(4) (some(check) (check_eq check 4))))"#,
+        r#"(deftest "match" (match some(4) (some(check) (check_eq check 4)) (none (check false))))"#,
         r#"(def check 5) (deftest "global" (check_eq check 5))"#,
         r#"(deftest "names" (let (deftest 1 check_eq 2) (check (== (+ deftest check_eq) 3))))"#,
     ] {
@@ -227,7 +228,7 @@ fn test_form_names_can_be_bound_as_ordinary_values() {
         r#"(deftest "scope" (let (check 1) check) (let (c check) c))"#,
         r#"(deftest "init" (let (check check) check))"#,
         r#"(deftest "param" (fn (check) check) (let (c check) c))"#,
-        r#"(deftest "match" (match some(4) (some(check) check)) (let (c check) c))"#,
+        r#"(deftest "match" (match some(4) (some(check) check) (none 0)) (let (c check) c))"#,
     ] {
         let report = run(&[("scope", source)], &[], Limits::default());
         assert_eq!(
@@ -239,7 +240,11 @@ fn test_form_names_can_be_bound_as_ordinary_values() {
 
 #[test]
 fn check_placement_and_arity_have_distinct_diagnostics() {
-    for source in ["(check true)", "(defn f () (check true))", "(check_eq 1 1)"] {
+    for source in [
+        "(check true)",
+        "(defn f () -> void (check true))",
+        "(check_eq 1 1)",
+    ] {
         let report = run(&[("placement", source)], &[], Limits::default());
         assert_eq!(
             report.errors[0].error.message,

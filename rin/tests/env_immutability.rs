@@ -12,9 +12,9 @@ fn eval_with_is_strictly_lexical_for_functions_and_closures() {
         r#"
         (def x 1)
         (def cap (let (x 5) (fn () x)))
-        (defn f () (+ x 1))
-        (defn invoke (k) (k))
-        (defn make () (fn () x))
+        (defn f () -> i64 (+ x 1))
+        (defn invoke ((k (fn () i64))) -> i64 (k))
+        (defn make () -> (fn () i64) (fn () x))
         "#,
     )
     .unwrap();
@@ -25,7 +25,7 @@ fn eval_with_is_strictly_lexical_for_functions_and_closures() {
     let res = m
         .eval_with(
             "(tuple x (f) (invoke (fn () x)) ((make)) (cap))",
-            &[("x", Value::Int(10))],
+            &[("x", "i64", Value::Int(10))],
         )
         .unwrap();
     assert_eq!(
@@ -42,7 +42,7 @@ fn eval_with_is_strictly_lexical_for_functions_and_closures() {
 
     // 初期束縛に別型を渡しても既存関数 f の参照先（大域 x = 1）は変わらない
     let res2 = m
-        .eval_with("(tuple x (f))", &[("x", Value::text("oops"))])
+        .eval_with("(tuple x (f))", &[("x", "text", Value::text("oops"))])
         .unwrap();
     assert_eq!(res2, Value::tuple(vec![Value::text("oops"), Value::Int(2)]));
     assert_eq!(m.live_bytes(), before);
@@ -52,9 +52,9 @@ fn eval_with_is_strictly_lexical_for_functions_and_closures() {
         .eval_with(
             "(tuple x map)",
             &[
-                ("x", Value::Int(100)),
-                ("x", Value::Int(200)),
-                ("map", Value::Int(42)),
+                ("x", "i64", Value::Int(100)),
+                ("x", "i64", Value::Int(200)),
+                ("map", "i64", Value::Int(42)),
             ],
         )
         .unwrap();
@@ -69,7 +69,7 @@ fn eval_with_is_strictly_lexical_for_functions_and_closures() {
 
     // 未定義名ヒントに初期束縛名が含まれる
     let err = m
-        .eval_with("bonuz", &[("bonus", Value::Int(5))])
+        .eval_with("bonuz", &[("bonus", "i64", Value::Int(5))])
         .unwrap_err();
     assert_eq!(err.rule(), "expr.name");
     assert!(
@@ -82,7 +82,10 @@ fn eval_with_is_strictly_lexical_for_functions_and_closures() {
     // ゼロヒープ API (eval_with_vals) でも同じレキシカル挙動
     let v10 = m.val_int(10);
     let out = m
-        .eval_with_vals("(tuple x (f) (invoke (fn () x)) ((make)))", &[("x", v10)])
+        .eval_with_vals(
+            "(tuple x (f) (invoke (fn () x)) ((make)))",
+            &[("x", "i64", v10)],
+        )
         .unwrap();
     assert_eq!(out.to_string(), "(tuple 10 2 10 1)");
     m.release_val(v10);
@@ -97,18 +100,18 @@ fn duplicate_definitions_builtins_and_module_collisions_are_rejected() {
     let mut b = Builder::new(Limits::default(), &mut alloc);
 
     // def / defn / bind の重複定義
-    b.eval("(def a 1) (defn f () 2)").unwrap();
+    b.eval("(def a 1) (defn f () -> i64 2)").unwrap();
     let e = b.eval("(def a 10)").unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.def");
     assert_eq!((e.at.line, e.at.col), (1, 1));
 
-    let e = b.eval("(defn f () 20)").unwrap_err();
+    let e = b.eval("(defn f () -> i64 20)").unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.defn");
     assert_eq!((e.at.line, e.at.col), (1, 1));
 
-    let e = b.bind("a", &Value::Int(30)).unwrap_err();
+    let e = b.bind("a", "i64", &Value::Int(30)).unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.def");
     assert_eq!((e.at.line, e.at.col), (0, 0));
@@ -118,11 +121,11 @@ fn duplicate_definitions_builtins_and_module_collisions_are_rejected() {
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.def");
 
-    let e = b.eval("(defn + (x) x)").unwrap_err();
+    let e = b.eval("(defn + ((x i64)) -> i64 x)").unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.defn");
 
-    let e = b.bind("pi", &Value::Int(3)).unwrap_err();
+    let e = b.bind("pi", "i64", &Value::Int(3)).unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.def");
     assert_eq!((e.at.line, e.at.col), (0, 0));
@@ -144,11 +147,11 @@ fn duplicate_definitions_builtins_and_module_collisions_are_rejected() {
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.def");
 
-    let e = b.eval("(defn game () 1)").unwrap_err();
+    let e = b.eval("(defn game () -> i64 1)").unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.defn");
 
-    let e = b.bind("game", &Value::Int(1)).unwrap_err();
+    let e = b.bind("game", "i64", &Value::Int(1)).unwrap_err();
     assert_eq!(e.kind, ErrorKind::Runtime);
     assert_eq!(e.rule(), "expr.def");
     assert_eq!((e.at.line, e.at.col), (0, 0));
@@ -166,7 +169,9 @@ fn duplicate_definitions_builtins_and_module_collisions_are_rejected() {
     // モジュール内の重複定義・組み込み上書き・値↔import 衝突は拒否
     let e = b.load_module("dup_m", "(def x 1) (def x 2)").unwrap_err();
     assert_eq!(e.rule(), "expr.def");
-    let e = b.load_module("bi_m", "(defn map (x) x)").unwrap_err();
+    let e = b
+        .load_module("bi_m", "(defn map ((x i64)) -> i64 x)")
+        .unwrap_err();
     assert_eq!(e.rule(), "expr.defn");
     let e = b
         .load_module("imp_c1", "(def game 1) (import game)")
@@ -203,7 +208,7 @@ fn failed_builder_eval_rolls_back_all_added_bindings_without_alloc() {
 
     // ゼロ除算で失敗した評価の def / defn / import はすべて取り消される
     let err = b
-        .eval("(import lib) (def a [1 2 3]) (defn g () a) (/ 1 0)")
+        .eval("(import lib) (def a [1 2 3]) (defn g () -> (list i64) a) (/ 1 0)")
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Runtime);
     assert_eq!(b.live_bytes(), baseline);
@@ -213,7 +218,7 @@ fn failed_builder_eval_rolls_back_all_added_bindings_without_alloc() {
     assert_eq!(b.eval("lib.k").unwrap_err().rule(), "expr.name");
 
     // 取り消された名前は同じ Builder で再利用できる
-    b.eval("(import lib) (def a 2) (defn g () (+ a lib.k))")
+    b.eval("(import lib) (def a 2) (defn g () -> i64 (+ a lib.k))")
         .unwrap();
     assert_eq!(b.eval("(g)").unwrap(), Value::Int(11));
 
@@ -268,24 +273,23 @@ fn failed_builder_eval_rolls_back_all_added_bindings_without_alloc() {
 fn eval_with_many_bindings_last_wins_hints_and_no_leak() {
     let mut alloc = HeapAllocator;
     let mut b = Builder::new(Limits::default(), &mut alloc);
-    b.eval("(defn sq (n) (* n n)) (defn bad_fn () unknown_inner_xyz)")
-        .unwrap();
+    b.eval("(defn sq ((n i64)) -> i64 (* n n))").unwrap();
     let mut m = b.freeze().unwrap();
 
     // 9 個超（deferred_initial 経路）で重複後勝ち・クロージャ捕捉・未使用オブジェクト解放を確認
     let mut owned_names: Vec<String> = (0..50).map(|i| format!("item_{i}")).collect();
     owned_names.push("item_0".to_string()); // 重複（後ろ勝ち）
     owned_names.push("damage".to_string());
-    let mut bindings: Vec<(&str, Value)> = Vec::new();
+    let mut bindings: Vec<(&str, &str, Value)> = Vec::new();
     for (i, name) in owned_names.iter().enumerate() {
         if i == 50 {
-            bindings.push((name.as_str(), Value::Int(7)));
+            bindings.push((name.as_str(), "i64", Value::Int(7)));
         } else if i == 51 {
-            bindings.push((name.as_str(), Value::text("unused_heap_str")));
+            bindings.push((name.as_str(), "text", Value::text("unused_heap_str")));
         } else if i % 5 == 0 {
-            bindings.push((name.as_str(), Value::text(format!("str_{i}"))));
+            bindings.push((name.as_str(), "text", Value::text(format!("str_{i}"))));
         } else {
-            bindings.push((name.as_str(), Value::Int(i as i64)));
+            bindings.push((name.as_str(), "i64", Value::Int(i as i64)));
         }
     }
 
@@ -305,24 +309,4 @@ fn eval_with_many_bindings_last_wins_hints_and_no_leak() {
         err.message
     );
     assert_eq!(m.live_bytes(), live_before);
-
-    // 凍結済み関数内の未定義名では eval_with の初期束縛を候補に出さない
-    let extra = [
-        ("b0", Value::Int(0)),
-        ("b1", Value::Int(1)),
-        ("b2", Value::Int(2)),
-        ("b3", Value::Int(3)),
-        ("b4", Value::Int(4)),
-        ("b5", Value::Int(5)),
-        ("b6", Value::Int(6)),
-        ("b7", Value::Int(7)),
-        ("b8", Value::Int(8)),
-        ("unknown_inner_xy", Value::Int(9)),
-    ];
-    let err = m.eval_with("(bad_fn)", &extra).unwrap_err();
-    assert_eq!(err.rule(), "expr.name");
-    assert_eq!(
-        err.message, "unknown name 'unknown_inner_xyz'",
-        "frozen fn must not suggest eval_with binding"
-    );
 }

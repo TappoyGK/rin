@@ -36,6 +36,14 @@ pub(crate) struct RawMap<K: Copy, V: Copy> {
     len: usize,
 }
 
+impl<K: Copy, V: Copy> Clone for RawMap<K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K: Copy, V: Copy> Copy for RawMap<K, V> {}
+
 impl<K: Copy, V: Copy> Default for RawMap<K, V> {
     fn default() -> Self {
         Self::new()

@@ -28,6 +28,23 @@ impl RawStr {
         Self { ptr, len }
     }
 
+    /// 既存の有効な UTF-8 `&str` をコピーなしで借用する。
+    ///
+    /// # Safety
+    /// `s` がこの `RawStr` の使用期間中ずっと有効でなければならない。
+    #[inline]
+    pub unsafe fn from_borrowed(s: &str) -> Self {
+        if s.is_empty() {
+            Self::empty()
+        } else {
+            // SAFETY: 非空 `&str` のポインタは非 NULL。
+            Self {
+                ptr: unsafe { NonNull::new_unchecked(s.as_ptr().cast_mut()) },
+                len: s.len(),
+            }
+        }
+    }
+
     pub fn from_perm(perm: &mut PermArena, core: &mut AllocCore<'_>, s: &str) -> Option<Self> {
         if s.is_empty() {
             return Some(Self::empty());

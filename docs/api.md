@@ -14,17 +14,17 @@ Rin をホストプログラム（Rust および C / FFI）から利用するた
 
 ```rust
 pub fn eval(source: &str) -> Result<Value, Error>
-pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error>
+pub fn eval_with(source: &str, bindings: &[(&str, &str, Value)], limits: Limits) -> Result<Value, Error>
 pub fn eval_with_allocator(
     source: &str,
-    bindings: &[(&str, Value)],
+    bindings: &[(&str, &str, Value)],
     limits: Limits,
     alloc: &mut dyn Allocator,
 ) -> Result<Value, Error>
 ```
 
 - `eval`：`Limits::default()`・`HeapAllocator` で式列を評価する。
-- `eval_with`：初期束縛 `bindings` と資源上限 `limits` を指定して評価する。
+- `eval_with`：型式付きの初期束縛 `bindings`（`(name, type_expr, value)`）と資源上限 `limits` を指定して評価する。
 - `eval_with_allocator`：呼び出し元が指定した `Allocator` 上で評価する。
 - これら 3 つの簡易評価関数は、読み込み段階の環境で 1 回評価し、数学関数の FMA 設定として常に `MathFma::Strict` を使う。凍結した実行環境や `MathFma::Fused` を使う場合は `Builder` と `Machine` を利用する。
 
@@ -43,7 +43,7 @@ impl<'a> Builder<'a> {
     pub fn into_machine(self) -> Machine<'a>
 
     // std-value フィーチャ有効時（所有型 Value / Error を使用）
-    pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error>
+    pub fn bind<T: TypeArg>(&mut self, name: &str, ty: T, value: &Value) -> Result<(), Error>
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error>
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
     pub fn freeze(self) -> Result<Machine<'a>, Error>
@@ -57,20 +57,20 @@ impl<'a> Machine<'a> {
 
     // std-value フィーチャ有効時（所有型 Value / Error を使用）
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
-    pub fn eval_with(&mut self, source: &str, bindings: &[(&str, Value)]) -> Result<Value, Error>
+    pub fn eval_with<T: TypeArg>(&mut self, source: &str, bindings: &[(&str, T, Value)]) -> Result<Value, Error>
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error>
     pub fn call_in(&mut self, mod_name: &str, fn_name: &str, args: &[Value]) -> Result<Value, Error>
 }
 ```
 
 - `Builder::new` / `Builder::with_memory_config`：読み込み段階の環境を生成する。`with_memory_config` で 3 領域（永続・オブジェクト・作業）のチャンクサイズ設定 `MemoryConfig` を指定できる。
-- `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する。既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は実行時エラー（`[expr.def]`、位置 `0:0`）を返す。
+- `Builder::bind` / `Builder::bind_val`：ホストの値（`bind` は所有値 `Value` を内部プールへ取り込み、`bind_val` はプール上の `Val` を retain して共有参照する）を型 `ty`（`TypeArg`：型式文字列 `&str` または `Builder::resolve_type` で事前解決した `TypeHandle`）で検証し、大域変数 `name` として束縛する。型が一致しない場合や無効な `TypeHandle` の場合は `[type.boundary]` の実行時エラー（位置 `0:0`）、既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は `[expr.def]` の実行時エラー（位置 `0:0`）を返す。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。読み込み済みのモジュール名、または既存の大域束縛・組み込み名と衝突する場合は実行時エラー（`[expr.module]`、位置 `0:0`）を返す。読み込みに失敗したモジュールは登録されず、同じ名前で再試行できる。
 - `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。途中でエラーになった場合、その評価中に追加した大域束縛・`import` は追加のメモリ確保なしで取り消される。
 - **永続領域の追記特性**：読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（失敗した評価で追加された大域束縛の値スロットは取り消し時に解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
 - `Builder::into_machine` / `Builder::freeze`：大域環境と読み込み済みモジュール、および永続領域（`PermArena`）を凍結し、実行段階の `Machine` を返す。`into_machine` は失敗しないゼロヒープ API、`freeze` は `std-value` フィーチャ有効時の `Result` ラッパー（現行実装では常に `Ok` を返す）。
 - 凍結後の `Machine` から読み込みの段階には戻れない。Mod を読み直す場合は、新しい `Builder` を作って読み込み・凍結し、ホスト側で `Machine` を差し替える（ホットリロードは組み込む側が担う）。
-- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効な最外側のレキシカル束縛であり、評価するソースおよびそのソース内で生成されたクロージャからのみ参照できる（凍結済みの大域関数・モジュール内関数やそれらが返すクロージャからは参照されない）。初期束縛は評価終了時に解放され、`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。評価するソース内の名前解決の優先順位は、内側の局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛（組み込みを含む） → 読み込み済みモジュール名とする。
+- `Machine::eval` / `Machine::eval_with`：凍結した環境でソースを評価する。`def`・`defn`・`defschema`・`import`・`export` を含むソースは評価前に `[env.frozen]` の構文エラーとする。`eval_with` の `bindings`（初期束縛）はその 1 回の評価にだけ有効な最外側のレキシカル束縛であり、評価するソースおよびそのソース内で生成されたクロージャからのみ参照できる（凍結済みの大域関数・モジュール内関数やそれらが返すクロージャからは参照されない）。初期束縛は評価終了時に解放され、`bindings` に同じ名前が重複した場合は後ろの束縛が有効になる。読み込み済みのモジュールは `import` なしで `mod_name.symbol` として参照できる。評価するソース内の名前解決の優先順位は、内側の局所変数・捕捉変数 → 初期束縛 → 凍結された大域束縛（組み込みを含む） → 読み込み済みモジュール名とする。
 - Rust API では `call` / `call_in` は凍結後の `Machine` のみ提供する（C FFI では同一ハンドル上で `rin_call` / `rin_call_in` を凍結前・凍結後のどちらでも呼び出せる）。
 - `set_math_fma` / `math_fma`：組み込み数学関数（`sin`・`cos`）の FMA 使用方針（`MathFma::Strict` / `MathFma::Fused`、既定は `Strict`）を設定・取得する。
 - `live_bytes`：現在オブジェクト領域上で生存している論理使用バイト数を返す。
@@ -101,17 +101,31 @@ pub fn release_val(&mut self, v: Val)
 pub fn value_ref(&self, v: Val) -> ValueRef<'_>
 
 // Builder
-pub fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>>
+pub fn resolve_type(&mut self, type_expr: &str) -> Result<TypeHandle, ErrorRef<'_>>
+pub fn bind_val<T: TypeArg>(&mut self, name: &str, ty: T, val: Val) -> Result<(), ErrorRef<'_>>
 pub fn load_module_ref(&mut self, name: &str, source: &str) -> Result<(), ErrorRef<'_>>
 pub fn eval_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn fn_sig(&self, fn_name: &str) -> Option<FnSigRef<'_>>
+pub fn fn_sig_in(&self, mod_name: &str, fn_name: &str) -> Option<FnSigRef<'_>>
+pub fn type_of(&self, name: &str) -> Option<TypeRef<'_>>
+pub fn type_of_in(&self, mod_name: &str, name: &str) -> Option<TypeRef<'_>>
 
 // Machine
 pub fn eval_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>>
-pub fn eval_with_vals(&mut self, source: &str, bindings: &[(&str, Val)]) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn eval_with_vals<T: TypeArg>(&mut self, source: &str, bindings: &[(&str, T, Val)]) -> Result<ValueRef<'_>, ErrorRef<'_>>
 pub fn call_ref(&mut self, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
 pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn fn_sig(&self, fn_name: &str) -> Option<FnSigRef<'_>>
+pub fn fn_sig_in(&self, mod_name: &str, fn_name: &str) -> Option<FnSigRef<'_>>
+pub fn type_of(&self, name: &str) -> Option<TypeRef<'_>>
+pub fn type_of_in(&self, mod_name: &str, name: &str) -> Option<TypeRef<'_>>
 ```
 
+- **`TypeArg` と `TypeHandle`**：
+  - `TypeArg` は外部から実装できない sealed トレイトであり、`&str`（型式文字列）と `TypeHandle`（`Builder::resolve_type` の戻り値）の 2 型のみが実装する。
+  - `Machine::eval_with` / `Machine::eval_with_vals` の 1 回の呼び出しに渡す `bindings` は、型式文字列（`&str`）か型ハンドル（`TypeHandle`）のどちらか一方に揃える。
+  - `TypeHandle` は `resolve_type` を呼んだ `Builder` と、そこから凍結した `Machine` でのみ有効である。無効なハンドル（別の環境で取得したものや範囲外の値）を渡した場合は `[type.boundary]` の実行時エラー（位置 `0:0`）となる。
+  - 束縛がない場合は `eval_with(src, &[])` のように空スライスを渡すのではなく `Machine::eval` / `Machine::eval_ref` を使用する（空スライスでは `T: TypeArg` が推論できないため）。また、`String` を型式として渡す場合は `s.as_str()` を渡す。
 - **`Val` の所有権規約**：
   - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_text` / `val_ident` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
   - コンテナ構築（`val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）および `bind_val` / `call_ref` / `call_in_ref` / `eval_with_vals` は渡された `Val` を内部で retain して共有参照する。**所有権は移動しない**ため、呼び出し元は自分が生成した `Val` を使い終わったタイミングで必ず同じマシンの `release_val` へ返却する。
@@ -192,6 +206,7 @@ pub struct Limits {
 pub enum ErrorKind {
     Lex,
     Parse,
+    Type,
     Runtime,
     TooManySteps,
     TooDeep,
@@ -352,7 +367,9 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
   - `size == 0` の要求では C の `alloc` / `dealloc` のいずれも呼び出さない。
   - `ctx` と `alloc` / `dealloc` が指す関数は、`rin_new`（または `rin_new_with_config`）の呼び出しから `rin_free` が戻るまで有効に保つこと（`rin_free` は `Rin` 本体の解放にも `dealloc` を使用する）。
 - `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
-- `RinBinding`：`{ const char *name; const RinValue *value; }`
+- `RinType`：`{ uint32_t id; uint64_t env_id; }`（`rin_resolve_type` で事前解決した型ハンドル。取得元の `Rin` でのみ有効であり、別の `Rin` で取得したハンドルや範囲外・ゼロ初期化した値を `rin_bind_resolved` / `rin_eval_with_resolved` に渡すと `[type.boundary]` の実行時エラー（位置 `0:0`）となる）
+- `RinBinding`：`{ const char *name; const char *type_expr; const RinValue *value; }`
+- `RinResolvedBinding`：`{ const char *name; RinType ty; const RinValue *value; }`
 - `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。**`rin_drop` へ渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等への入力引数として渡せる）
 
 ### 2.2 `Rin` 操作
@@ -367,13 +384,20 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `bool rin_freeze(Rin *rin)` | 大域環境と読み込み済みモジュールを凍結し、実行の段階へ移行する（`rin == NULL` のときのみ `false`、すでに凍結済みなら `true`） |
 | `bool rin_set_math_fma(Rin *rin, RinMathFma mode)` | 組み込み数学関数の FMA 設定を変更する（不正値・NULL は `false`、非 NULL なら `RIN_ERR_HOST` を記録） |
 | `RinMathFma rin_math_fma(const Rin *rin)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
-| `bool rin_bind(Rin *rin, const char *name, const RinValue *val)` | 値を大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、既存の大域束縛・組み込み名・読み込み済みモジュール名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.def`・位置 `0:0` を記録して `false`） |
+| `bool rin_resolve_type(Rin *rin, const char *type_expr, RinType *out)` | 読み込み段階で型式を事前解決して `*out` へ書き込む（`fn` 型を含む場合は `type.boundary`、凍結後は `env.frozen`） |
+| `bool rin_bind(Rin *rin, const char *name, const char *type_expr, const RinValue *val)` | 値を型式 `type_expr` で検証したうえで大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、型不一致は `RIN_ERR_RUNTIME`・規則 `type.boundary`・位置 `0:0`、既存の大域束縛・組み込み名・読み込み済みモジュール名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.def`・位置 `0:0` を記録して `false`） |
+| `bool rin_bind_resolved(Rin *rin, const char *name, RinType ty, const RinValue *val)` | 事前解決済み `RinType` を使って値を大域変数として束縛する |
 | `RinEvalResult rin_build(Rin *rin, const char *source)` | 読み込み段階でソースを評価し大域定義を構築する（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗。評価が途中で失敗した場合は追加した大域束縛・`import` を取り消す） |
 | `RinEvalResult rin_eval(Rin *rin, const char *source)` | 凍結後の環境でソースを評価し結果を借用ポインタで返す（`[env.frozen]`・`[env.modules]` を適用。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
 | `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する（評価するソースの最外側のレキシカル束縛として導入され、そのソースおよびその中で生成されたクロージャからのみ参照でき、凍結済み関数からは参照されない。前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は同じ `Rin` で生成した有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
+| `RinEvalResult rin_eval_with_resolved(Rin *rin, const char *source, const RinResolvedBinding *bindings, size_t binding_count)` | 事前解決済み `RinType` を使って `rin_eval_with` と同様に評価する（型式文字列の再パースを省略） |
 | `RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、読み込み済みモジュール名や既存の大域束縛・組み込み名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.module`・位置 `0:0` を記録して失敗。失敗した読み込みは登録されず再試行可能） |
 | `RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
+| `bool rin_fn_arity(const Rin *rin, const char *fn_name, size_t *out_arity)` | 大域関数 `defn` の仮引数個数を `*out_arity` へ書き込む |
+| `bool rin_fn_arity_in(const Rin *rin, const char *mod_name, const char *fn_name, size_t *out_arity)` | モジュール公開関数 `defn` の仮引数個数を `*out_arity` へ書き込む |
+| `size_t rin_fn_sig_format(const Rin *rin, const char *fn_name, char *out_buf, size_t out_cap)` | 大域関数 `defn` のシグネチャを `out_buf`（NUL 終端）へ書き出し、必要なバイト数（NUL 除く）を返す（未定義なら `0`） |
+| `size_t rin_fn_sig_format_in(const Rin *rin, const char *mod_name, const char *fn_name, char *out_buf, size_t out_cap)` | モジュール公開関数 `defn` のシグネチャを `out_buf`（NUL 終端）へ書き出し、必要なバイト数（NUL 除く）を返す（未定義なら `0`） |
 | `const RinError *rin_last_error(const Rin *rin)` | 直近の対象操作のエラーを借用する（エラーなし・NULL は NULL） |
 
 #### エラー情報の借用
@@ -384,7 +408,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 typedef enum RinErrorKind {
     RIN_ERR_LEX = 0, RIN_ERR_PARSE = 1, RIN_ERR_RUNTIME = 2,
     RIN_ERR_TOO_MANY_STEPS = 3, RIN_ERR_TOO_DEEP = 4,
-    RIN_ERR_TOO_MUCH_MEMORY = 5, RIN_ERR_HOST = 6
+    RIN_ERR_TOO_MUCH_MEMORY = 5, RIN_ERR_HOST = 6, RIN_ERR_TYPE = 7
 } RinErrorKind;
 
 typedef struct RinError {
@@ -404,7 +428,7 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_text` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
+- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_eval_with_resolved` / `rin_load` / `rin_call` / `rin_call_in` / `rin_resolve_type` / `rin_bind` / `rin_bind_resolved` / `rin_freeze` / `rin_set_math_fma` の 12 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_text` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
 - 有効な `Rin` への状態変更・評価操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（**ホスト側で `rin_drop` に渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等の入力値として渡せる）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
@@ -424,7 +448,7 @@ if (!result.ok) {
 生成関数は `Rin *rin` を第 1 引数に取り、`rin` のアロケータ上で値ハンドルを確保して返す。使い終わったら同じ `rin` に対して `rin_drop(rin, val)` で返却する。
 
 - **失敗時の挙動**：`rin == NULL`、必須引数の `NULL`、不正 UTF-8 文字列、`rin_struct_set` の第 2 引数がその `Rin` の生存中ハンドルでない場合、メモリ上限（`memory_bytes`）超過、またはアロケータの確保失敗時は `NULL`（`rin_struct_set` は `false`）を返し、`rin != NULL` であれば `rin_last_error(rin)` にエラー（`RIN_ERR_HOST` または `RIN_ERR_TOO_MUCH_MEMORY`）を記録する。
-- **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_call` / `rin_eval_with` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` や `rin_struct_set` の第 2 引数へ渡してはならない。
+- **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_bind_resolved` / `rin_call` / `rin_eval_with` / `rin_eval_with_resolved` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` や `rin_struct_set` の第 2 引数へ渡してはならない。
 - **ハンドルの取り違えと解放済みハンドル**：次はホスト側の誤用であり、してはならない（`[eval.sandbox]` の対象ではなく、`rin_struct_set` の場合を除き `rin_last_error` にも記録されない）。
   - 同じハンドルを 2 回 `rin_drop` した場合は内部の生存フラグ（`alive`）により 2 回目は無視される。ただしスロットが新しいハンドルへ再利用された後に古いポインタを渡すと、`rin_drop` では新しいハンドルを解放してしまい、`rin_struct_set` の第 2 引数では再利用先のハンドルが持つ構造体を書き換えてしまう。
   - `rin_drop` 済みのハンドル（未再利用のもの）および `RinEvalResult.value` を `rin_struct_set` の第 2 引数に渡した場合は `RIN_ERR_HOST` を記録して `false` を返す。`rin_drop` 済みのハンドルを読み取り・入力に渡した場合は、`Void` またはスロット再利用後の別の値を読むことがある。
@@ -504,11 +528,12 @@ if (!result.ok) {
 | 凍結 | `rin_freeze(rin)` | `builder.into_machine()` / `builder.freeze()` | 読み込み → 実行段階へ不可逆遷移 |
 | FMA 設定 | `rin_set_math_fma(rin, mode)` | `builder.set_math_fma` / `machine.set_math_fma` | 両段階で利用可 |
 | FMA 取得 | `rin_math_fma(rin)` | `builder.math_fma` / `machine.math_fma` | 両段階で利用可 |
-| 大域束縛 | `rin_bind(rin, name, val)` | `builder.bind_val` / `builder.bind` | C は凍結後 `[env.frozen]` |
+| 型の事前解決 | `rin_resolve_type(rin, type_expr, out)` | `builder.resolve_type` | C は凍結後 `[env.frozen]` |
+| 大域束縛 | `rin_bind(rin, name, type_expr, val)` / `rin_bind_resolved(rin, name, ty, val)` | `builder.bind_val` / `builder.bind` | C は凍結後 `[env.frozen]`、Rust は `TypeArg` で統一 |
 | モジュール読込 | `rin_load(rin, mod_name, src)` | `builder.load_module_ref` / `builder.load_module` | C は凍結後 `[env.frozen]` |
 | 読み込み段階の評価 | `rin_build(rin, src)` | `builder.eval_ref` / `builder.eval` | C は凍結後 `[env.frozen]` |
 | 実行段階の評価 | `rin_eval(rin, src)` | `machine.eval_ref` / `machine.eval` | C は凍結前 `[env.phase]` |
-| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` | `machine.eval_with_vals` / `machine.eval_with` | C は凍結前 `[env.phase]` |
+| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` / `rin_eval_with_resolved(rin, src, binds, n)` | `machine.eval_with_vals` / `machine.eval_with` | C は凍結前 `[env.phase]`、Rust は `TypeArg` で統一 |
 | 関数直接呼出 | `rin_call(rin, fn_name, args, argc)` | `machine.call_ref` / `machine.call` | C は凍結前も呼べる |
 | モジュール関数呼出 | `rin_call_in(rin, mod, fn_name, args, argc)` | `machine.call_in_ref` / `machine.call_in` | C は凍結前も呼べる |
 | エラー取得 | `rin_last_error(rin)` | `Result<_, ErrorRef<'_>>` / `Result<_, Error>` | C は直前エラーを `Rin` 内に保持 |

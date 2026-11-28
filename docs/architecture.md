@@ -6,7 +6,8 @@ Rin インタプリタ（`rin` クレート）の評価環境・コンパイラ�
 
 評価環境は、公開 API を `Builder` と `Machine` の 2 つの型に分け、どちらも同じ内部構造体 `EnvState` を包む構成にしている（型定義は `rin/src/eval/mod.rs`、メソッド実装は `rin/src/eval/machine.rs`）。
 
-- **`EnvState`**（内部状態）: `Pool`（3 領域メモリ管理・値プール・ゼロヒープ `ErrorStore`）、`SymTable`（シンボル番号表）、`globals`（大域スロット `EnvSlots`）、`modules`（モジュール表 `ModuleTable`）、`last_result` のほか、`limits`・`math_fma` を保持する。
+- **`EnvState`**（内部状態）: `Pool`（3 領域メモリ管理・値プール・ゼロヒープ `ErrorStore`）、`SymTable`（シンボル番号表）、`TypeEnv`（`PermArena` 上の永続型環境・`defschema` 定義・`defn` シグネチャ）、`globals`（大域スロット `EnvSlots`）、`modules`（モジュール表 `ModuleTable`）、`last_result` のほか、`limits`・`math_fma` を保持する。
+- **静的型検査パイプライン（`rin/src/typecheck/`）**: 構文解析の直後・バイトコードコンパイルの前に双方向型検査器 `TypeChecker` を実行し、`defschema` 解決・`defn` 型注釈必須検証・`datum` 昇格・`match` 網羅性／到達不能性検査を `WorkArena` 上でゼロヒープに行う。型検査が成功した場合のみ `PermArena` の `TypeEnv` へ確定し、失敗時はスナップショット（`TypeEnvSnapshot`）で追加確保なしに巻き戻す。ホスト境界（`bind` / `eval_with` / `call` / `call_in`）では `typecheck/boundary.rs` が反復スタックで実行時型照合（`[type.boundary]`）を行う。
 - **`Builder`**（読み込み段階）: `Builder::new` / `Builder::with_memory_config` で生成し、`bind` / `bind_val`・`load_module` / `load_module_ref`・`eval` / `eval_ref` で大域環境とモジュールを構築する。`into_machine(self)`（または `std-value` 有効時の `freeze(self)`）で永続領域（`PermArena`）を凍結し、`EnvState` の所有権ごと `Machine` へ移行する。
 - **`Machine`**（実行段階・凍結）: `eval` / `eval_ref`・`eval_with` / `eval_with_vals`・`call` / `call_ref`・`call_in` / `call_in_ref`（および `val_*`・`set_math_fma`・`math_fma`・`live_bytes`）を提供する。大域環境とモジュールを変更する操作を持たないことを型で保証する。
 - **C FFI（`Rin`）**（`rin/src/ffi/mod.rs`）: `Rin` 本体・`ValueHandles` プール・インライン NUL 終端 `StoredError` をすべて `RinAllocator` 上に直接配置するゼロヒープ C ABI ラッパー。ポインタ型 `Rin*` を維持したまま `rin_freeze()` で不可逆に凍結する。`rin_new_with_config` で 3 領域のブロック設定（`RinMemoryConfig`）を指定できる。

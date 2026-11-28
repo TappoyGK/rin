@@ -111,7 +111,7 @@ fn multiline_quotes_escapes_and_interpolation() {
         &mut alloc,
     );
     m.eval(&format!(
-        "(defn same () (== \"{long}\" \"\"\"\n  {long}\n  \"\"\"))"
+        "(defn same () -> bool (== \"{long}\" \"\"\"\n  {long}\n  \"\"\"))"
     ))
     .unwrap();
     let mut m = m.freeze().unwrap();
@@ -224,7 +224,7 @@ fn multiline_errors_and_spans() {
     // 埋め込めない型のエラー位置は元のソースの式を指す
     let src = "(def xs [1])\n\"\"\"\n  ${xs}\n  \"\"\"";
     let err = eval(src).unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.kind, ErrorKind::Type);
     assert_eq!(err.rule(), "expr.template");
     assert_eq!(err.at.line, 3);
     assert_eq!(err.at.col, 5);

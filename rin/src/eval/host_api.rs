@@ -8,7 +8,90 @@ impl EnvState<'_> {
         ValueRef::new(v.0, &self.pool)
     }
 
-    pub(super) fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>> {
+    pub(super) fn fn_sig(&self, fn_name: &str) -> Option<crate::FnSigRef<'_>> {
+        let vb = self.type_env.lookup_root_val(fn_name)?;
+        let sig = vb.fn_sig?;
+        Some(crate::FnSigRef::new(&self.type_env, sig))
+    }
+
+    pub(super) fn fn_sig_in(&self, mod_name: &str, fn_name: &str) -> Option<crate::FnSigRef<'_>> {
+        let (_, menv) = self.type_env.lookup_module(mod_name)?;
+        let h = crate::mem::fnv1a_bytes(fn_name.as_bytes());
+        let vb = menv.exports_vals.get_by(h, |k| k.as_str() == fn_name)?;
+        let sig = vb.fn_sig?;
+        Some(crate::FnSigRef::new(&self.type_env, sig))
+    }
+
+    pub(super) fn type_of(&self, name: &str) -> Option<crate::TypeRef<'_>> {
+        let vb = self.type_env.lookup_root_val(name)?;
+        Some(crate::TypeRef::new(&self.type_env, vb.ty))
+    }
+
+    pub(super) fn type_of_in(&self, mod_name: &str, name: &str) -> Option<crate::TypeRef<'_>> {
+        let (_, menv) = self.type_env.lookup_module(mod_name)?;
+        let h = crate::mem::fnv1a_bytes(name.as_bytes());
+        let vb = menv.exports_vals.get_by(h, |k| k.as_str() == name)?;
+        Some(crate::TypeRef::new(&self.type_env, vb.ty))
+    }
+
+    pub(super) fn resolve_type(
+        &mut self,
+        type_expr: &str,
+    ) -> Result<crate::TypeHandle, ErrorRef<'_>> {
+        let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
+        let res = (|| {
+            let te = parse_type_expr_work(type_expr, &mut self.pool.work, &mut self.pool.core)?;
+            let tid = resolve_type_expr_perm(
+                &te,
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )?;
+            reject_fn_in_perm_type(
+                tid,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                Span::default(),
+            )?;
+            self.type_env.mark_boundary_ok(
+                &mut self.pool.perm,
+                &mut self.pool.core,
+                tid,
+                Span::default(),
+            )?;
+            Ok::<_, ErrRecorded>(crate::TypeHandle {
+                id: tid,
+                env_id: self.type_env.env_id(),
+            })
+        })();
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        match res {
+            Ok(h) => Ok(h),
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                Err(self.pool.core.error.as_ref())
+            }
+        }
+    }
+
+    pub(super) fn bind_typed_val(
+        &mut self,
+        name: &str,
+        ty: crate::TypeHandle,
+        val: Val,
+    ) -> Result<(), ErrorRef<'_>> {
+        if !self.type_env.is_valid_handle(ty) {
+            self.pool.core.err_str(
+                "type.boundary",
+                ErrorKind::Runtime,
+                Span::default(),
+                "invalid type handle",
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
         if self.modules.get_val(name).is_some() {
             self.pool.core.err_fmt(
                 "expr.def",
@@ -45,10 +128,140 @@ impl EnvState<'_> {
             );
             return Err(self.pool.core.error.as_ref());
         }
+        let mark = self.pool.work.mark(&self.pool.core);
+        let check_res = check_rval_against_type(
+            val.0,
+            ty.id,
+            &self.type_env,
+            &mut self.pool,
+            Span::default(),
+        );
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        if check_res.is_err() {
+            return Err(self.pool.core.error.as_ref());
+        }
+        let type_snap = self.type_env.snapshot();
+        if self
+            .type_env
+            .define_root_val(
+                &mut self.pool.perm,
+                &mut self.pool.core,
+                name,
+                ValBinding {
+                    ty: ty.id,
+                    fn_sig: None,
+                },
+                Span::default(),
+            )
+            .is_err()
+        {
+            self.type_env.rollback(type_snap);
+            return Err(self.pool.core.error.as_ref());
+        }
         self.pool.retain_val(val.0);
         match self.globals.set(&mut self.pool, id, val.0, Span::default()) {
             Ok(_) => Ok(()),
             Err(_) => {
+                self.type_env.rollback(type_snap);
+                self.pool.release_val(val.0);
+                Err(self.pool.core.error.as_ref())
+            }
+        }
+    }
+
+    pub(super) fn bind_val(
+        &mut self,
+        name: &str,
+        type_expr: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'_>> {
+        if self.modules.get_val(name).is_some() {
+            self.pool.core.err_fmt(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("cannot bind '{name}': conflicts with loaded module '{name}'"),
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
+        let Some(id) = self.syms.intern(&mut self.pool, name) else {
+            self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            );
+            return Err(self.pool.core.error.as_ref());
+        };
+        if id < STATIC_SYM_COUNT {
+            self.pool.core.err_fmt(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("cannot redefine builtin '{name}'"),
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
+        if self.globals.get(id).is_some() {
+            self.pool.core.err_fmt(
+                "expr.def",
+                ErrorKind::Runtime,
+                Span::default(),
+                format_args!("'{name}' is already defined"),
+            );
+            return Err(self.pool.core.error.as_ref());
+        }
+        let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
+        let tid = match (|| {
+            let te = parse_type_expr_work(type_expr, &mut self.pool.work, &mut self.pool.core)?;
+            let tid = resolve_type_expr_perm(
+                &te,
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )?;
+            reject_fn_in_perm_type(
+                tid,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                Span::default(),
+            )?;
+            check_rval_against_type(val.0, tid, &self.type_env, &mut self.pool, Span::default())?;
+            Ok::<_, ErrRecorded>(tid)
+        })() {
+            Ok::<_, ErrRecorded>(tid) => tid,
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                self.pool.work.rewind(&mut self.pool.core, mark);
+                return Err(self.pool.core.error.as_ref());
+            }
+        };
+        self.pool.work.rewind(&mut self.pool.core, mark);
+        if self
+            .type_env
+            .define_root_val(
+                &mut self.pool.perm,
+                &mut self.pool.core,
+                name,
+                ValBinding {
+                    ty: tid,
+                    fn_sig: None,
+                },
+                Span::default(),
+            )
+            .is_err()
+        {
+            self.type_env.rollback(type_snap);
+            return Err(self.pool.core.error.as_ref());
+        }
+        self.pool.retain_val(val.0);
+        match self.globals.set(&mut self.pool, id, val.0, Span::default()) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                self.type_env.rollback(type_snap);
                 self.pool.release_val(val.0);
                 Err(self.pool.core.error.as_ref())
             }
@@ -58,9 +271,26 @@ impl EnvState<'_> {
     pub(super) fn eval_building_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.clear_last_result();
         let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
         let res = (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: false,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: true,
+                    extra_bindings: &[],
+                    extra_binding_exprs: &[],
+                },
+            )?;
             let chunk = compile_program(
                 exprs.as_slice(),
                 None,
@@ -69,8 +299,13 @@ impl EnvState<'_> {
                 &self.globals,
                 false,
             )?;
-            let mut runner = self.runner(None, false);
-            runner.run_top_chunk(&chunk)
+            self.reserve_global_sigs_for_exprs(exprs.as_slice())?;
+            let val = {
+                let mut runner = self.runner(None, false);
+                runner.run_top_chunk(&chunk)?
+            };
+            self.populate_global_sigs_for_exprs(exprs.as_slice());
+            Ok::<_, ErrRecorded>(val)
         })();
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
@@ -78,14 +313,17 @@ impl EnvState<'_> {
                 self.set_last_result(v);
                 Ok(ValueRef::new(self.last_result, &self.pool))
             }
-            Err(_) => Err(self.pool.core.error.as_ref()),
+            Err(_) => {
+                self.type_env.rollback(type_snap);
+                Err(self.pool.core.error.as_ref())
+            }
         }
     }
 
     pub(super) fn eval_frozen_ref(
         &mut self,
         source: &str,
-        bindings: &[(&str, Val)],
+        bindings: &[(&str, &str, Val)],
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.clear_last_result();
         let outer_mark = self.pool.work.mark(&self.pool.core);
@@ -104,12 +342,28 @@ impl EnvState<'_> {
     fn eval_frozen_vals_inner(
         &mut self,
         source: &str,
-        bindings: &[(&str, Val)],
+        bindings: &[(&str, &str, Val)],
     ) -> Result<RVal, ErrRecorded> {
         if bindings.is_empty() {
             let chunk = {
                 let exprs =
                     parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+                check_program_work(
+                    exprs.as_slice(),
+                    &mut self.type_env,
+                    &mut self.pool.perm,
+                    &mut self.pool.work,
+                    &mut self.pool.core,
+                    CheckOptions {
+                        frozen: true,
+                        strict_defn_annotations: true,
+                        module_name: None,
+                        test_mode: false,
+                        commit: false,
+                        extra_bindings: &[],
+                        extra_binding_exprs: &[],
+                    },
+                )?;
                 compile_program(
                     exprs.as_slice(),
                     None,
@@ -122,9 +376,48 @@ impl EnvState<'_> {
             let mut runner = self.runner(None, true);
             return runner.run_top_chunk(&chunk);
         }
+        let mut extra_exprs = RawVec::<(&str, crate::ast::TypeExpr)>::new();
+        for &(bname, bty, bval) in bindings {
+            let te = parse_type_expr_work(bty, &mut self.pool.work, &mut self.pool.core)?;
+            validate_boundary_type_expr(
+                &te,
+                &self.type_env,
+                &mut self.pool.work,
+                &mut self.pool.core,
+            )?;
+            check_rval_against_type_expr(
+                bval.0,
+                &te,
+                &self.type_env,
+                &mut self.pool,
+                Span::default(),
+            )?;
+            if extra_exprs
+                .push_work(&mut self.pool.work, &mut self.pool.core, (bname, te))
+                .is_none()
+            {
+                return Err(self.pool.core.err_oom(Span::default()));
+            }
+        }
         let (chunk, used) = {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: true,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: false,
+                    extra_bindings: &[],
+                    extra_binding_exprs: extra_exprs.as_slice(),
+                },
+            )?;
             compile_program_with_bindings(
                 exprs.as_slice(),
                 None,
@@ -140,7 +433,7 @@ impl EnvState<'_> {
                 let mut vals = [RVal::Void; 8];
                 let count = len as usize;
                 for i in 0..count {
-                    vals[i] = bindings[indices[i] as usize].1.0;
+                    vals[i] = bindings[indices[i] as usize].2.0;
                 }
                 let mut runner = self.runner(None, true);
                 runner.run_top_chunk_with_locals(&chunk, &vals[..count])
@@ -158,7 +451,120 @@ impl EnvState<'_> {
                         let _ = vals.push_work(
                             &mut self.pool.work,
                             &mut self.pool.core,
-                            bindings[idx as usize].1.0,
+                            bindings[idx as usize].2.0,
+                        );
+                    }
+                }
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk_with_locals(&chunk, vals.as_slice())
+            }
+        }
+    }
+
+    pub(super) fn eval_frozen_typed_ref(
+        &mut self,
+        source: &str,
+        bindings: &[(&str, crate::TypeHandle, Val)],
+    ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
+        self.clear_last_result();
+        let outer_mark = self.pool.work.mark(&self.pool.core);
+        let res = self.eval_frozen_typed_vals_inner(source, bindings);
+        self.syms.clear_temp();
+        self.pool.work.rewind(&mut self.pool.core, outer_mark);
+        match res {
+            Ok(v) => {
+                self.set_last_result(v);
+                Ok(ValueRef::new(self.last_result, &self.pool))
+            }
+            Err(_) => Err(self.pool.core.error.as_ref()),
+        }
+    }
+
+    fn eval_frozen_typed_vals_inner(
+        &mut self,
+        source: &str,
+        bindings: &[(&str, crate::TypeHandle, Val)],
+    ) -> Result<RVal, ErrRecorded> {
+        if bindings.is_empty() {
+            return self.eval_frozen_vals_inner(source, &[]);
+        }
+        let mut extra_types = RawVec::<(&str, crate::typecheck::TypeId)>::new();
+        for &(bname, bty, bval) in bindings {
+            if !self.type_env.is_valid_handle(bty) {
+                return Err(self.pool.core.err_str(
+                    "type.boundary",
+                    ErrorKind::Runtime,
+                    Span::default(),
+                    "invalid type handle",
+                ));
+            }
+            check_rval_against_type(
+                bval.0,
+                bty.id,
+                &self.type_env,
+                &mut self.pool,
+                Span::default(),
+            )?;
+            if extra_types
+                .push_work(&mut self.pool.work, &mut self.pool.core, (bname, bty.id))
+                .is_none()
+            {
+                return Err(self.pool.core.err_oom(Span::default()));
+            }
+        }
+        let (chunk, used) = {
+            let exprs =
+                parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: true,
+                    strict_defn_annotations: true,
+                    module_name: None,
+                    test_mode: false,
+                    commit: false,
+                    extra_bindings: extra_types.as_slice(),
+                    extra_binding_exprs: &[],
+                },
+            )?;
+            compile_program_with_bindings(
+                exprs.as_slice(),
+                None,
+                &mut self.syms,
+                &mut self.pool,
+                &self.globals,
+                true,
+                InitialBindingNames::TypedVals(bindings),
+            )?
+        };
+        match used {
+            UsedBindings::Small { indices, len } => {
+                let mut vals = [RVal::Void; 8];
+                let count = len as usize;
+                for i in 0..count {
+                    vals[i] = bindings[indices[i] as usize].2.0;
+                }
+                let mut runner = self.runner(None, true);
+                runner.run_top_chunk_with_locals(&chunk, &vals[..count])
+            }
+            UsedBindings::Many(used_indices) => {
+                let mut vals = RawVec::<RVal>::new();
+                if !used_indices.is_empty() {
+                    if vals
+                        .reserve_work(&mut self.pool.work, &mut self.pool.core, used_indices.len())
+                        .is_none()
+                    {
+                        return Err(self.pool.core.err_oom(Span::default()));
+                    }
+                    for &idx in used_indices.as_slice() {
+                        let _ = vals.push_work(
+                            &mut self.pool.work,
+                            &mut self.pool.core,
+                            bindings[idx as usize].2.0,
                         );
                     }
                 }
@@ -175,10 +581,10 @@ impl EnvState<'_> {
         frozen: bool,
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.clear_last_result();
-        let Some(callee) = self
+        let Some((sym_id, callee)) = self
             .syms
             .get(fn_name)
-            .and_then(|id| global_slot(&self.globals, id))
+            .and_then(|id| global_slot(&self.globals, id).map(|v| (id, v)))
         else {
             let out =
                 self.pool
@@ -189,7 +595,8 @@ impl EnvState<'_> {
             write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
             return Err(self.pool.core.error.as_ref());
         };
-        self.call_rval_vals_ref(callee, args, frozen)
+        let fn_sig = self.global_fn_sig(sym_id);
+        self.call_rval_vals_ref(callee, fn_sig, args, frozen)
     }
 
     pub(super) fn call_in_vals_ref(
@@ -227,15 +634,46 @@ impl EnvState<'_> {
             );
             return Err(self.pool.core.error.as_ref());
         };
-        self.call_rval_vals_ref(callee, args, frozen)
+        let fn_sig = self.type_env.lookup_module(mod_name).and_then(|(_, menv)| {
+            menv.exports_vals
+                .get_by(fnv1a_bytes(fn_name.as_bytes()), |k| k.as_str() == fn_name)
+                .and_then(|vb| vb.fn_sig)
+        });
+        self.call_rval_vals_ref(callee, fn_sig, args, frozen)
     }
 
     fn call_rval_vals_ref(
         &mut self,
         callee: RVal,
+        fn_sig: Option<FnSig>,
         args: &[Val],
         frozen: bool,
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
+        if let Some(sig) = fn_sig {
+            let params = sig.params.as_slice();
+            if params.len() != args.len() {
+                self.pool.core.err_str(
+                    "type.boundary",
+                    ErrorKind::Runtime,
+                    Span::default(),
+                    "wrong number of arguments",
+                );
+                return Err(self.pool.core.error.as_ref());
+            }
+            for (arg, &(_, pty)) in args.iter().zip(params) {
+                if check_rval_against_type(
+                    arg.0,
+                    pty,
+                    &self.type_env,
+                    &mut self.pool,
+                    Span::default(),
+                )
+                .is_err()
+                {
+                    return Err(self.pool.core.error.as_ref());
+                }
+            }
+        }
         let mark = self.pool.work.mark(&self.pool.core);
         let mut r_args = RawVec::new();
         for &arg in args {
@@ -373,10 +811,198 @@ macro_rules! impl_val_constructors {
 impl_val_constructors!(Builder);
 impl_val_constructors!(Machine);
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for &str {}
+    impl Sealed for crate::TypeHandle {}
+}
+
+/// ホスト境界 API（[`Builder::bind`]・[`Builder::bind_val`]・[`Machine::eval_with`]・
+/// [`Machine::eval_with_vals`]）の型引数として渡せる型。
+///
+/// 型式文字列（`&str`）または [`Builder::resolve_type`] で事前解決した [`crate::TypeHandle`] を受け付ける。
+pub trait TypeArg: sealed::Sealed + Copy {
+    #[doc(hidden)]
+    fn bind_val_inner<'b>(
+        self,
+        builder: &'b mut Builder<'_>,
+        name: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'b>>;
+
+    #[doc(hidden)]
+    fn eval_with_vals_inner<'m>(
+        machine: &'m mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, Val)],
+    ) -> Result<ValueRef<'m>, ErrorRef<'m>>;
+
+    #[cfg(feature = "std-value")]
+    #[doc(hidden)]
+    fn bind_value_inner(
+        self,
+        builder: &mut Builder<'_>,
+        name: &str,
+        value: &crate::Value,
+    ) -> Result<(), crate::Error>;
+
+    #[cfg(feature = "std-value")]
+    #[doc(hidden)]
+    fn eval_with_values_inner(
+        machine: &mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, crate::Value)],
+    ) -> Result<crate::Value, crate::Error>;
+}
+
+impl TypeArg for &str {
+    #[inline]
+    fn bind_val_inner<'b>(
+        self,
+        builder: &'b mut Builder<'_>,
+        name: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'b>> {
+        builder.inner.bind_val(name, self, val)
+    }
+
+    #[inline]
+    fn eval_with_vals_inner<'m>(
+        machine: &'m mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, Val)],
+    ) -> Result<ValueRef<'m>, ErrorRef<'m>> {
+        machine.inner.eval_frozen_ref(source, bindings)
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn bind_value_inner(
+        self,
+        builder: &mut Builder<'_>,
+        name: &str,
+        value: &crate::Value,
+    ) -> Result<(), crate::Error> {
+        builder.inner.bind(name, self, value)
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn eval_with_values_inner(
+        machine: &mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, crate::Value)],
+    ) -> Result<crate::Value, crate::Error> {
+        machine.inner.eval_frozen(source, bindings)
+    }
+}
+
+impl TypeArg for crate::TypeHandle {
+    #[inline]
+    fn bind_val_inner<'b>(
+        self,
+        builder: &'b mut Builder<'_>,
+        name: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'b>> {
+        builder.inner.bind_typed_val(name, self, val)
+    }
+
+    #[inline]
+    fn eval_with_vals_inner<'m>(
+        machine: &'m mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, Val)],
+    ) -> Result<ValueRef<'m>, ErrorRef<'m>> {
+        machine.inner.eval_frozen_typed_ref(source, bindings)
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn bind_value_inner(
+        self,
+        builder: &mut Builder<'_>,
+        name: &str,
+        value: &crate::Value,
+    ) -> Result<(), crate::Error> {
+        let imported = match builder.inner.pool.import(value, Span::default()) {
+            Ok(v) => Val(v),
+            Err(_) => return Err(builder.inner.pool.core.error.to_owned_error()),
+        };
+        let res = builder
+            .inner
+            .bind_typed_val(name, self, imported)
+            .map_err(|e| e.to_error());
+        builder.inner.pool.release_val(imported.0);
+        res
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn eval_with_values_inner(
+        machine: &mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, crate::Value)],
+    ) -> Result<crate::Value, crate::Error> {
+        let mut imported: Vec<(&str, crate::TypeHandle, Val)> = Vec::with_capacity(bindings.len());
+        for (name, ty, val) in bindings {
+            match machine.inner.pool.import(val, Span::default()) {
+                Ok(rv) => imported.push((*name, *ty, Val(rv))),
+                Err(_) => {
+                    let err = machine.inner.pool.core.error.to_owned_error();
+                    for (_, _, v) in imported {
+                        machine.inner.pool.release_val(v.0);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        let res = machine
+            .inner
+            .eval_frozen_typed_ref(source, &imported)
+            .map(|vr| vr.to_value())
+            .map_err(|e| e.to_error());
+        for (_, _, v) in imported {
+            machine.inner.pool.release_val(v.0);
+        }
+        res
+    }
+}
+
 impl Builder<'_> {
-    /// マシン上で構築した [`Val`] を大域変数として束縛する（システムヒープ不使用）。
-    pub fn bind_val(&mut self, name: &str, val: Val) -> Result<(), ErrorRef<'_>> {
-        self.inner.bind_val(name, val)
+    /// 型式文字列を事前解決し、反復評価・束縛に再利用できる [`crate::TypeHandle`] を返す（システムヒープ不使用）。
+    pub fn resolve_type(&mut self, type_expr: &str) -> Result<crate::TypeHandle, ErrorRef<'_>> {
+        self.inner.resolve_type(type_expr)
+    }
+
+    /// マシン上で構築した [`Val`] を型 `ty`（型式文字列または事前解決済み [`crate::TypeHandle`]）付きで大域変数として束縛する（システムヒープ不使用）。
+    pub fn bind_val<T: TypeArg>(
+        &mut self,
+        name: &str,
+        ty: T,
+        val: Val,
+    ) -> Result<(), ErrorRef<'_>> {
+        ty.bind_val_inner(self, name, val)
+    }
+
+    /// 大域関数 `defn` のシグネチャを取得する（システムヒープ不使用）。
+    pub fn fn_sig(&self, fn_name: &str) -> Option<crate::FnSigRef<'_>> {
+        self.inner.fn_sig(fn_name)
+    }
+
+    /// 読み込み済みモジュールの公開関数 `defn` のシグネチャを取得する（システムヒープ不使用）。
+    pub fn fn_sig_in(&self, mod_name: &str, fn_name: &str) -> Option<crate::FnSigRef<'_>> {
+        self.inner.fn_sig_in(mod_name, fn_name)
+    }
+
+    /// 大域束縛の型を取得する（システムヒープ不使用）。
+    pub fn type_of(&self, name: &str) -> Option<crate::TypeRef<'_>> {
+        self.inner.type_of(name)
+    }
+
+    /// 読み込み済みモジュールの公開束縛の型を取得する（システムヒープ不使用）。
+    pub fn type_of_in(&self, mod_name: &str, name: &str) -> Option<crate::TypeRef<'_>> {
+        self.inner.type_of_in(mod_name, name)
     }
 
     /// モジュールを読み込み、失敗時は借用エラー [`ErrorRef`] を返す。
@@ -416,13 +1042,33 @@ impl Machine<'_> {
         self.inner.eval_frozen_ref(source, &[])
     }
 
-    /// 凍結した環境で一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
-    pub fn eval_with_vals(
+    /// 凍結した環境で型（型式文字列または事前解決済み [`crate::TypeHandle`]）付き一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
+    pub fn eval_with_vals<T: TypeArg>(
         &mut self,
         source: &str,
-        bindings: &[(&str, Val)],
+        bindings: &[(&str, T, Val)],
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
-        self.inner.eval_frozen_ref(source, bindings)
+        T::eval_with_vals_inner(self, source, bindings)
+    }
+
+    /// 大域関数 `defn` のシグネチャを取得する（システムヒープ不使用）。
+    pub fn fn_sig(&self, fn_name: &str) -> Option<crate::FnSigRef<'_>> {
+        self.inner.fn_sig(fn_name)
+    }
+
+    /// 読み込み済みモジュールの公開関数 `defn` のシグネチャを取得する（システムヒープ不使用）。
+    pub fn fn_sig_in(&self, mod_name: &str, fn_name: &str) -> Option<crate::FnSigRef<'_>> {
+        self.inner.fn_sig_in(mod_name, fn_name)
+    }
+
+    /// 大域束縛の型を取得する（システムヒープ不使用）。
+    pub fn type_of(&self, name: &str) -> Option<crate::TypeRef<'_>> {
+        self.inner.type_of(name)
+    }
+
+    /// 読み込み済みモジュールの公開束縛の型を取得する（システムヒープ不使用）。
+    pub fn type_of_in(&self, mod_name: &str, name: &str) -> Option<crate::TypeRef<'_>> {
+        self.inner.type_of_in(mod_name, name)
     }
 
     /// 定義済みの大域関数を [`Val`] 引数で呼び出し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。

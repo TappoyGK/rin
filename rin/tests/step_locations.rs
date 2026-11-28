@@ -54,7 +54,7 @@ fn exact_step_locations_across_branches_and_function_scopes() {
         Value::Int(3),
     );
     check_every_limit(
-        "(defn sq (x)\n  (* x x))\n(sq 7)",
+        "(defn sq ((x i64)) -> i64\n  (* x x))\n(sq 7)",
         &[
             (1, 1),
             (3, 1),

@@ -43,13 +43,13 @@ fn main() {
                 .map(|i| (format!("f{i}"), Value::Int(i as i64)))
                 .collect::<BTreeMap<_, _>>(),
         );
-        for (name, body) in [
-            ("len", "(len xs)"),
-            ("contains", "(contains xs 9)"),
-            ("equal-list", "(== xs ys)"),
-            ("equal-struct", "(== s t)"),
-            ("fold", "(fold + 0 xs)"),
-            ("unique", "(len (unique xs))"),
+        for (name, ret, body) in [
+            ("len", "i64", "(len xs)"),
+            ("contains", "bool", "(contains xs 9)"),
+            ("equal-list", "bool", "(== xs ys)"),
+            ("equal-struct", "bool", "(== s t)"),
+            ("fold", "i64", "(fold + 0 xs)"),
+            ("unique", "i64", "(len (unique xs))"),
         ] {
             let mut alloc = HeapAllocator;
             let mut b = Builder::new(
@@ -59,11 +59,14 @@ fn main() {
                 },
                 &mut alloc,
             );
-            b.bind("xs", &xs).unwrap();
-            b.bind("ys", &xs).unwrap();
-            b.bind("s", &s).unwrap();
-            b.bind("t", &s).unwrap();
-            b.eval(&format!("(defn run () {body})")).unwrap();
+            let field_defs: String = (0..n).map(|i| format!(" (f{i} i64)")).collect();
+            b.eval(&format!("(defschema S (struct S{field_defs}))"))
+                .unwrap();
+            b.bind("xs", "(list i64)", &xs).unwrap();
+            b.bind("ys", "(list i64)", &xs).unwrap();
+            b.bind("s", "S", &s).unwrap();
+            b.bind("t", "S", &s).unwrap();
+            b.eval(&format!("(defn run () -> {ret} {body})")).unwrap();
             let mut m = b.freeze().unwrap();
             let repeats = if n == 10 {
                 100_000

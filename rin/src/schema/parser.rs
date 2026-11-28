@@ -89,7 +89,7 @@ impl Schema {
         stack.push(ty);
         while let Some(cur) = stack.pop() {
             match cur {
-                TypeExpr::Any
+                TypeExpr::Datum
                 | TypeExpr::Void
                 | TypeExpr::I64
                 | TypeExpr::F64
@@ -305,7 +305,14 @@ impl SchemaParser {
                     match kind {
                         TokenKind::Ident(name) => {
                             let ty = match name.as_str() {
-                                "any" => TypeExpr::Any,
+                                "any" => {
+                                    return Err(Error::parse(
+                                        "schema.type",
+                                        span,
+                                        "'any' has been removed; use a concrete type or 'datum'",
+                                    ));
+                                }
+                                "datum" => TypeExpr::Datum,
                                 "void" => TypeExpr::Void,
                                 "i64" => TypeExpr::I64,
                                 "f64" => TypeExpr::F64,

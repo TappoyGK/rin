@@ -16,7 +16,7 @@
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 ### eval-002 0 による除算は実行時エラー
 
@@ -64,7 +64,7 @@
 **入力：**
 
 ```rin
-(defn inf_loop (n) (inf_loop (+ n 1)))
+(defn inf_loop ((n i64)) -> i64 (inf_loop (+ n 1)))
 (inf_loop 0)
 ```
 
@@ -83,7 +83,7 @@
 **入力：**
 
 ```rin
-(defn deep (n) (+ 1 (deep (+ n 1))))
+(defn deep ((n i64)) -> i64 (+ 1 (deep (+ n 1))))
 (deep 0)
 ```
 
@@ -130,7 +130,7 @@
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 ### eval-008 フィールド一覧を名前順で示す
 
@@ -143,6 +143,7 @@
 **入力：**
 
 ```rin
+(defschema Point (struct Point (z i64) (a i64)))
 Point{z: 1 a: 2}.bad
 ```
 
@@ -150,7 +151,7 @@ Point{z: 1 a: 2}.bad
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 ### eval-009 スコープを抜けた名前は候補にしない
 
@@ -170,7 +171,7 @@ Point{z: 1 a: 2}.bad
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 ### eval-010 ソース行とキャレットを表示する
 
@@ -215,7 +216,7 @@ Point{z: 1 a: 2}.bad
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 **期待表示：**
 
@@ -235,8 +236,8 @@ Point{z: 1 a: 2}.bad
 **入力：**
 
 ```rin
-(defn f () (/ 1 0))
-(defn g () (+ 1 (f)))
+(defn f () -> i64 (/ 1 0))
+(defn g () -> i64 (+ 1 (f)))
 
 
 
@@ -256,14 +257,14 @@ Point{z: 1 a: 2}.bad
 **期待表示：**
 
 ```text
-1:12: division by zero [op.arith]
+1:19: division by zero [op.arith]
    |
- 1 | (defn f () (/ 1 0))
-   |            ^
-  in f (at 2:17)
+ 1 | (defn f () -> i64 (/ 1 0))
+   |                   ^
+  in f (at 2:24)
    |
- 2 | (defn g () (+ 1 (f)))
-   |                 ^
+ 2 | (defn g () -> i64 (+ 1 (f)))
+   |                        ^
   in g (at 10:1)
    |
 10 | (g)
@@ -279,7 +280,7 @@ Point{z: 1 a: 2}.bad
 **入力：**
 
 ```rin
-(defn deep (n)
+(defn deep ((n i64)) -> i64
   (fold (fn (acc x) (deep (+ n 1))) 0 [1]))
 (deep 0)
 ```
@@ -324,7 +325,7 @@ Point{z: 1 a: 2}.bad
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 ### eval-016 reverseの走査費用をステップに含める
 
@@ -404,7 +405,7 @@ Point{z: 1 a: 2}.bad
 **入力：**
 
 ```rin
-(defn + (a b) 0)
+(defn + ((a i64) (b i64)) -> i64 0)
 ```
 
 **期待結果：**
@@ -434,15 +435,15 @@ Point{z: 1 a: 2}.bad
 
 主根拠：`[env.isolation]`
 
-初期束縛：`x = 10`
+初期束縛：`x i64 = 10`
 
 **読み込み：**
 
 ```rin
 (def x 1)
-(defn f () (+ x 1))
-(defn invoke (cb) (cb))
-(defn make () (fn () x))
+(defn f () -> i64 (+ x 1))
+(defn invoke ((cb (fn () i64))) -> i64 (cb))
+(defn make () -> (fn () i64) (fn () x))
 ```
 
 **入力：**
@@ -504,3 +505,156 @@ a
 | 上限 | 結果 | 値 |
 |---|---|---|
 | 既定 | 実行時エラー | `—` |
+
+### eval-025 datum の構築と型パターンによる取り出し
+
+主根拠：`[type.datum]`
+
+**入力：**
+
+```rin
+(match '1
+  (i64(n) (+ n 1))
+  (_ 0))
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `2` |
+
+### eval-026 datum の暗黙受け入れと異種値の等値比較
+
+主根拠：`[op.cmp]`
+
+**入力：**
+
+```rin
+(tuple (== '1 1) (== '1 "1") (!= '1 "1"))
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `(tuple true false true)` |
+
+### eval-027 datum の 8 種型パターン網羅
+
+主根拠：`[expr.match]`
+
+**入力：**
+
+```rin
+(defn kind ((d datum)) -> i64
+  (match d
+    (i64(_) 1)
+    (f64(_) 2)
+    (bool(_) 3)
+    (char(_) 4)
+    (text(_) 5)
+    (ident(_) 6)
+    (list(_) 7)
+    (none 8)))
+[(kind '1) (kind '(a b)) (kind 'none)]
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `[1 7 8]` |
+
+### eval-028 any は型式として構文エラー
+
+主根拠：`[type.expr]`
+
+期待規則：`[type.expr]`
+
+**入力：**
+
+```rin
+(defschema Bad (struct Bad (x any)))
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 構文エラー | `—` |
+
+### eval-029 ホスト境界の型不一致は実行時エラー
+
+主根拠：`[type.boundary]`
+
+期待規則：`[type.boundary]`
+
+初期束縛：`x i64 = "bad"`
+
+**入力：**
+
+```rin
+(+ x 1)
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 実行時エラー | `—` |
+
+### eval-030 他モジュールの構造体・バリアント値の構築と照合
+
+主根拠：`[expr.struct]`
+
+**モジュール `game`：**
+
+```rin
+(defschema Element (variant Element (Plain) (Fire) (Heat i64)))
+(defschema HitResult (struct HitResult (dmg i64) (effect text)))
+```
+
+**入力：**
+
+```rin
+(import game)
+(def h game.HitResult { dmg: 10 effect: "burn" })
+(def e game.Element.Fire)
+(def e2 game.Element.Heat(5))
+(tuple
+  h.dmg
+  (match e (game.Element.Fire 1) (game.Element.Plain 0) (game.Element.Heat(n) n))
+  (match e2 (game.Element.Fire 0) (game.Element.Plain 0) (game.Element.Heat(n) n)))
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `(tuple 10 1 5)` |
+
+### eval-031 他モジュールの型名を値の位置に書くと型エラー
+
+主根拠：`[expr.module]`
+
+期待規則：`[expr.module]`
+
+**モジュール `game`：**
+
+```rin
+(defschema HitResult (struct HitResult (dmg i64) (effect text)))
+```
+
+**入力：**
+
+```rin
+(import game)
+game.HitResult
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 型エラー | `—` |

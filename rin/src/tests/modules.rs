@@ -10,9 +10,10 @@ fn modules_import_export_isolation_and_ffi_call_in() {
         .load_module(
             "base",
             r#"
-            (export deal_damage)
-            (defn helper (n) (* n 2))
-            (defn deal_damage (target amount)
+            (defschema Action (struct Action (kind text) (target i64) (amount i64)))
+            (export Action deal_damage)
+            (defn helper ((n i64)) -> i64 (* n 2))
+            (defn deal_damage ((target i64) (amount i64)) -> Action
               Action { kind: "damage" target: target amount: (helper amount) })
             "#,
         )
@@ -22,7 +23,7 @@ fn modules_import_export_isolation_and_ffi_call_in() {
             "ember",
             r#"
             (import base)
-            (defn on_play (target)
+            (defn on_play ((target i64)) -> (list base.Action)
               [(base.deal_damage target 5)])
             "#,
         )
@@ -49,7 +50,7 @@ fn modules_import_export_isolation_and_ffi_call_in() {
         },
     );
     let mod_base = CString::new("base").unwrap();
-    let src_base = CString::new("(defn double (x) (* x 2))").unwrap();
+    let src_base = CString::new("(defn double ((x i64)) -> i64 (* x 2))").unwrap();
     let fn_double = CString::new("double").unwrap();
     unsafe {
         let lr = ffi::rin_load(m, mod_base.as_ptr(), src_base.as_ptr());

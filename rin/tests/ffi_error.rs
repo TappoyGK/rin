@@ -74,7 +74,7 @@ fn kinds_modules_and_borrowed_lifetime() {
         let loaded = rin_load(
             m.0,
             c"mod".as_ptr(),
-            c"(defn fail () (/ 1 0)) (defn good () 42)".as_ptr(),
+            c"(defn fail () -> i64 (/ 1 0)) (defn good () -> i64 42)".as_ptr(),
         );
         assert!(loaded.ok && loaded.value.is_null());
         assert!(rin_last_error(m.0).is_null());
@@ -98,7 +98,10 @@ fn kinds_modules_and_borrowed_lifetime() {
         finish(rin_build(m.0, c"(/ 1 0)".as_ptr()), false);
         assert!((*rin_last_error(m.0)).module.is_null());
         finish(
-            rin_build(m.0, c"(defn fail () (/ 1 0)) (defn good () 42)".as_ptr()),
+            rin_build(
+                m.0,
+                c"(defn fail () -> i64 (/ 1 0)) (defn good () -> i64 42)".as_ptr(),
+            ),
             true,
         );
         assert!(rin_last_error(m.0).is_null());
@@ -126,7 +129,7 @@ fn resource_errors_and_bind_failures_preserve_kind() {
                     depth: 2,
                     ..rin_limits_default()
                 },
-                c"(defn f () (+ 1 (f))) (f)",
+                c"(defn f () -> i64 (+ 1 (f))) (f)",
                 RinErrorKind::TooDeep,
             ),
             (
@@ -150,7 +153,7 @@ fn resource_errors_and_bind_failures_preserve_kind() {
         assert!(rin_text(m.0, c"value".as_ptr()).is_null());
         check_error(m.0, RinErrorKind::TooMuchMemory);
         let v = rin_int(m.0, 1);
-        assert!(!rin_bind(m.0, c"x".as_ptr(), v));
+        assert!(!rin_bind(m.0, c"x".as_ptr(), c"i64".as_ptr(), v));
         check_error(m.0, RinErrorKind::TooMuchMemory);
         rin_drop(m.0, v);
     }
@@ -166,14 +169,17 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
         let missing = [null()];
         let missing_bind_name = [RinBinding {
             name: null(),
+            type_expr: c"i64".as_ptr(),
             value: v,
         }];
         let bad_bind_name = [RinBinding {
             name: bad,
+            type_expr: c"i64".as_ptr(),
             value: v,
         }];
         let missing_bind_val = [RinBinding {
             name: c"x".as_ptr(),
+            type_expr: c"i64".as_ptr(),
             value: null(),
         }];
         // 各経路の前にモジュール内のエラーを記録し、残存していないことを確かめる。
@@ -202,9 +208,11 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
             Box::new(|| rin_call_in(m.0, c"m".as_ptr(), bad, null(), 0).ok),
             Box::new(|| rin_call_in(m.0, c"m".as_ptr(), c"f".as_ptr(), null(), 1).ok),
             Box::new(|| rin_call_in(m.0, c"m".as_ptr(), c"f".as_ptr(), missing.as_ptr(), 1).ok),
-            Box::new(|| rin_bind(m.0, null(), v)),
-            Box::new(|| rin_bind(m.0, bad, v)),
-            Box::new(|| rin_bind(m.0, c"x".as_ptr(), null())),
+            Box::new(|| rin_bind(m.0, null(), c"i64".as_ptr(), v)),
+            Box::new(|| rin_bind(m.0, bad, c"i64".as_ptr(), v)),
+            Box::new(|| rin_bind(m.0, c"x".as_ptr(), null(), v)),
+            Box::new(|| rin_bind(m.0, c"x".as_ptr(), bad, v)),
+            Box::new(|| rin_bind(m.0, c"x".as_ptr(), c"i64".as_ptr(), null())),
         ];
         for (idx, case) in cases.into_iter().enumerate() {
             finish(
@@ -214,7 +222,7 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
             assert!(!case());
             check_error(m.0, RinErrorKind::Host);
             let name = CString::new(format!("x_{idx}")).unwrap();
-            assert!(rin_bind(m.0, name.as_ptr(), v));
+            assert!(rin_bind(m.0, name.as_ptr(), c"i64".as_ptr(), v));
             assert!(rin_last_error(m.0).is_null());
         }
         rin_drop(m.0, v);
@@ -225,13 +233,13 @@ fn all_host_argument_paths_replace_previous_error_and_success_clears_it() {
         finish(rin_load(null_mut(), null(), null()), false);
         finish(rin_call(null_mut(), null(), null(), 0), false);
         finish(rin_call_in(null_mut(), null(), null(), null(), 0), false);
-        assert!(!rin_bind(null_mut(), null(), null()));
+        assert!(!rin_bind(null_mut(), null(), null(), null()));
     }
 }
 
 #[test]
 fn ffi_text_matches_rust_display() {
-    let source = "(defn f () (/ 1 0)) (f)";
+    let source = "(defn f () -> i64 (/ 1 0)) (f)";
     let expected = rin::eval(source).unwrap_err();
     let source = CString::new(source).unwrap();
     unsafe {
@@ -258,12 +266,12 @@ fn ffi_text_matches_rust_display() {
 fn hints_are_in_ffi_message_and_text_with_original_rule() {
     for (source, expected_message, rule) in [
         (
-            "(defn fail (damage) damge) (fail 1)",
+            "(defn fail ((damage i64)) -> i64 damge) (fail 1)",
             "unknown name 'damge'; did you mean 'damage'?",
             "expr.name",
         ),
         (
-            "Point{z: 1 a: 2}.bad",
+            "(defschema Point (struct Point (z i64) (a i64))) Point{z: 1 a: 2}.bad",
             "Point has no field 'bad'; fields: a, z",
             "expr.field",
         ),
@@ -324,7 +332,10 @@ fn foreign_and_non_owned_handles_are_rejected_in_struct_set_and_drop() {
         rin_drop(m2.0, got2);
 
         // RinEvalResult.value（所有ハンドルではない）を rin_struct_set / rin_drop に渡しても安全に拒否・無視される
-        let eval_res = rin_build(m1.0, c"Point{x: 7}".as_ptr());
+        let eval_res = rin_build(
+            m1.0,
+            c"(defschema Point (struct Point (x i64))) Point{x: 7}".as_ptr(),
+        );
         assert!(eval_res.ok && !eval_res.value.is_null());
         let eval_mut = eval_res.value as *mut RinValue;
         assert!(!rin_struct_set(m1.0, eval_mut, c"x".as_ptr(), v1));

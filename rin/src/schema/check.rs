@@ -112,7 +112,19 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
         }
         let base = path.len();
         match ty {
-            TypeExpr::Any => {}
+            TypeExpr::Datum => match value {
+                Value::Int(_)
+                | Value::Float(_)
+                | Value::Bool(_)
+                | Value::Char(_)
+                | Value::Text(_)
+                | Value::Ident(_)
+                | Value::None => {}
+                Value::List(xs) => {
+                    work.push(Task::List(xs.iter(), ty, base, 0));
+                }
+                _ => return mismatch("datum", value.type_name(), &path),
+            },
             TypeExpr::Void => expect_match(matches!(value, Value::Void), "void", value, &path)?,
             TypeExpr::I64 => expect_match(matches!(value, Value::Int(_)), "i64", value, &path)?,
             TypeExpr::F64 => expect_match(matches!(value, Value::Float(_)), "f64", value, &path)?,

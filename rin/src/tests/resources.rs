@@ -6,7 +6,7 @@ use crate::{
 #[test]
 fn recursive_defn_and_step_limit() {
     let src = r#"
-        (defn loop_forever (n) (loop_forever (+ n 1)))
+        (defn loop_forever ((n i64)) -> i64 (loop_forever (+ n 1)))
         (loop_forever 0)
     "#;
     let err = eval_with(
@@ -33,11 +33,11 @@ fn step_limit_error_reports_exact_span() {
     assert_eq!(e1.kind, ErrorKind::TooManySteps);
     assert_eq!((e1.at.line, e1.at.col), (1, 9));
 
-    let e2 = eval_with("(+ 1\n   zzz)", &[], limits(2)).unwrap_err();
+    let e2 = eval_with("(let (zzz 2) (+ 1\n   zzz))", &[], limits(3)).unwrap_err();
     assert_eq!(e2.kind, ErrorKind::TooManySteps);
-    assert_eq!((e2.at.line, e2.at.col), (1, 4));
+    assert_eq!((e2.at.line, e2.at.col), (1, 15));
 
-    let e3 = eval_with("(def a 1) (def a (+ a 1)) a", &[], limits(1)).unwrap_err();
+    let e3 = eval_with("(def a 1) (def b (+ a 1)) b", &[], limits(1)).unwrap_err();
     assert_eq!(e3.kind, ErrorKind::TooManySteps);
     assert_eq!((e3.at.line, e3.at.col), (1, 8));
 }
@@ -49,7 +49,9 @@ fn arena_allocator_reuses_slots_across_many_calls() {
     {
         let mut machine = Builder::new(Limits::default(), &mut arena);
         machine
-            .eval("(defn sum_double (n) (fold + 0 (map (fn (x) (* x 2)) (range 0 n))))")
+            .eval(
+                "(defn sum_double ((n i64)) -> i64 (fold + 0 (map (fn (x) (* x 2)) (range 0 n))))",
+            )
             .unwrap();
         let baseline = machine.live_bytes();
 
@@ -85,10 +87,11 @@ fn error_paths_do_not_leak_pool_slots() {
     machine
         .eval(
             r#"
-            (defn boom (n)
+            (defschema Card (struct Card (cost i64)))
+            (defn boom ((n i64)) -> i64
               (let (tmp (range 0 10))
                 (if (== n 0) (/ tmp[0] 0) (boom (- n 1)))))
-            (defn loop_step (n)
+            (defn loop_step ((n i64)) -> i64
               (let (tmp [1 2 3])
                 (loop_step (+ n (len tmp)))))
             "#,
@@ -108,7 +111,7 @@ fn error_paths_do_not_leak_pool_slots() {
         let with_err = machine
             .eval("(with Card { cost: 1 } { missing: 2 })")
             .unwrap_err();
-        assert_eq!(with_err.kind, ErrorKind::Runtime);
+        assert_eq!(with_err.kind, ErrorKind::Type);
         assert_eq!(machine.live_bytes(), baseline);
     }
 }
@@ -121,12 +124,12 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
         Limits {
             steps: 100_000,
             depth: 200,
-            memory_bytes: 4000,
+            memory_bytes: 8192,
         },
         &mut alloc,
     );
     m.eval(r#"(def s "hello")"#).unwrap();
-    let big_list = format!("[{}]", vec!["s"; 200].join(" "));
+    let big_list = format!("[{}]", vec!["s"; 400].join(" "));
     let err = m.eval(&big_list).unwrap_err();
     assert_eq!(err.kind, ErrorKind::TooMuchMemory);
     assert_eq!(m.eval("s").unwrap(), Value::text("hello"));
@@ -137,11 +140,11 @@ fn memory_limit_does_not_double_free_shared_values_or_modules() {
         Limits {
             steps: 100_000,
             depth: 200,
-            memory_bytes: 4096,
+            memory_bytes: 8192,
         },
         &mut alloc2,
     );
-    let big_mod = format!(r#"(def s "{}")"#, "a".repeat(5000));
+    let big_mod = format!(r#"(def s "{}")"#, "a".repeat(9000));
     let merr = m2.load_module("m", &big_mod).unwrap_err();
     assert_eq!(merr.kind, ErrorKind::TooMuchMemory);
     m2.eval(r#"(def t "xyz")"#).unwrap();
@@ -180,13 +183,13 @@ fn fn_and_defn_body_last_expr_counts_step() {
     };
 
     assert_eq!(
-        eval_with("(defn f (x) x) (f 1)", &[], lim(4))
+        eval_with("(defn f ((x i64)) -> i64 x) (f 1)", &[], lim(4))
             .unwrap_err()
             .kind,
         ErrorKind::TooManySteps
     );
     assert_eq!(
-        eval_with("(defn f (x) x) (f 1)", &[], lim(5)).unwrap(),
+        eval_with("(defn f ((x i64)) -> i64 x) (f 1)", &[], lim(5)).unwrap(),
         Value::Int(1)
     );
 
@@ -199,7 +202,7 @@ fn fn_and_defn_body_last_expr_counts_step() {
         Value::Int(1)
     );
 
-    let chain = "(defn f () 2) (defn g () (f)) (g)";
+    let chain = "(defn f () -> i64 2) (defn g () -> i64 (f)) (g)";
     assert_eq!(
         eval_with(chain, &[], lim(6)).unwrap_err().kind,
         ErrorKind::TooManySteps

@@ -211,7 +211,7 @@ fn declarations(root: &Expr) -> u8 {
     let mut work = vec![root];
     while let Some(expr) = work.pop() {
         match &expr.kind {
-            ExprKind::Def { name, .. } => mask |= test_name(name.as_str()),
+            ExprKind::Def(d) => mask |= test_name(d.name.as_str()),
             ExprKind::Defn(d) => mask |= test_name(d.name.as_str()),
             _ => {}
         }
@@ -280,7 +280,7 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
                     .params
                     .as_slice()
                     .iter()
-                    .fold(bound, |mask, name| mask | test_name(name.as_str()));
+                    .fold(bound, |mask, param| mask | test_name(param.name.as_str()));
                 work.extend(f.body.as_slice().iter().map(|e| (e, scope)));
             }
             ExprKind::Defn(d) => {
@@ -288,7 +288,7 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
                     .params
                     .as_slice()
                     .iter()
-                    .fold(bound, |mask, name| mask | test_name(name.as_str()));
+                    .fold(bound, |mask, param| mask | test_name(param.name.as_str()));
                 work.extend(d.body.as_slice().iter().map(|e| (e, scope)));
             }
             ExprKind::Match { scrutinee, arms } => {
@@ -299,6 +299,7 @@ fn validate(root: &Expr, in_test: bool, bound: u8) -> Result<(), Error> {
                         Pattern::Some(name)
                         | Pattern::Ok(name)
                         | Pattern::Err(name)
+                        | Pattern::DatumType { binding: name, .. }
                         | Pattern::Variant { binding: name, .. } => {
                             name.as_ref().map(|s| s.as_str())
                         }

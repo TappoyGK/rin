@@ -34,9 +34,10 @@ Rin は次のものを含まない。
 
 ### 2.2 要件を表す言い方
 
-- 「〜は字句エラーである」：字句解析が入力を受け付けず、位置と理由を返す。
-- 「〜は構文エラーである」：構文解析またはコンパイルが入力を受け付けず、位置と理由を返す。
-- 「〜は実行時エラーである」：評価器が実行を中断し、位置と理由を返す。
+- 「〜は字句エラーである」：字句解析が入力を受け付けず、位置と理由を返す（`ErrorKind::Lex`）。
+- 「〜は構文エラーである」：構文解析またはコンパイルが入力を受け付けず、位置と理由を返す（`ErrorKind::Parse`）。
+- 「〜は型エラーである」：静的型検査が入力を受け付けず、位置と理由を返す（`ErrorKind::Type`）。
+- 「〜は実行時エラーである」：評価器が実行を中断し、位置と理由を返す（`ErrorKind::Runtime`）。
 
 ## 3. 字句
 
@@ -61,7 +62,7 @@ Rin は次のものを含まない。
 **[src.keywords]** 次の語は予約語または特殊リテラルである。
 
 ```text
-def defn fn let if when match with import export
+def defn defschema fn let if when match with import export
 quote quasiquote unquote unquote_splicing
 tuple field index variant struct
 true false none some ok err inf nan
@@ -105,23 +106,32 @@ true false none some ok err inf nan
 
 ## 4. 値と型
 
-**[type.dynamic]** Rin は動的型付け言語であり、すべての値は自身の型を保持する。
+**[type.static]** Rin は静的型付け言語であり、ソースの実行前に双方向型検査を行う。未実行の分岐や関数本体を含め、型不一致・未定義名・非網羅な `match`・到達不能な `match` 枝は実行前に型エラー（`ErrorKind::Type`）として報告する。型検査の作業量とメモリ使用量の制限は `[eval.support-cost]` および `[eval.limits]` に従う。
 
 **[type.numeric]** 数値型は 64 ビット符号付き整数 `i64` と 64 ビット浮動小数点数 `f64` の 2 種類のみとする。整数と浮動小数点数の暗黙の変換は行わない。
 
 **[type.builtin]** 組み込みの値と型は次のとおりである。
 
-- `void`：値を持たない結果（`def`、`defn`、`when` の戻り値）
+- `void`：値を持たない結果（`def`、`defn`、`defschema`、`when` の戻り値）
 - `i64`、`f64`、`bool`、`char`、`text`
 - `ident`：不変の識別子名値（UTF-8 文字列と同じ内部表現。`'foo` のように表記する）
+- `datum`：動的なデータ表現（`i64`・`f64`・`bool`・`char`・`text`・`ident`・`none`・要素が `datum` の `list`）。詳細は `[type.datum]` に従う
 - `list`：コンスセルからなる不変の連結リスト `[e1 e2 ...]` / `(list e1 e2 ...)`（`cons`、`car`、`cdr`、`len`、`is_empty` は O(1) で末尾を共有する）
 - `array`：連続メモリ上に配置された固定長配列（`list->array` で生成し、`arr[i]`・`len`・`get` を O(1) で実行でき、FFI 境界との受け渡しに適する）
 - `tuple`：2 要素以上の組 `(tuple e1 e2 ...)`
-- `struct`：名前と名前付きフィールドを持つ複合値 `Name { field: expr ... }` / `(struct Name (field expr) ...)`
-- `variant`：型名とバリアント名（および任意のペイロード 1 つ）を持つ値 `Type.Variant` / `Type.Variant(expr)` / `(variant Type Variant)` / `(variant Type Variant expr)`
+- `struct`：名前と名前付きフィールドを持つ複合値 `Name { field: expr ... }` / `(struct Name (field expr) ...)`（事前に `defschema` で定義する）
+- `variant`：型名とバリアント名（および任意のペイロード 1 つ）を持つ値 `Type.Variant` / `Type.Variant(expr)` / `(variant Type Variant)` / `(variant Type Variant expr)`（事前に `defschema` で定義する）
 - `option`：`none` または `some(expr)` / `(some expr)`
 - `result`：`ok(expr)` / `(ok expr)` または `err(expr)` / `(err expr)`
 - `fn`：関数値（ユーザー定義関数・無名関数・組み込み関数）
+
+**[type.datum]** `datum` は `quote` / `quasiquote` が構築する動的データ値（`i64`・`f64`・`bool`・`char`・`text`・`ident`・`none`・要素が `datum` の `list`）を表す。期待型が `datum` である位置（`quasiquote` の `,expr`、関数の実引数、関数の戻り値、`(list datum)` の要素、片側が `datum` の `==` / `!=`）では、6 基本型（`i64`・`f64`・`bool`・`char`・`text`・`ident`）・`none`・および要素が `datum` へ変換可能な `list` を暗黙に受け入れる。また期待型が `(list datum)` の位置では、基本型の `list` も暗黙に受け入れる。`some(...)`・`tuple`・`struct`・`variant`・`array`・`result`・`fn`・`void` は `datum` へ暗黙に変換できず型エラーである。`datum` の大小比較（`<` 等）やテンプレート埋め込みは、`match` の型パターンで具象型を取り出したあとに行う。
+
+**[type.defschema]** `(defschema Name SchemaBody)` は、大文字始まりの名前 `Name` で構造体・開放構造体・バリアント型を定義する。`SchemaBody` に既存の型名（`Other` または `mod.Other`）を書いた場合は、型エイリアスではなく同じ定義を持つ別の固有型 `Name` を定義する（型エイリアス構文は置かない）。型名は値とは別の名前空間に属し、トップレベルにのみ記述できる（関数本体や式の中に書いた場合は構文エラー）。同一評価単位内での相互再帰と前方参照を許し、同一環境内の重複定義・フィールド名重複・循環する別名定義・未定義型の参照は型エラーである。モジュール内では `(export TypeName)` で型を公開でき（`export` 省略時はモジュール内の全 `defschema` も公開する）、読み込み段階の評価が失敗したときは追加した `defschema` も取り消される。`open_struct` で定義した構造体では、スキーマに宣言されたフィールドのみを参照・更新できる。
+
+**[type.expr]** 型式は `void`・`i64`・`f64`・`bool`・`char`・`text`・`ident`・`datum`、名前付き型（`Name` / `mod.Name`）、および `(list T)`・`(array T)`・`(option T)`・`(result T E)`・`(tuple T1 T2 ...)`・`(fn (P1 P2 ...) R)` とする。上記の形に当てはまらない型式（`any`、未知の小文字の型名、未知の型構築子を含む）は、`[type.expr]` の構文エラーである。名前付き型 `Name` が定義されていない場合は `[type.defschema]` の型エラー、`mod.Name` がモジュール `mod` の公開した型にない場合は `[expr.module]` の型エラーである。
+
+**[type.boundary]** ホスト境界（`Builder::bind` / `bind_val` / `rin_bind` / `rin_bind_resolved`、`Machine::eval_with` / `eval_with_vals` / `rin_eval_with` / `rin_eval_with_resolved`、`Machine::call` / `call_in` / `rin_call` / `rin_call_in`）でホストから渡された値は、宣言された型式・事前解決済み型ハンドル・または関数仮引数型と実行時に照合する。型式に `fn` 型を含めること（ホストから関数値を渡せない）、無効な型ハンドルの使用、引数の個数不一致、または実行時の値が型と一致しない場合は `[type.boundary]` の実行時エラー（位置は `0:0`）を返す。
 
 **[value.display]** 値の表示（`Value`・`ValueRef` の `Display`）は型ごとに次の形式とし、関数値・`void`・`array`・`f64`（および `f64` を含む値）を除くデータ値はそのまま Rin のソースとして読み直したときに元の値と等しくなる表現を用いる。
 
@@ -145,29 +155,29 @@ true false none some ok err inf nan
 
 **[src.syntax]** 式は本仕様の構文に従う。必要なトークン・識別子の欠落、閉じていない区切り、予期しないトークン、空の `()` は構文エラーである。個別の診断規則がない構文の不一致にはこの規則名を付ける。
 
-**[expr.program]** プログラムは 0 個以上のトップレベル項目（宣言または式）の並びである。宣言は `def`・`defn`・`import`・`export` の 4 形式を指す。先頭から順に評価し、最後の項目の値をプログラムの結果とする。項目が 0 個のときは `void` を返す。本仕様で「トップレベル」とは、プログラム・モジュール・`deftest` 本体の最外側の並びを指す。
+**[expr.program]** プログラムは 0 個以上のトップレベル項目（宣言または式）の並びである。宣言は `def`・`defn`・`defschema`・`import`・`export` の 5 形式を指す。先頭から順に評価し、最後の項目の値をプログラムの結果とする。項目が 0 個のときは `void` を返す。本仕様で「トップレベル」とは、プログラム・モジュール・`deftest` 本体の最外側の並びを指す。
 
 **[expr.body]** `defn`・`fn`・`let`・`when` の本体と `match` の各枝には、1 つ以上の式が必要である。空の本体は構文エラーである。
 
-**[expr.name]** 名前の参照・ホストからの関数呼び出しでは、名前が現在の環境で解決できなければ実行時エラーである。
+**[expr.name]** ソース中の名前参照が現在の環境で解決できない場合は型エラーである。ホストからの直接関数呼び出し（`call` / `call_in`）で関数が解決できない場合は実行時エラーである。
 
 ### 5.1 定義と束縛
 
-**[expr.def]** `(def name expr)` は、`expr` を評価した値を現在のトップレベル環境（大域環境またはモジュール環境）の名前 `name` に束縛し、`void` を返す。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。同じ環境に同名の束縛がある場合、組み込み名と同名の場合、または大域環境において読み込み済みのモジュール名（`import` の有無を問わない）と同名の場合は、`[expr.def]` の実行時エラーである。ホスト API（`Builder::bind` / `bind_val` / `rin_bind`）による大域束縛も同じ重複・衝突規則に従う（位置は `0:0`）。読み込み段階のトップレベル評価（`Builder::eval` / `rin_build`）が途中で失敗した場合、その評価中に追加した大域束縛（`def`・`defn`・`import`）は追加のメモリ確保なしで取り消される（永続領域への追記は `[eval.limits]` に従う）。`let`・仮引数・パターン束縛・`eval_with` の初期束縛など局所束縛によるシャドーイングは許可する。
+**[expr.def]** `(def name expr)` または型注釈付きの `(def name TypeExpr expr)` は、`expr` を評価した値を現在のトップレベル環境（大域環境またはモジュール環境）の名前 `name` に束縛し、`void` を返す。型注釈を省略した場合は `expr` から型を推論し、型が確定しない場合（例：`(def x [])`）または注釈と `expr` の型が一致しない場合は型エラーである。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。同じ環境に同名の束縛がある場合、組み込み名と同名の場合、または大域環境において読み込み済みのモジュール名（`import` の有無を問わない）と同名の場合は、`[expr.def]` の実行時エラーである。ホスト API（`Builder::bind` / `bind_val` / `rin_bind` / `rin_bind_resolved`）による大域束縛も同じ重複・衝突規則に従う（位置は `0:0`）。読み込み段階のトップレベル評価（`Builder::eval` / `rin_build`）が途中で失敗した場合、その評価中に追加した大域束縛（`def`・`defn`・`defschema`・`import`）は追加のメモリ確保なしで取り消される（永続領域への追記は `[eval.limits]` に従う）。`let`・仮引数・パターン束縛・`eval_with` の初期束縛など局所束縛によるシャドーイングは許可する。
 
-**[expr.defn]** `(defn name (p1 p2 ...) body...)` は、仮引数 `p1, p2, ...` と本体 `body...` を持つ関数を定義し、現在のトップレベル環境の名前 `name` に束縛して `void` を返す。`defn` で定義した関数は、自身を含む大域環境・モジュール環境の名前を参照して再帰呼び出しできる。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。`[expr.def]` と同じく、同一環境での同名再定義・組み込み名の上書き・大域環境における読み込み済みモジュール名との衝突は、`[expr.defn]` の実行時エラーである。
+**[expr.defn]** `(defn name ((p1 T1) (p2 T2) ...) -> RetType body...)` は、型注釈付きの仮引数と戻り値型・本体 `body...` を持つ関数を定義し、現在のトップレベル環境の名前 `name` に束縛して `void` を返す。すべての仮引数型と戻り値型 `-> RetType` は必須であり、省略した場合は型エラーである。`defn` で定義した関数は、自身を含む大域環境・モジュール環境の名前を参照して再帰呼び出しできる。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。`[expr.def]` と同じく、同一環境での同名再定義・組み込み名の上書き・大域環境における読み込み済みモジュール名との衝突は、`[expr.defn]` の実行時エラーである。
 
-**[expr.fn]** `(fn (p1 p2 ...) body...)` は、現在のレキシカル環境を捕捉する無名関数値を返す。本体は 1 つ以上の式を持ち、順に評価して最後の式の値を返す。
+**[expr.fn]** `(fn (p1 p2 ...) body...)` または型注釈付きの `(fn ((p1 T1) ...) -> RetType body...)`（各仮引数の型注釈と `-> RetType` はそれぞれ任意）は、現在のレキシカル環境を捕捉する無名関数値を返す。型注釈を省略した仮引数・戻り値型は周囲の期待型や本体から双方向に推論する。本体は 1 つ以上の式を持ち、順に評価して最後の式の値を返す。
 
 **[expr.let]** `(let (x1 e1 x2 e2 ...) body...)` は、先頭から順に `e1, e2, ...` を評価して `x1, x2, ...` に束縛した局所環境で `body...` を評価し、最後の式の値を返す。
 
-**[expr.module]** `(import mod_name)` は、ホストにより事前に読み込まれたモジュール `mod_name` を現在の環境に束縛し、`mod_name.symbol` の形式で公開シンボルを参照できるようにする（未読込のモジュールは実行時エラー）。同一環境で同じモジュール `mod_name` を再度 `import` する操作は無操作として許可するが、既存の値束縛または組み込み名と衝突する場合は `[expr.module]` の実行時エラーである。ホストによるモジュール読み込み（`Builder::load_module` / `rin_load`）において、読み込み済みのモジュール名を指定した場合、または既存の大域束縛・組み込み名と同名の場合は `[expr.module]` の実行時エラーである（位置は `0:0`）。読み込みに失敗したモジュールは登録されないため、同じ名前で再試行できる。`(export s1 s2 ...)` をモジュール内で記述した場合、指定されたシンボルのみが公開される（省略時はモジュール内の全 `def` / `defn` が公開される）。複数の `export` の指定は合わせて扱い、同じシンボルを同一の `export` 内または複数の `export` にまたがって重複して指定した場合は、1 回指定したのと同じとする。`import`・`export` はトップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。
+**[expr.module]** `(import mod_name)` は、ホストにより事前に読み込まれたモジュール `mod_name` を現在の環境に束縛し、`mod_name.symbol` の形式で公開シンボルを参照できるようにする（未読込のモジュールは実行時エラー）。同一環境で同じモジュール `mod_name` を再度 `import` する操作は無操作として許可するが、既存の値束縛または組み込み名と衝突する場合は `[expr.module]` の実行時エラーである。ホストによるモジュール読み込み（`Builder::load_module` / `rin_load`）において、読み込み済みのモジュール名を指定した場合、または既存の大域束縛・組み込み名と同名の場合は `[expr.module]` の実行時エラーである（位置は `0:0`）。読み込みに失敗したモジュールは登録されないため、同じ名前で再試行できる。`(export s1 s2 ...)` をモジュール内で記述した場合、指定されたシンボル（値・関数・`defschema` 型）のみが公開される（省略時はモジュール内の全 `def` / `defn` / `defschema` が公開される）。複数の `export` の指定は合わせて扱い、同じシンボルを同一の `export` 内または複数の `export` にまたがって重複して指定した場合は、1 回指定したのと同じとする。`import`・`export` はトップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。
 
-未定義の公開シンボルの指定、非公開・存在しないシンボルへのアクセス、モジュール外の `export` は `[expr.module]` の実行時エラーである。実行の段階では `[env.frozen]` と `[env.modules]` に従う。
+未定義の公開シンボルの指定、非公開・存在しないシンボルへのアクセス（ソース中では型エラー、ホストの `call_in` では実行時エラー）、モジュール外の `export` は `[expr.module]` のエラーである。実行の段階では `[env.frozen]` と `[env.modules]` に従う。
 
 **[env.phase]** 実行環境には、読み込みの段階と実行の段階がある。環境は読み込みの段階で作られ、凍結の操作によって実行の段階に移る。実行の段階から読み込みの段階には戻れない。読み込みの段階で実行の段階のソース評価（`rin_eval`・`rin_eval_with` 等）を行おうとした場合は、実行時エラーとする。定義済み関数の直接呼び出しは、ホスト API が許可する限りどちらの段階でも行える。
 
-**[env.frozen]** 実行の段階で評価するソースに `def`、`defn`、`export`、`import` が含まれる場合は、位置（トップレベルか式の中か）によらずこの規則名による構文エラーとする。この判定は未実行の分岐や関数本体を含めて評価の前に行う。そのため、エラーになったソースは一部も実行されない。実行の段階でホストから大域束縛の追加・変更、モジュールの読み込み、または読み込みの段階の評価を行おうとした場合は、実行時エラーとする。実行の段階の評価は、大域環境と読み込み済みのモジュールを変更しない。
+**[env.frozen]** 実行の段階で評価するソースに `def`、`defn`、`defschema`、`export`、`import` が含まれる場合は、位置（トップレベルか式の中か）によらずこの規則名による構文エラーとする。この判定は未実行の分岐や関数本体を含めて評価の前に行う。そのため、エラーになったソースは一部も実行されない。実行の段階でホストから大域束縛の追加・変更、モジュールの読み込み、または読み込みの段階の評価を行おうとした場合は、実行時エラーとする。実行の段階の評価は、大域環境と読み込み済みのモジュールを変更しない。
 
 **[env.modules]** 実行の段階のモジュール外の評価では、凍結した時点で読み込まれているすべてのモジュールの公開シンボルを、`import` なしで `mod_name.symbol` の形式で参照できる（同名の局所変数・初期束縛がある場合は `[env.isolation]` の優先順位に従う）。読み込みの段階でのモジュール間の `import` は、`[expr.module]` のとおりとする。
 
@@ -177,13 +187,13 @@ true false none some ok err inf nan
 
 ### 5.2 分岐とパターンマッチ
 
-**[expr.condition]** `if` と `when` の条件は `bool` でなければならない。条件の型不一致にはこの規則名を付ける。
+**[expr.condition]** `if` と `when` の条件は `bool` でなければならない。条件の型不一致は型エラーとし、この規則名を付ける。
 
-**[expr.if]** `(if cond then_expr else_expr)` は、`cond` を評価する。`bool` 以外の値は実行時エラーである。`true` なら `then_expr` のみを、`false` なら `else_expr` のみを評価して返す。第 3 引数（`else_expr`）は省略できない。
+**[expr.if]** `(if cond then_expr else_expr)` は、`cond` を評価する。`cond` が `bool` 型でない場合は `[expr.condition]` の型エラー、`then_expr` と `else_expr` の型が一致しない場合は `[expr.if]` の型エラーである。`true` なら `then_expr` のみを、`false` なら `else_expr` のみを評価して返す。第 3 引数（`else_expr`）は省略できない。
 
 **[expr.when]** `(when cond body...)` は、`cond` が `true` のときのみ `body...` を順に評価し、つねに `void` を返す。
 
-**[expr.match]** `(match scrutinee (pat1 body1...) (pat2 body2...) ...)` は、`scrutinee` を評価し、上から順にパターンと照合する。最初に一致した枝の `body...` を、パターンが束縛した変数を含む環境で評価して返す。いずれの枝にも一致しない場合は実行時エラーである。
+**[expr.match]** `(match scrutinee (pat1 body1...) (pat2 body2...) ...)` は、`scrutinee` を評価し、上から順にパターンと照合する。最初に一致した枝の `body...` を、パターンが束縛した変数を含む環境で評価して返す。パターンの型が `scrutinee` と一致しない場合、各枝の戻り値型が一致しない場合、すべての取り得る値を網羅していない場合（`variant` 全ケース、`option` の `none` と `some`、`result` の `ok` と `err`、`bool` の `true` と `false`、`datum` の 8 種、または `_`/変数による受け皿がない場合）、および先行する枝によって到達不能な枝がある場合は型エラーである。
 
 **[pat.kinds]** パターンには次のものを書ける。
 
@@ -191,53 +201,54 @@ true false none some ok err inf nan
 - `name`（小文字始まり）：任意の値に一致し、`name` に束縛する
 - リテラル：整数、`true` / `false`、文字、文字列、`'ident`（`ident` 値に一致）
 - `none`、`some(name)`、`ok(name)`、`err(name)`（`name` には `_` も書ける）
-- `Type.Variant`、`Type.Variant(name)`
+- `datum` 型パターン：`i64(name)`、`f64(name)`、`bool(name)`、`char(name)`、`text(name)`、`ident(name)`、`list(name)`（`list(name)` の `name` は `(list datum)` 型に束縛。`none` と合わせた 8 種で `datum` を網羅する）
+- `Type.Variant`、`Type.Variant(name)`、およびモジュール修飾の `mod.Type.Variant`、`mod.Type.Variant(name)`
 
 ### 5.3 データ構築・アクセス・不変更新
 
-**[expr.list]** `[e1 e2 ...]` は、各要素を左から評価したリストを返す。正規 S 式形式は `(list e1 e2 ...)` である。
+**[expr.list]** `[e1 e2 ...]` は、各要素を左から評価したリストを返す。正規 S 式形式は `(list e1 e2 ...)` である。要素の型が一致しない場合は型エラーである（期待型が `(list datum)` の場合は `[type.datum]` に従う）。
 
 **[expr.tuple]** `(tuple e1 e2 ...)` は、2 要素以上のタプルを構築する。0 要素または 1 要素の `(tuple)` / `(tuple e1)` は構文エラーである。
 
-**[expr.struct]** 先頭が大文字の識別子に `{` が続く `Name { f1: e1 f2: e2 ... }`、または正規 S 式形式 `(struct Name (f1 e1) (f2 e2) ...)` は、構造体値を構築する。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
+**[expr.struct]** 先頭が大文字の識別子（またはモジュール修飾の `mod.Name`）に `{` が続く `Name { f1: e1 f2: e2 ... }` / `mod.Name { f1: e1 f2: e2 ... }`、または正規 S 式形式 `(struct Name (f1 e1) (f2 e2) ...)` / `(struct mod.Name (f1 e1) (f2 e2) ...)` は、`defschema` で定義された構造体値を構築する。未定義型・存在しないフィールド・必須フィールドの欠落・フィールド値の型不一致は型エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
 
-**[expr.variant]** 先頭が大文字の識別子に `.` とバリアント名が続く `Type.Variant`、隣接した `(` を伴う `Type.Variant(e)`、または正規 S 式形式 `(variant Type Variant)` / `(variant Type Variant e)` は、バリアント値を構築する。
+**[expr.variant]** 先頭が大文字の識別子（またはモジュール修飾の `mod.Type`）に `.` とバリアント名が続く `Type.Variant` / `mod.Type.Variant`、隣接した `(` を伴う `Type.Variant(e)` / `mod.Type.Variant(e)`、または正規 S 式形式 `(variant Type Variant)` / `(variant mod.Type Variant)` / `(variant Type Variant e)` / `(variant mod.Type Variant e)` は、`defschema` で定義されたバリアント値を構築する。未定義型・存在しないケース・ペイロードの有無や型の不一致は型エラーである。
 
-**[expr.field]** `expr.field` または正規 S 式形式 `(field expr field)` は、構造体値からフィールド `field` の値を読む。構造体でない場合、または存在しないフィールドを指定した場合は実行時エラーである。
+**[expr.field]** `expr.field` または正規 S 式形式 `(field expr field)` は、構造体値からフィールド `field` の値を読む。構造体でない場合、または存在しないフィールド（`open_struct` で宣言されていないフィールドを含む）を指定した場合は型エラーである。
 
-**[expr.index]** `expr[index]`（`[` は直前に隣接）または正規 S 式形式 `(index expr index)` は、リスト・配列・`text` から `i64` 型の添字 `index` の要素を読む（`text` は Unicode スカラー値単位で `char` を返す）。対象がこれらの型でない場合、`index` が `i64` でない場合、負または要素数以上の場合は実行時エラーである。
+**[expr.index]** `expr[index]`（`[` は直前に隣接）または正規 S 式形式 `(index expr index)` は、リスト・配列・`text` から `i64` 型の添字 `index` の要素を読む（`text` は Unicode スカラー値単位で `char` を返す）。対象がこれらの型でない場合や `index` が `i64` でない場合は型エラー、添字が負または要素数以上の場合は実行時エラーである。
 
-**[expr.with]** `(with target { f1: e1 ... })` または正規 S 式形式 `(with target (f1 e1) ...)` は、構造体 `target` の指定フィールドのみを新しい値で置き換えた構造体の複製を返す。`target` が構造体でない場合、または存在しないフィールドを含む場合は実行時エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
+**[expr.with]** `(with target { f1: e1 ... })` または正規 S 式形式 `(with target (f1 e1) ...)` は、構造体 `target` の指定フィールドのみを新しい値で置き換えた構造体の複製を返す。`target` が構造体でない場合、存在しないフィールドを含む場合、または更新値の型がフィールド型と一致しない場合は型エラーである。同じフィールド名を複数回書いた場合は、すべての式を評価し、最後の値が有効になる。
 
-**[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードは `ident` 値、数値（`inf` / `nan` を含む）・`true` / `false` / `none`・文字・文字列はその値、`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。`datum` の中にテンプレート埋め込み（`"..."` / `"""..."""` 内の `${...}`）は書けず、構文エラーである。
+**[expr.quote]** `'datum` または `(quote datum)` は、式を評価せずデータ値として返す。識別子・構文キーワードの quote は `ident` 型となり、それ以外（数値・`inf` / `nan`・`true` / `false` / `none`・文字・文字列・リスト）は `datum` 型となる。`(a b ...)` は要素のリスト、`()` は空リスト `[]` となる。糖衣構文は正規 S 式（`[a b]` → `(list a b)`、`a.b` → `(field a b)`、`xs[i]` → `(index xs i)`、`some(x)` / `ok(x)` / `err(x)` → `(some x)` / `(ok x)` / `(err x)`、`Type.Variant` / `Type.Variant(x)` → `(variant Type Variant)` / `(variant Type Variant x)`、`Point { x: 1 }` → `(struct Point (x 1))`、`(with p { x: 1 })` → `(with p (x 1))`）へ正規化してからクォートする。`datum` の中にテンプレート埋め込み（`"..."` / `"""..."""` 内の `${...}`）は書けず、構文エラーである。
 
-**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築するが、深さに応じて `unquote` / `unquote_splicing` を評価する。`quote` と同じく、`datum` の位置にテンプレート埋め込み（`"..."` / `"""..."""` 内の `${...}`）は書けず構文エラーである（`,expr` / `,@expr` 内の式には書ける）。深さは、その位置を囲む `quasiquote` の数から、囲む `unquote` / `unquote_splicing` の数を引いた値とする（どの `quasiquote` にも囲まれていない位置は深さ 0）。`quasiquote` の中の `quote` は深さを変えない（`` `(a '(b ,x)) `` の `,x` は評価される）。評価対象の `quasiquote` の中で、深さ 1 の位置に書いた `,expr` / `(unquote expr)` は `expr` を通常の式として評価して埋め込み、リスト要素位置の深さ 1 に書いた `,@expr` / `(unquote_splicing expr)` は `expr` をリストとして評価して展開する（評価される `expr` の中は深さ 0 になる）。深さ 2 以上の位置、または `quote` の中に書かれた `quasiquote` 内の深さ 1 以上の位置に書いた `unquote` / `unquote_splicing` は評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。深さ 0 の位置（どの `quasiquote` にも囲まれていない位置、および評価される `,expr` / `,@expr` の中を含む）に書いた `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外の深さ 1 で評価される `,@` / `(unquote_splicing ...)` は構文エラーである。リスト要素位置とは `(...)` または `[...]` の直接の要素位置を指し、`'`・`` ` ``・`,`・`,@`・`(unquote ...)`・`some(...)`・構造体フィールド値・添字などの単一オペランド位置は含めない（たとえば深さ 2 の `,,@xs` も構文エラーである）。`,@expr` の評価結果が `list` でない場合は実行時エラーである。
+**[expr.quasiquote]** `` `datum `` または `(quasiquote datum)` は、`quote` と同様にデータ値を構築し、結果の型は `datum` となる。深さに応じて `unquote` / `unquote_splicing` を評価する。`quote` と同じく、`datum` の位置にテンプレート埋め込み（`"..."` / `"""..."""` 内の `${...}`）は書けず構文エラーである（`,expr` / `,@expr` 内の式には書ける）。深さは、その位置を囲む `quasiquote` の数から、囲む `unquote` / `unquote_splicing` の数を引いた値とする（どの `quasiquote` にも囲まれていない位置は深さ 0）。`quasiquote` の中の `quote` は深さを変えない（`` `(a '(b ,x)) `` の `,x` は評価される）。評価対象の `quasiquote` の中で、深さ 1 の位置に書いた `,expr` / `(unquote expr)` は `expr` を通常の式として評価して埋め込み（`expr` は `datum` に適合する型でなければならない）、リスト要素位置の深さ 1 に書いた `,@expr` / `(unquote_splicing expr)` は `expr` を `(list datum)` に適合するリストとして評価して展開する（評価される `expr` の中は深さ 0 になる）。深さ 2 以上の位置、または `quote` の中に書かれた `quasiquote` 内の深さ 1 以上の位置に書いた `unquote` / `unquote_splicing` は評価せずデータ（`['unquote ...]` / `['unquote_splicing ...]`）として構築する。深さ 0 の位置（どの `quasiquote` にも囲まれていない位置、および評価される `,expr` / `,@expr` の中を含む）に書いた `,` / `,@` / `(unquote ...)` / `(unquote_splicing ...)`、およびリスト要素位置以外の深さ 1 で評価される `,@` / `(unquote_splicing ...)` は構文エラーである。リスト要素位置とは `(...)` または `[...]` の直接の要素位置を指し、`'`・`` ` ``・`,`・`,@`・`(unquote ...)`・`some(...)`・構造体フィールド値・添字などの単一オペランド位置は含めない（たとえば深さ 2 の `,,@xs` も構文エラーである）。`,expr` が `datum` に適合しない型の場合、または `,@expr` が `(list datum)` に適合するリスト型でない場合は型エラーである。
 
-**[expr.template]** `"..."` または `"""..."""` 内に `${expr}` を含む文字列リテラルはテンプレート式として評価され、各埋め込み式を左から右に 1 回ずつ評価して文字列化し、`text` を返す。埋め込める型は `i64`・`f64`・`bool`・`char`・`text`・`ident` とし、それ以外の型は実行時エラーである。`f64` は `[value.display]` と同じ表記、`char` はその 1 文字、`text` はその内容（インデント除去・自動字下げ・CRLF 正規化などの加工は行わない）、`ident` は先頭の `'` を付けずに名前だけを挿入する。埋め込みのない文字列リテラルは `match` のパターンにも使える。
+**[expr.template]** `"..."` または `"""..."""` 内に `${expr}` を含む文字列リテラルはテンプレート式として評価され、各埋め込み式を左から右に 1 回ずつ評価して文字列化し、`text` を返す。埋め込める型は `i64`・`f64`・`bool`・`char`・`text`・`ident` とし、それ以外の型（`datum` を含む）は型エラーである。`f64` は `[value.display]` と同じ表記、`char` はその 1 文字、`text` はその内容（インデント除去・自動字下げ・CRLF 正規化などの加工は行わない）、`ident` は先頭の `'` を付けずに名前だけを挿入する。埋め込みのない文字列リテラルは `match` のパターンにも使える。
 
 ### 5.4 関数呼び出し
 
-**[expr.call]** `(callee arg1 arg2 ...)` は、`callee` および各引数を左から順に評価して関数を呼び出す。ただし、`and` および `or` は短絡評価を行う（[op.logic]）。呼び出し先が関数でない場合や、ユーザー定義関数の仮引数と実引数の数が一致しない場合は実行時エラーである。
+**[expr.call]** `(callee arg1 arg2 ...)` は、`callee` および各引数を左から順に評価して関数を呼び出す。ただし、`and` および `or` は短絡評価を行う（[op.logic]）。呼び出し先が関数でない場合、仮引数と実引数の個数が一致しない場合、または実引数の型が仮引数の型と一致しない場合は型エラーである。
 
 ## 6. 演算・組み込み関数
 
-**[op.arith]** `+`、`-`、`*`、`/`、`%` は `i64` 同士または `f64` 同士に適用できる。`+` と `*` は 2 個以上の引数を受け取り左から畳み込む。単項 `(- x)` は符号反転を行う。
+**[op.arith]** `+`、`-`、`*`、`/`、`%` は `i64` 同士または `f64` 同士に適用できる。`+` と `*` は 2 個以上の引数を受け取り左から畳み込む。単項 `(- x)` は符号反転を行う。型の不一致や引数の個数の誤りは型エラーである。
 - `i64` の加算・減算・乗算・除算・剰余・符号反転でオーバーフローが生じる場合は実行時エラーである。
 - `i64` の `/` および `%` で右辺が `0` の場合は実行時エラーである。
 
-**[op.cmp]** `==`、`!=` は同じ型の値同士を比較して `bool` を返す。`<`、`<=`、`>`、`>=` は `i64` 同士、`f64` 同士、`text` 同士、または `ident` 同士（Unicode コードポイント辞書順）を比較して `bool` を返す。異なる型同士（`ident` と `text` を含む）の比較は実行時エラーである。
+**[op.cmp]** `==`、`!=` は同じ型の値同士を比較して `bool` を返す。また、片側または両側が `datum` の場合（他方は `datum` へ暗黙に受け入れ可能な型であること）は等値比較を許可し、異なる種類の値同士では `==` が `false`、`!=` が `true` を返す。`<`、`<=`、`>`、`>=` は `i64` 同士、`f64` 同士、`text` 同士、または `ident` 同士（Unicode コードポイント辞書順）を比較して `bool` を返す。異なる型同士（`ident` と `text` を含む）の比較、順序付けできない型（`datum` を含む）の大小比較、または引数の個数誤りは型エラーである。
 
-**[op.logic]** `and` と `or` は 1 個以上の `bool` 式を受け取り、左から短絡評価して `bool` を返す。`not` は 1 個の `bool` 値を否定する。
+**[op.logic]** `and` と `or` は 1 個以上の `bool` 式を受け取り、左から短絡評価して `bool` を返す。`not` は 1 個の `bool` 値を否定する。引数が `bool` でない場合や引数の個数誤りは型エラーである。
 
-**[fn.convert]** `as_f64` は `i64` または `f64` を `f64` に変換する。`as_i64` は `i64` または `f64` を `i64` に変換する（`f64` が有限でない場合または `i64` の範囲外の場合は実行時エラーである）。`ident->text` は `ident` を `text` に変換する。`text->ident` は `text` が識別子として有効なら `some(ident)`、無効なら `none` を返す。
+**[fn.convert]** `as_f64` は `i64` または `f64` を `f64` に変換する。`as_i64` は `i64` または `f64` を `i64` に変換する。`ident->text` は `ident` を `text` に変換する。`text->ident` は `text` が識別子として有効なら `some(ident)`、無効なら `none` を返す。引数の型や個数の誤りは型エラーであり、`as_i64` で `f64` が有限でない場合または `i64` の範囲外の場合は実行時エラーである。
 
-**[fn.math]** 組み込み定数 `pi`（円周率 `f64`）および組み込み関数 `sin`、`cos`、`sqrt`、`floor`、`ceil`（`f64 -> f64`）、`abs`（`i64 -> i64` または `f64 -> f64`）を提供する。
+**[fn.math]** 組み込み定数 `pi`（円周率 `f64`）および組み込み関数 `sin`、`cos`、`sqrt`、`floor`、`ceil`（`f64 -> f64`）、`abs`（`i64 -> i64` または `f64 -> f64`）を提供する。引数の型や個数の誤りは型エラーである。
 
 `abs` の `i64` 結果が範囲を超える場合は `[fn.math]` の実行時エラーである。
 
 `sin` と `cos` は [数学関数の決定的な計算手順](math-spec.md) に従う Rin 自身の実装で計算する。`Strict`（既定）と `Fused` のいずれの FMA 設定でも、すべての有限 `f64` 入力に対して真の値との差は 1 ulp 以内とする（正しく丸めた値とは限らない）。特殊値は `NaN`・`±inf` で `NaN`、`sin(±0.0) = ±0.0`、`cos(±0.0) = +1.0` を返す。絶対値が大きい有限引数には固定長の整数 Payne–Hanek 縮約を用い、引数の大きさによらず O(1)・動的確保なしで完了する。
 
-**[fn.list]** リスト操作として次の組み込み関数を提供する。すべてのリスト操作は元のリストを変更せず、新しいリストまたは値を返す。
+**[fn.list]** リスト操作として次の組み込み関数を提供する。すべてのリスト操作は元のリストを変更せず、新しいリストまたは値を返す。引数の型・個数の誤り、コールバックの型不一致、および順序付けできない型の `sort` / `sort_by` は型エラーである。`slice` の範囲外、`take` / `drop` の負数、および `sort` / `sort_by` における `NaN` の比較は実行時エラーである。
 
 - 基本・安全な参照
   - `(list e1 e2 ...)`：0 個以上の引数からリストを構築する。
@@ -382,6 +393,7 @@ true false none some ok err inf nan
 | 構造体・モジュールの名前検索、構造体の生成・更新 | 対象の表の要素数F、名前の最大バイト数Lについて、構造体の生成はフィールド名の整列と重複の除去に O(F × (L+1) × log(F+2))（加えて構造体記述子表のハッシュ検索を行うため、ハッシュ衝突が集中する最悪時は `[compile.cost]` と同様に記述子数比例）。フィールド・公開名の検索と `with` の更新は、二分探索で 1 回につき O((L+1) log(F+2)) を項目数だけ繰り返す。生成は表を確保する。`with` の表の複製費用は [eval.builtin-cost] に含む | フィールド数・公開名の数・名前の長さ・更新項目数を制限する |
 | リテラル・パターン・タプル・列挙値、通常のVM命令 | スカラー演算・スロット参照・ジャンプはO(1)。列挙した要素の保持やパターン検査は、そのソース内の要素数・文字列長に比例する。値の生成に必要な領域を確保する。リスト生成・添字参照・値比較の追加ステップは [eval.limits] に従う | ソースの大きさ・反復回数を制限する。実行した式は`steps`に数える |
 | 大域・モジュールの定義・読込・公開表の作成 | 保持する名前数G・最大の名前長L・`export`で指定した名前の数F（重複を含む。`export`がない場合は公開する定義の数）について、スロットの拡張・列挙はO(G+1)、公開表の構築はシンボル表（ハッシュ表）の参照と公開名配列の整列および重複の除去 O(F(L+1) log(F+2)) を含む（ハッシュ衝突最悪時は表サイズ比例）。領域はスロット・名前・公開表の大きさに比例する | 定義数・読込回数を制限し、読込済みの関数を呼び出す。読込はホストが渡したソースだけを使い、ファイル探索やネットワーク接続を行わない |
+| 静的型検査（双方向型推論・単一化・網羅性検査） | 今回のソースの AST 節数・型式節数・参照する既存型定義（構造体フィールド・バリアントケース）の項目数の和を `N` とし、式・型式・型変数解決・単一化の各処理ステップを 1 回の作業として数える。作業回数は `64 × max(N, 1)` を固定上限（超過時は `[eval.limits]` の `TooManySteps`）とし、最悪計算量は O(N + 1)。一時型ノード・単一化表は作業領域（`WorkArena`）、確定した型・シグネチャは永続領域（`PermArena`）へ確保し、いずれも `memory_bytes` に計上する | ソース長と参照する型定義の大きさを制限する。定義を一度読み込み、`call` / `call_in` や事前解決済み型ハンドル（`TypeHandle`）を使えば反復呼び出し時の型検査・型式解析を省ける |
 
 
 ## 7. 評価規則・資源制限・エラー
@@ -400,7 +412,7 @@ true false none some ok err inf nan
 この規則は実行時間の一致や、`steps` だけで全処理量を制限できることを意味しない。ソース付きエラー表示には、ホストが提供するソースとコールバックの返り値も同じであることが必要である。
 
 **[eval.limits]** 評価器は 1 回の評価ごとに上限値 `Limits`（`steps`、`depth`、`memory_bytes`）を監視する。
-- `steps`：式評価ごとに1と、`[eval.builtin-cost]` の内部処理を計上し、上限を超えると `TooManySteps` エラーを返す。`with` は置き換える値の評価後、複製前に元のフィールド数分の費用を計上する。リストリテラルは要素数分の生成費用、リスト・非 ASCII の `text` の添字参照は、`get` と同じ走査費用、`check_eq` は同じ比較費用 `E` も計上する。それぞれ、追加費用が上限を超えた位置をエラー位置とする。
+- `steps`：式評価ごとに1と、`[eval.builtin-cost]` の内部処理を計上し、上限を超えると `TooManySteps` エラーを返す。`with` は置き換える値の評価後、複製前に元のフィールド数分の費用を計上する。リストリテラルは要素数分の生成費用、リスト・非 ASCII の `text` の添字参照は、`get` と同じ走査費用、`check_eq` は同じ比較費用 `E` も計上する。それぞれ、追加費用が上限を超えた位置をエラー位置とする。また、静的型検査の作業回数が `[eval.support-cost]` の予算（`64 × max(N, 1)`）を超えた場合も `TooManySteps` エラーを返す。
 - `depth`：ユーザー定義関数の呼び出しネスト深さが上限を超えると `TooDeep` エラーを返す（末尾呼び出し最適化が適用された呼び出しはネスト深さに数えない）。組み込み関数が呼ぶユーザー定義関数も数える。呼び出しフレームは作業領域（`WorkArena`）上で非再帰に管理するため、ネイティブスタック容量に依存せず、`depth` 上限と利用可能なメモリ（`memory_bytes`）の範囲内で任意の深さまで安全に実行できる。
 - `memory_bytes`：3 領域（永続領域・オブジェクト領域・作業領域）の合計論理使用バイト数が上限を超えると `TooMuchMemory` エラーを返す。アロケータが要求された領域を確保できない場合も同じ種別・規則名で返す。また、1 つの `text` のバイト長は `2^32 - 1` バイトまでとし、超えた場合も `TooMuchMemory` エラーを返す。`Allocator` から取得するチャンク総量はブロック単位の切り上げにより `memory_bytes` を超えうるため、固定容量アリーナ（`ArenaAllocator` 等）の容量は `MemoryConfig` のブロックサイズを踏まえて別に見積もる（参考：最小限の評価に必要な `memory_bytes` はリテラルで約 1 KiB、単純な算術式で約 1.6 KiB、関数定義を含む式で約 3.5 KiB 程度）。なお、読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` の破棄まで回収されない（読み込み段階の `eval` / `load_module` が失敗しても永続領域の追記分は `memory_bytes` に残るが、重複・衝突の判定は有効な束縛と読み込み済みモジュールの有無で行うため、失敗した定義やモジュールの名前で再試行できる。環境の再構築が必要な場合は新しい `Builder` を作り直す。凍結後の `Machine` 評価では永続領域へ追記しない）。
 - 構文の入れ子上限（`[src.nesting-limit]`、`256` 段）は `Limits` とは独立した固定上限として構文解析時に検査する。
@@ -448,24 +460,37 @@ true false none some ok err inf nan
 ```ebnf
 Program    ::= TopItem* EOF
 TopItem    ::= Decl | Expr
-Decl       ::= "(" "def" IDENT Expr ")"
-             | "(" "defn" IDENT "(" IDENT* ")" Expr+ ")"
+Decl       ::= "(" "def" IDENT TypeExpr? Expr ")"
+             | "(" "defn" IDENT "(" TypedParam* ")" "->" TypeExpr Expr+ ")"
+             | "(" "defschema" UpperIdent SchemaBody ")"
              | "(" "import" IDENT ")"
              | "(" "export" IDENT* ")"
+(* defn の仮引数型や "->" TypeExpr を省いた形も構文としては受け付け、[expr.defn] の型エラーとする *)
+SchemaBody ::= "(" ( "struct" | "open_struct" ) UpperIdent ( "(" IDENT TypeExpr ")" )* ")"
+             | "(" "variant" UpperIdent ( "(" UpperIdent TypeExpr? ")" )* ")"
+             | ( IDENT "." )? UpperIdent
+TypeExpr   ::= "void" | "i64" | "f64" | "bool" | "char" | "text" | "ident" | "datum"
+             | ( IDENT "." )? UpperIdent
+             | "(" ( "list" | "array" | "option" ) TypeExpr ")"
+             | "(" "result" TypeExpr TypeExpr ")"
+             | "(" "tuple" TypeExpr TypeExpr+ ")"
+             | "(" "fn" "(" TypeExpr* ")" TypeExpr ")"
+TypedParam ::= "(" IDENT TypeExpr ")"
+Param      ::= IDENT | TypedParam
 Expr       ::= Primary ( "." IDENT | "[" Expr "]" )*
 Primary    ::= INT | FLOAT | STRING | Template | CHAR
              | "true" | "false" | "none" | "inf" | "nan"
              | "'" Datum | "`" Datum
              | ( "some" | "ok" | "err" ) "(" Expr ")"
-             | UpperIdent "{" ( IDENT ":" Expr )* "}"
-             | UpperIdent "." IDENT ( "(" Expr ")" )?
+             | ( IDENT "." )? UpperIdent "{" ( IDENT ":" Expr )* "}"
+             | ( IDENT "." )? UpperIdent "." IDENT ( "(" Expr ")" )?
              | "[" Expr* "]"
              | SpecialForm
              | "(" Expr Expr* ")"
              | IDENT
 Template   ::= '"' TextPart ( "${" Expr "}" TextPart )+ '"'
              | '"""' Newline MultiTextPart ( "${" Expr "}" MultiTextPart )+ '"""'
-SpecialForm ::= "(" "fn" "(" IDENT* ")" Expr+ ")"
+SpecialForm ::= "(" "fn" "(" Param* ")" ( "->" TypeExpr )? Expr+ ")"
               | "(" "let" "(" ( IDENT Expr )* ")" Expr+ ")"
               | "(" "if" Expr Expr Expr ")"
               | "(" "when" Expr Expr+ ")"
@@ -475,12 +500,13 @@ SpecialForm ::= "(" "fn" "(" IDENT* ")" Expr+ ")"
               | "(" "field" Expr IDENT ")"
               | "(" "index" Expr Expr ")"
               | "(" ( "some" | "ok" | "err" ) Expr ")"
-              | "(" "variant" IDENT IDENT Expr? ")"
-              | "(" "struct" IDENT ( "(" IDENT Expr ")" )* ")"
+              | "(" "variant" ( IDENT "." )? IDENT IDENT Expr? ")"
+              | "(" "struct" ( IDENT "." )? IDENT ( "(" IDENT Expr ")" )* ")"
               | "(" ( "quote" | "quasiquote" ) Datum ")"
 Pattern    ::= "_" | INT | STRING | CHAR | "'" IDENT | "true" | "false" | "none"
              | ( "some" | "ok" | "err" ) "(" ( IDENT | "_" ) ")"
-             | UpperIdent "." IDENT ( "(" ( IDENT | "_" ) ")" )?
+             | ( "i64" | "f64" | "bool" | "char" | "text" | "ident" | "list" ) "(" ( IDENT | "_" ) ")"
+             | ( IDENT "." )? UpperIdent "." IDENT ( "(" ( IDENT | "_" ) ")" )?
              | IDENT
 (* STRING は埋め込みのない文字列リテラル。Pattern・DatumPrimary では Template を許さない *)
 Datum      ::= DatumPrimary ( "." IDENT | "[" Datum "]" )*
@@ -502,7 +528,7 @@ DatumPrimary ::= INT | FLOAT | STRING | CHAR
 
 **[test.deftest]** `(deftest "name" body...)` は名前付きテストを定義する。テストファイルのトップレベルでのみ使用でき、名前は文字列とする。同じファイル内の名前の重複は構文エラーとする。本体は空でもよく、本体の最外側（トップレベル）には宣言と式を書ける。通常の `eval` / `load_module` では、未実行の分岐内を含めて `deftest` を構文エラーとする。
 
-**[test.check]** `(check expr)` は評価結果が `true` であることを検査する。`(check_eq actual expected)` は左から順に各引数を1回評価し、`==` と同じ規則で比較する。型が異なるなど、`==` がエラーになる比較は検査失敗ではなく実行時エラーとなる。両形式とも `deftest` の本体内だけで使用でき、成功・失敗のどちらでも `void` を返す。引数の数が不正な場合は構文エラーとする。検査失敗は記録して評価を続ける。通常の `eval` / `load_module` でこれらの形式を使用した場合は構文エラーとする。テスト用の形式は関数値として渡せない。同名の変数や仮引数は、束縛の有効範囲で通常の値として参照できる。呼び出しの先頭に書いた `check` / `check_eq` は特殊形式として扱う。
+**[test.check]** `(check expr)` は `bool` 型の `expr` の評価結果が `true` であることを検査する。`(check_eq actual expected)` は `==` で比較可能な同じ型（または `[op.cmp]` の `datum` 比較規則を満たす型）の 2 引数を左から順に 1 回評価して比較する。`check` に `bool` 以外を渡した場合や、`check_eq` に比較できない型同士を渡した場合は検査失敗ではなく型エラーとなる。両形式とも `deftest` の本体内だけで使用でき、成功・失敗のどちらでも `void` を返す。引数の数が不正な場合は構文エラーとする。検査失敗は記録して評価を続ける。通常の `eval` / `load_module` でこれらの形式を使用した場合は構文エラーとする。テスト用の形式は関数値として渡せない。同名の変数や仮引数は、束縛の有効範囲で通常の値として参照できる。呼び出しの先頭に書いた `check` / `check_eq` は特殊形式として扱う。
 
 **[test.result]** テストの結果は成功・失敗・エラーの3種類とする。実行時エラーまたは資源上限超過があればエラー、そうでなく検査失敗があれば失敗、それ以外は成功とする。エラーが起きた場合も、それ以前の検査失敗を報告に残す。検査失敗には位置と実際の値・期待値を、実行エラーには通常の位置情報と呼び出し履歴を付ける。
 

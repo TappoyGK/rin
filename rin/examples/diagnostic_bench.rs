@@ -94,7 +94,11 @@ fn main() {
     let mut machine = Builder::new(Limits::default(), &mut alloc);
     for i in 0..500 {
         machine
-            .bind(&format!("{}{:03}", "z".repeat(1997), i), &Value::Int(0))
+            .bind(
+                &format!("{}{:03}", "z".repeat(1997), i),
+                "i64",
+                &Value::Int(0),
+            )
             .unwrap();
     }
     let mut machine = machine.freeze().unwrap();

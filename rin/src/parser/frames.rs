@@ -12,10 +12,12 @@ pub(super) enum WrapKind {
 pub(super) enum BodyTarget {
     Defn {
         name: RawStr,
-        params: RawVec<RawStr>,
+        params: RawVec<Param>,
+        ret_ty: Option<WorkBox<TypeExpr>>,
     },
     Fn {
-        params: RawVec<RawStr>,
+        params: RawVec<Param>,
+        ret_ty: Option<WorkBox<TypeExpr>>,
     },
     Let {
         bindings: RawVec<(RawStr, Expr)>,
@@ -29,11 +31,20 @@ pub(super) enum BodyTarget {
 pub(super) struct StructFieldFrame {
     pub(super) brace_start: Span,
     pub(super) span: Span,
+    pub(super) module: Option<RawStr>,
     pub(super) name: RawStr,
     pub(super) fields: RawVec<(RawStr, Expr)>,
     pub(super) key: RawStr,
     pub(super) max_child: usize,
     pub(super) sexp: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct VariantDataFrame {
+    pub(super) span: Span,
+    pub(super) module: Option<RawStr>,
+    pub(super) type_name: RawStr,
+    pub(super) variant: RawStr,
 }
 
 #[derive(Clone, Copy)]
@@ -170,14 +181,12 @@ pub(super) enum ParseFrame {
         kind: WrapKind,
     },
     StructField(WorkBox<StructFieldFrame>),
-    VariantData {
-        span: Span,
-        type_name: RawStr,
-        variant: RawStr,
-    },
+    VariantData(WorkBox<VariantDataFrame>),
     Def {
         start: Span,
         name: RawStr,
+        ty: Option<WorkBox<TypeExpr>>,
+        ty_depth: usize,
     },
     Body(WorkBox<BodyFrame>),
     LetBindVal(WorkBox<LetBindFrame>),

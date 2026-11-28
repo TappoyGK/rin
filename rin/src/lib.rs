@@ -20,6 +20,7 @@ mod pool;
 pub mod schema;
 #[cfg(feature = "std-value")]
 pub mod test;
+mod typecheck;
 #[cfg(feature = "std-value")]
 pub mod value;
 pub mod value_ref;
@@ -30,13 +31,14 @@ pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
 #[cfg(feature = "std-value")]
 pub use error::{Error, StackFrame};
 pub use error::{ErrorKind, ErrorRef, Limits, Span};
-pub use eval::{Builder, Machine};
+pub use eval::{Builder, Machine, TypeArg};
 #[cfg(feature = "std-value")]
 pub use eval::{eval_with, eval_with_allocator};
 pub use math::MathFma;
 pub use mem::{MemoryConfig, RegionConfig};
 #[cfg(feature = "std-value")]
 pub use schema::Schema;
+pub use typecheck::{FnSigRef, TypeHandle, TypeRef};
 #[cfg(feature = "std-value")]
 pub use value::Value;
 pub use value_ref::{ListIter, SliceView, StructRef, Val, ValueRef, ValueTag, VariantRef};

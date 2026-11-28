@@ -7,13 +7,15 @@ mod frames;
 mod pattern;
 mod primary;
 mod resume;
+mod type_expr;
 use frames::*;
 
 #[cfg(feature = "std-value")]
 use crate::alloc::HeapAllocator;
 use crate::ast::{
-    Datum, DatumKind, DefnExpr, Expr, ExprKind, FnExpr, LetExpr, MatchArm, Pattern, StructExpr,
-    VariantExpr,
+    Datum, DatumKind, DatumTypePat, DefExpr, DefSchemaExpr, DefnExpr, Expr, ExprKind, FnExpr,
+    LetExpr, MatchArm, Param, Pattern, SchemaBody, StructExpr, TypeExpr, TypeExprKind,
+    VariantCaseDef, VariantExpr,
 };
 #[cfg(feature = "std-value")]
 use crate::error::Error;
@@ -76,6 +78,35 @@ pub(crate) fn parse_program_work(
         }
     }
     Ok(exprs)
+}
+
+/// 単独の型式文字列を `WorkArena` 上へ解析する（ホスト境界 API・`resolve_type` 用）。
+pub(crate) fn parse_type_expr_work(
+    input: &str,
+    work: &mut WorkArena,
+    core: &mut AllocCore<'_>,
+) -> Result<TypeExpr, ErrRecorded> {
+    let mut lexer = WorkLexer::new(input);
+    let first = lexer.next_token(work, core)?;
+    let mut frames = RawVec::<ParseFrame>::new();
+    let mut parser = Parser {
+        test_mode: false,
+        lexer,
+        cur: first,
+        next: None,
+        frames: &mut frames,
+        work,
+        core,
+    };
+    let (ty, _) = parser.parse_type_expr(0)?;
+    if !parser.at_eof() {
+        return Err(parser.parse_err(
+            "type.expr",
+            parser.peek().span,
+            "unexpected trailing token in type expression",
+        ));
+    }
+    Ok(ty)
 }
 
 #[cfg(feature = "std-value")]

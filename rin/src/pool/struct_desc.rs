@@ -182,7 +182,6 @@ impl Pool<'_> {
         }
     }
 
-    #[cfg(feature = "std-value")]
     pub fn struct_desc_field_count(&self, desc: StructDescRef) -> usize {
         match desc {
             StructDescRef::Perm(id) => self.struct_descs.descs.as_slice()[id as usize].fields.len(),

@@ -268,6 +268,7 @@ impl Parser<'_, '_, '_> {
                         let s = *sf.as_ref();
                         let se = self.alloc_box(
                             StructExpr {
+                                module: s.module,
                                 name: s.name,
                                 fields: s.fields,
                             },
@@ -297,6 +298,7 @@ impl Parser<'_, '_, '_> {
                     let s = *sf.as_ref();
                     let se = self.alloc_box(
                         StructExpr {
+                            module: s.module,
                             name: s.name,
                             fields: s.fields,
                         },
@@ -321,32 +323,36 @@ impl Parser<'_, '_, '_> {
                 self.push_frame(ParseFrame::StructField(sf), sp)?;
                 Ok(NextStep::StartExpr)
             }
-            ParseFrame::VariantData {
-                span,
-                type_name,
-                variant,
-            } => {
+            ParseFrame::VariantData(vf) => {
+                let v = *vf.as_ref();
                 self.expect(WorkTokenKind::RParen, "')'")?;
-                let data = self.alloc_box(expr, span)?;
+                let data = self.alloc_box(expr, v.span)?;
                 let ve = self.alloc_box(
                     VariantExpr {
-                        type_name,
-                        variant,
+                        module: v.module,
+                        type_name: v.type_name,
+                        variant: v.variant,
                         data: Some(data),
                     },
-                    span,
+                    v.span,
                 )?;
                 Ok(NextStep::HaveExpr(
-                    Expr::new(span, ExprKind::Variant(ve)),
+                    Expr::new(v.span, ExprKind::Variant(ve)),
                     1 + depth,
                 ))
             }
-            ParseFrame::Def { start, name } => {
+            ParseFrame::Def {
+                start,
+                name,
+                ty,
+                ty_depth,
+            } => {
                 self.expect(WorkTokenKind::RParen, "')'")?;
                 let value = self.alloc_box(expr, start)?;
+                let def = self.alloc_box(DefExpr { name, ty, value }, start)?;
                 Ok(NextStep::HaveExpr(
-                    Expr::new(start, ExprKind::Def { name, value }),
-                    1 + depth,
+                    Expr::new(start, ExprKind::Def(def)),
+                    1 + depth.max(ty_depth),
                 ))
             }
             ParseFrame::Body(mut bf) => {

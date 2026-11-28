@@ -214,9 +214,25 @@ unsafe fn begin_operation<'a>(machine: *mut Rin) -> Option<&'a mut Rin> {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RinType {
+    pub id: u32,
+    pub env_id: u64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RinBinding {
     pub name: *const c_char,
+    pub type_expr: *const c_char,
+    pub value: *const RinValue,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RinResolvedBinding {
+    pub name: *const c_char,
+    pub ty: RinType,
     pub value: *const RinValue,
 }
 

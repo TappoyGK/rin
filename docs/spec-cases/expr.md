@@ -7,7 +7,7 @@
 **入力：**
 
 ```rin
-(defn fact (n)
+(defn fact ((n i64)) -> i64
   (if (<= n 1) 1 (* n (fact (- n 1)))))
 (fact 5)
 ```
@@ -61,6 +61,7 @@
 **入力：**
 
 ```rin
+(defschema Card (struct Card (id text) (cost i64)))
 (let (c1 Card { id: "strike" cost: 1 })
   (let (c2 (with c1 { cost: 0 }))
     (+ c1.cost c2.cost)))
@@ -79,6 +80,7 @@
 **入力：**
 
 ```rin
+(defschema Effect (variant Effect (Gain i64) (Pass)))
 (match Effect.Gain(7)
   (Effect.Gain(n) (+ n 3))
   (_ 0))
@@ -167,6 +169,7 @@
 **入力：**
 
 ```rin
+(defschema P (struct P (x i64)))
 (tuple P { x: 1 x: 2 }.x (with P { x: 1 } { x: 2 x: 3 }).x)
 ```
 
@@ -190,7 +193,7 @@
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 値 | `['+ 1 ['list 'a 'b] ['struct 'Point ['x 2]] ['field 'p 'x] ['index 'xs 0]]` |
+| 既定 | 値 | `'(+ 1 (list a b) (struct Point (x 2)) (field p x) (index xs 0))` |
 
 ### expr-012 quasiquote の unquote と unquote-splicing
 
@@ -207,7 +210,7 @@
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 値 | `['head 10 20 30 'tail]` |
+| 既定 | 値 | `'(head 10 20 30 tail)` |
 
 ### expr-013 テンプレート文字列の埋め込み評価
 
@@ -226,7 +229,7 @@
 |---|---|---|
 | 既定 | 値 | `"a1b2.0id"` |
 
-### expr-014 テンプレート文字列に埋め込めない型は実行時エラー
+### expr-014 テンプレート文字列に埋め込めない型は型エラー
 
 主根拠：`[expr.template]`
 
@@ -242,7 +245,7 @@
 
 | 上限 | 結果 | 値 |
 |---|---|---|
-| 既定 | 実行時エラー | `—` |
+| 既定 | 型エラー | `—` |
 
 ### expr-015 text の添字参照と slice
 

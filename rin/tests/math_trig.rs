@@ -83,8 +83,8 @@ fn trig_matches_shared_vectors_strict_and_fused() {
 
         // Machine 経由の評価でも同じビット列を返すこと。
         let name = format!("x_{count}");
-        machine_s.bind(&name, &Value::Float(x)).unwrap();
-        machine_f.bind(&name, &Value::Float(x)).unwrap();
+        machine_s.bind(&name, "f64", &Value::Float(x)).unwrap();
+        machine_f.bind(&name, "f64", &Value::Float(x)).unwrap();
         let src = format!("({func} {name})");
         let Value::Float(eval_s) = machine_s.eval(&src).unwrap() else {
             panic!("expected float");
@@ -119,9 +119,9 @@ fn user_arithmetic_is_never_fused_even_in_fused_mode() {
         let mut alloc = HeapAllocator;
         let mut machine = Builder::new(Limits::default(), &mut alloc);
         machine.set_math_fma(mode);
-        machine.bind("a", &Value::Float(a)).unwrap();
-        machine.bind("b", &Value::Float(b)).unwrap();
-        machine.bind("c", &Value::Float(c)).unwrap();
+        machine.bind("a", "f64", &Value::Float(a)).unwrap();
+        machine.bind("b", "f64", &Value::Float(b)).unwrap();
+        machine.bind("c", "f64", &Value::Float(c)).unwrap();
         let Value::Float(res) = machine.eval("(+ (* a b) c)").unwrap() else {
             panic!("expected float");
         };
@@ -157,7 +157,7 @@ fn c_ffi_math_fma_api() {
 
         // Strict と Fused で結果が 1 bit 分かれる入力を bind して、設定が評価に効くことを確かめる。
         let input = rin_float(m, f64::from_bits(0x3fcb_a7ce_3783_fd35));
-        assert!(rin_bind(m, c"x".as_ptr(), input));
+        assert!(rin_bind(m, c"x".as_ptr(), c"f64".as_ptr(), input));
         rin_drop(m, input);
         assert!(rin_freeze(m));
 

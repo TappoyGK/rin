@@ -44,9 +44,26 @@ impl EnvState<'_> {
             }
         };
         let mark = self.pool.work.mark(&self.pool.core);
+        let type_snap = self.type_env.snapshot();
         let chunk = match (|| {
             let exprs =
                 parse_program_work(source, &mut self.pool.work, &mut self.pool.core, false)?;
+            check_program_work(
+                exprs.as_slice(),
+                &mut self.type_env,
+                &mut self.pool.perm,
+                &mut self.pool.work,
+                &mut self.pool.core,
+                CheckOptions {
+                    frozen: false,
+                    strict_defn_annotations: true,
+                    module_name: Some(name),
+                    test_mode: false,
+                    commit: true,
+                    extra_bindings: &[],
+                    extra_binding_exprs: &[],
+                },
+            )?;
             compile_program(
                 exprs.as_slice(),
                 Some(mod_id),
@@ -58,6 +75,7 @@ impl EnvState<'_> {
         })() {
             Ok(chunk) => chunk,
             Err(e) => {
+                self.type_env.rollback(type_snap);
                 self.pool.work.rewind(&mut self.pool.core, mark);
                 self.pool.core.error.resolve_module(Some(name));
                 return Err(e);
@@ -75,6 +93,7 @@ impl EnvState<'_> {
             }
         };
         if let Err(e) = v {
+            self.type_env.rollback(type_snap);
             self.pool.work.rewind(&mut self.pool.core, mark);
             self.modules.clear_env(mod_id, &mut self.pool);
             self.pool.core.error.resolve_module(Some(name));
@@ -91,8 +110,19 @@ impl EnvState<'_> {
                         .get(sym)
                         .and_then(|id| self.modules.env(mod_id).get(id))
                     else {
+                        // `defschema` の型名エクスポートは実行時値を持たないためスキップする。
+                        let is_exported_type =
+                            self.type_env.lookup_module(name).is_some_and(|(_, menv)| {
+                                menv.exports_types
+                                    .get_by(fnv1a_bytes(sym.as_bytes()), |k| k.as_str() == sym)
+                                    .is_some()
+                            });
+                        if is_exported_type {
+                            continue;
+                        }
                         let mut sym_buf = crate::error::InlineBuf::<256>::new();
                         sym_buf.push_str(sym);
+                        self.type_env.rollback(type_snap);
                         self.pool.work.rewind(&mut self.pool.core, mark);
                         self.modules.clear_env(mod_id, &mut self.pool);
                         return Err(self.pool.core.err_fmt(
@@ -291,6 +321,11 @@ impl EnvState<'_> {
             write_available(out, "exports", exports.iter().map(|e| e.name.as_str()));
             return Err(self.pool.core.error.to_owned_error());
         };
-        self.call_rval(callee, args, frozen)
+        let fn_sig = self.type_env.lookup_module(mod_name).and_then(|(_, menv)| {
+            menv.exports_vals
+                .get_by(fnv1a_bytes(fn_name.as_bytes()), |k| k.as_str() == fn_name)
+                .and_then(|vb| vb.fn_sig)
+        });
+        self.call_rval(callee, fn_sig, args, frozen)
     }
 }

@@ -80,7 +80,7 @@ fn lisp_list_operations() {
     );
     assert_eq!(eval("(list 1 2 3)").unwrap(), eval("[1 2 3]").unwrap());
     let rec_map = r#"
-        (defn my_map (f xs)
+        (defn my_map ((f (fn (i64) i64)) (xs (list i64))) -> (list i64)
           (match (car xs)
             (none [])
             (some(h) (cons (f h) (my_map f (cdr xs))))))

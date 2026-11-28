@@ -1,0 +1,541 @@
+#![cfg(feature = "std-value")]
+
+use rin::ffi::RinErrorKind;
+use rin::{Builder, Error, ErrorKind, HeapAllocator, Limits, Span, Value, eval};
+
+#[test]
+fn error_kind_type_and_ffi_mapping() {
+    let err = Error::type_err("type.static", Span::new(1, 1), "type mismatch");
+    assert_eq!(err.kind, ErrorKind::Type);
+    assert_eq!(err.rule(), "type.static");
+    assert_eq!(RinErrorKind::from(ErrorKind::Type), RinErrorKind::Type);
+    assert_eq!(RinErrorKind::Type as u32, 7);
+}
+
+#[test]
+fn defschema_syntax_and_placement() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module("game", "(defschema HitCtx (struct HitCtx (atk i64)))")
+        .unwrap();
+    let src = r#"
+(import game)
+(defschema Element (variant Element (Plain) (Fire) (Frost) (Custom text)))
+(defschema HitCtx (struct HitCtx (atk i64) (element Element)))
+(defschema OpenCtx (open_struct OpenCtx (id i64) (tags (list text))))
+(defschema CopyCtx HitCtx)
+(defschema ModCopy game.HitCtx)
+(defschema Complex (struct Complex
+  (cb (fn ((list i64) text) (result (tuple i64 bool) (option datum))))
+  (arr (array f64))
+  (ch char)
+  (sym ident)
+  (u void)))
+1
+"#;
+    assert_eq!(b.eval(src).unwrap(), Value::Int(1));
+
+    // 小文字始まりのスキーマ名は構文エラー
+    let err = eval("(defschema foo (struct Foo (x i64)))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "type.defschema");
+
+    // `any` は型式として禁止
+    let err = eval("(defschema Bad (struct Bad (x any)))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "type.expr");
+
+    // 1 要素タプル型は構文エラー
+    let err = eval("(defschema Bad (struct Bad (x (tuple i64))))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "schema.tuple");
+
+    // 式の中の defschema は構文エラー
+    let err = eval("(defn f () -> i64 (defschema Inner (struct Inner (x i64))) 1)").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "type.defschema");
+
+    // 凍結後の defschema は env.frozen 構文エラー
+    let mut alloc = HeapAllocator;
+    let b = Builder::new(Limits::default(), &mut alloc);
+    let mut m = b.freeze().unwrap();
+    let err = m
+        .eval("(defschema Frozen (struct Frozen (x i64)))")
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "env.frozen");
+}
+
+#[test]
+fn typed_defn_fn_and_def_syntax_and_eval() {
+    let src = r#"
+(def x i64 10)
+(def xs (list i64) [1 2 3])
+(def plain (list 4 5))
+(def pred (fn (i64) bool) (fn ((n i64)) -> bool (> n 0)))
+(def ho (fn ((fn (i64) bool)) i64) (fn (f) (if (f 1) 100 0)))
+(defn add ((a i64) (b i64)) -> i64 (+ a b))
+(tuple x (len xs) (len plain) (ho pred) (add 3 4))
+"#;
+    assert_eq!(
+        eval(src).unwrap(),
+        Value::tuple(vec![
+            Value::Int(10),
+            Value::Int(3),
+            Value::Int(2),
+            Value::Int(100),
+            Value::Int(7),
+        ])
+    );
+
+    // 型注釈のない defn は静的型エラー
+    let err = eval("(defn untyped (a b) (+ a b))").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Type);
+    assert_eq!(err.rule(), "expr.defn");
+
+    // 構造体リテラル・バリアントを型注釈なしの def 値に書ける（指摘 1 の回帰テスト）
+    let def_struct = r#"
+(defschema Pt (struct Pt (a i64)))
+(defschema Color (variant Color (Red) (Blue i64)))
+(def p1 Pt { a: 1 })
+(def p2 Pt Pt { a: 2 })
+(def c1 Color.Red)
+(def c2 Color Color.Blue(3))
+(tuple p1.a p2.a (match c1 (Color.Red 10) (Color.Blue(n) n)) (match c2 (Color.Red 0) (Color.Blue(n) n)))
+"#;
+    assert_eq!(
+        eval(def_struct).unwrap(),
+        Value::tuple(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(10),
+            Value::Int(3),
+        ])
+    );
+
+    // 3 引数 def の型注釈に不正な型を書いた場合は type.expr 構文エラー（指摘 8 の回帰テスト）
+    for bad in [
+        "(def x any 1)",
+        "(def x (list) 1)",
+        "(def x (map i64) 1)",
+        "(def x (list i64 i64) 1)",
+        "(def x (option) none)",
+        "(def x (fn i64) 1)",
+    ] {
+        let err = eval(bad).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "{bad}: {err}");
+        assert_eq!(err.rule(), "type.expr", "{bad}: {err}");
+    }
+
+    // 組み込み名の再定義メッセージには名前が含まれる（再レビュー指摘 2）
+    let err = eval("(def pi 1)").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "expr.def");
+    assert_eq!(err.message, "cannot redefine builtin 'pi'");
+
+    // 前の Builder::eval で import したモジュールの型を後続の評価で参照できる（再レビュー指摘 1）
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module(
+        "m",
+        "(defschema T (struct T (a i64))) (defn mk () -> T T { a: 3 }) (def k 7)",
+    )
+    .unwrap();
+    assert_eq!(b.eval("(import m) 1").unwrap(), Value::Int(1));
+    assert_eq!(b.eval("(def y m.k) y").unwrap(), Value::Int(7));
+    assert_eq!(b.eval("(def q m.T (m.mk)) q.a").unwrap(), Value::Int(3));
+    assert_eq!(
+        b.eval("(defn g ((t m.T)) -> i64 t.a) (g (m.mk))").unwrap(),
+        Value::Int(3)
+    );
+
+    // 型注釈の直後にテンプレート文字列を書ける（再々レビュー指摘 1）
+    assert_eq!(eval("(def s text \"${1}\") s").unwrap(), Value::text("1"));
+    assert_eq!(
+        eval("(def s text \"${'foo}\") s").unwrap(),
+        Value::text("foo")
+    );
+    assert_eq!(
+        eval("(def s text \"a${(+ 1 2)}b\") s").unwrap(),
+        Value::text("a3b")
+    );
+    assert_eq!(
+        eval("(def s text \"\"\"\n  x=${(+ 2 3)}\n  \"\"\") s").unwrap(),
+        Value::text("x=5")
+    );
+    assert!(rin::fmt::format("(def s text \"${1}\")").is_ok());
+
+    // 他モジュールの型を値の位置で構築できる（再々レビュー指摘 2）
+    let mut alloc2 = HeapAllocator;
+    let mut b2 = Builder::new(Limits::default(), &mut alloc2);
+    b2.load_module(
+        "game",
+        r#"
+(defschema Element (variant Element (Plain) (Fire) (Heat i64)))
+(defschema HitResult (struct HitResult (dmg i64) (effect text)))
+"#,
+    )
+    .unwrap();
+    let mod_ctor = r#"
+(import game)
+(def h1 game.HitResult { dmg: 10 effect: "burn" })
+(def h2 (struct game.HitResult (dmg 20) (effect "chill")))
+(def e1 game.Element.Fire)
+(def e2 game.Element.Heat(5))
+(def e3 (variant game.Element Heat 7))
+(tuple
+  h1.dmg
+  h2.dmg
+  (match e1 (game.Element.Fire 1) (game.Element.Plain 0) (game.Element.Heat(n) n))
+  (match e2 (game.Element.Fire 0) (game.Element.Plain 0) (game.Element.Heat(n) n))
+  (match e3 (game.Element.Fire 0) (game.Element.Plain 0) (game.Element.Heat(n) n)))
+"#;
+    assert_eq!(
+        b2.eval(mod_ctor).unwrap(),
+        Value::tuple(vec![
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(1),
+            Value::Int(5),
+            Value::Int(7),
+        ])
+    );
+    // フォーマッタも mod.Type { ... } / mod.Type.Case(x) を冪等に整形できる
+    let fmt_mod =
+        rin::fmt::format("game.HitResult { dmg: 1 effect: \"a\" }\ngame.Element.Heat(5)\n")
+            .unwrap();
+    assert_eq!(rin::fmt::format(&fmt_mod).unwrap(), fmt_mod);
+
+    // 型だけを公開したモジュールで値位置に t.P を書いたときのエラーメッセージ（再々レビュー指摘 4）
+    b2.load_module("t", "(defschema P (struct P (a i64))) (export P)")
+        .unwrap();
+    let err = b2.eval("(import t) t.P").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Type);
+    assert_eq!(err.rule(), "expr.module");
+    assert_eq!(err.message, "'t.P' is a type, not a value");
+}
+
+#[test]
+fn datum_type_patterns_and_module_variant_pattern() {
+    let src = r#"
+(defn classify ((d datum)) -> i64
+  (match d
+    (i64(n) (+ n 1))
+    (f64(_) 2)
+    (bool(b) (if b 3 4))
+    (char(_) 5)
+    (text(_) 6)
+    (ident(_) 7)
+    (list(xs) (+ 100 (len xs)))
+    (none 0)))
+[(classify 10) (classify 1.5) (classify true) (classify false)
+ (classify \a) (classify "hi") (classify 'sym) (classify '(a 1 2)) (classify none)]
+"#;
+    assert_eq!(
+        eval(src).unwrap(),
+        Value::list(vec![
+            Value::Int(11),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4),
+            Value::Int(5),
+            Value::Int(6),
+            Value::Int(7),
+            Value::Int(103),
+            Value::Int(0),
+        ])
+    );
+
+    // モジュール修飾バリアントパターンが型検査・実行できる
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module(
+        "game",
+        "(defschema Element (variant Element (Plain) (Fire))) (defn fire () -> Element Element.Fire)",
+    )
+    .unwrap();
+    let src_mod_pat = r#"
+(import game)
+(match (game.fire)
+  (game.Element.Fire 1)
+  (game.Element.Plain 2))
+"#;
+    assert_eq!(b.eval(src_mod_pat).unwrap(), Value::Int(1));
+}
+
+#[test]
+fn host_boundary_type_validation() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.eval("(defschema Ctx (struct Ctx (atk i64)))").unwrap();
+    b.eval("(defn dmg ((ctx Ctx) (mult i64)) -> i64 (* ctx.atk mult))")
+        .unwrap();
+
+    // bind の型不一致は type.boundary
+    let err = b.bind("bad", "i64", &Value::text("oops")).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // 正常な bind
+    b.bind("base", "i64", &Value::Int(10)).unwrap();
+
+    let mut m = b.freeze().unwrap();
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("atk".to_string(), Value::Int(7));
+    let ctx = Value::structure("Ctx", fields);
+    assert_eq!(
+        m.call("dmg", &[ctx.clone(), Value::Int(3)]).unwrap(),
+        Value::Int(21)
+    );
+
+    // call の引数型不一致は type.boundary
+    let err = m.call("dmg", &[Value::Int(7), Value::Int(3)]).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // eval_with の値型不一致は type.boundary
+    let err = m
+        .eval_with("(+ x base)", &[("x", "i64", Value::Bool(true))])
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // eval_with の正常動作（永続 TypeEnv を汚染しない）
+    assert_eq!(
+        m.eval_with("(+ x base)", &[("x", "i64", Value::Int(5))])
+            .unwrap(),
+        Value::Int(15)
+    );
+    assert_eq!(m.eval("x").unwrap_err().kind, ErrorKind::Type);
+}
+
+#[test]
+fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module(
+        "combat",
+        r#"
+(defschema Ctx (struct Ctx (atk i64) (crit bool)))
+(defn calc ((ctx Ctx) (bonus i64)) -> i64 (if ctx.crit (* ctx.atk 2) (+ ctx.atk bonus)))
+(def version 3)
+"#,
+    )
+    .unwrap();
+    b.eval(
+        r#"
+(import combat)
+(defschema Wrap (struct Wrap (ctx combat.Ctx)))
+(defn entry ((w Wrap)) -> (option i64) some(w.ctx.atk))
+"#,
+    )
+    .unwrap();
+
+    // 事前解決 TypeHandle（有効・無効・fn 型拒否）
+    let ty_i64 = b.resolve_type("i64").unwrap();
+    let ty_ctx = b.resolve_type("combat.Ctx").unwrap();
+    assert_eq!(
+        b.resolve_type("(fn (i64) i64)").unwrap_err().rule(),
+        "type.boundary"
+    );
+    let v10 = b.val_int(10);
+    b.bind_val("k", ty_i64, v10).unwrap();
+    b.release_val(v10);
+
+    // Builder 段階でのシグネチャ・型照会
+    let sig_mod = b.fn_sig_in("combat", "calc").unwrap();
+    assert_eq!(sig_mod.param_count(), 2);
+    assert_eq!(sig_mod.param_name(0), Some("ctx"));
+    assert_eq!(sig_mod.param_type(0).unwrap().to_string(), "combat.Ctx");
+    assert_eq!(sig_mod.param_name(1), Some("bonus"));
+    assert_eq!(sig_mod.param_type(1).unwrap().to_string(), "i64");
+    assert_eq!(sig_mod.ret_type().to_string(), "i64");
+    assert_eq!(sig_mod.to_string(), "((ctx combat.Ctx) (bonus i64)) -> i64");
+    assert_eq!(
+        b.type_of_in("combat", "version").unwrap().to_string(),
+        "i64"
+    );
+    assert!(b.fn_sig_in("combat", "version").is_none());
+
+    let mut m = b.freeze().unwrap();
+
+    // Machine 段階でのシグネチャ・型照会
+    let sig_root = m.fn_sig("entry").unwrap();
+    assert_eq!(sig_root.param_count(), 1);
+    assert_eq!(sig_root.param_name(0), Some("w"));
+    assert_eq!(sig_root.param_type(0).unwrap().to_string(), "Wrap");
+    assert_eq!(sig_root.ret_type().to_string(), "(option i64)");
+    assert_eq!(sig_root.to_string(), "((w Wrap)) -> (option i64)");
+    assert_eq!(m.type_of("k").unwrap().to_string(), "i64");
+
+    // 事前解決 TypeHandle を使った反復 eval_with / eval_with_vals
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("atk".to_string(), Value::Int(12));
+    fields.insert("crit".to_string(), Value::Bool(true));
+    let ctx_val = Value::structure("Ctx", fields);
+    assert_eq!(
+        m.eval_with(
+            "(+ (combat.calc c k) n)",
+            &[("c", ty_ctx, ctx_val.clone()), ("n", ty_i64, Value::Int(5))],
+        )
+        .unwrap(),
+        Value::Int(29)
+    );
+    // 型不一致は type.boundary
+    let err = m
+        .eval_with("(+ n k)", &[("n", ty_i64, Value::text("bad"))])
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "type.boundary");
+
+    // 別環境（Builder）で取得した TypeHandle は bind / eval_with で type.boundary になる
+    {
+        let mut ha = HeapAllocator;
+        let mut hb = HeapAllocator;
+        let mut a = Builder::new(Limits::default(), &mut ha);
+        let mut b2 = Builder::new(Limits::default(), &mut hb);
+        let ta_list = a.resolve_type("(list text)").unwrap();
+        let ta_i64 = a.resolve_type("i64").unwrap();
+        let _tb_list = b2.resolve_type("(list i64)").unwrap();
+        let v_list = b2.eval("[5]").unwrap();
+        let err_list = b2.bind("x", ta_list, &v_list).unwrap_err();
+        assert_eq!(err_list.kind, ErrorKind::Runtime);
+        assert_eq!(err_list.rule(), "type.boundary");
+        let err_prim = b2.bind("y", ta_i64, &Value::Int(1)).unwrap_err();
+        assert_eq!(err_prim.kind, ErrorKind::Runtime);
+        assert_eq!(err_prim.rule(), "type.boundary");
+        let mut m2 = b2.freeze().unwrap();
+        let err_eval = m2
+            .eval_with("x", &[("x", ta_i64, Value::Int(1))])
+            .unwrap_err();
+        assert_eq!(err_eval.kind, ErrorKind::Runtime);
+        assert_eq!(err_eval.rule(), "type.boundary");
+    }
+
+    // C FFI での rin_resolve_type / rin_bind_resolved / rin_eval_with_resolved / rin_fn_arity / rin_fn_sig_format
+    use rin::ffi::*;
+    unsafe {
+        let r = rin_new(
+            rin_limits_default(),
+            RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: None,
+                dealloc: None,
+            },
+        );
+        assert!(
+            rin_load(
+                r,
+                c"m".as_ptr(),
+                c"(defn add ((a i64) (b i64)) -> i64 (+ a b))".as_ptr()
+            )
+            .ok
+        );
+        let mut ty = RinType { id: 0, env_id: 0 };
+        assert!(rin_resolve_type(r, c"i64".as_ptr(), &mut ty));
+        let v7 = rin_int(r, 7);
+        assert!(rin_bind_resolved(r, c"base".as_ptr(), ty, v7));
+        // 未初期化（env_id == 0）や別 Rin の RinType は type.boundary で拒否される
+        assert!(!rin_bind_resolved(
+            r,
+            c"bad_zero".as_ptr(),
+            RinType { id: 1, env_id: 0 },
+            v7
+        ));
+        assert_eq!(
+            std::ffi::CStr::from_ptr((*rin_last_error(r)).rule)
+                .to_str()
+                .unwrap(),
+            "type.boundary"
+        );
+        let r_other = rin_new(
+            rin_limits_default(),
+            RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: None,
+                dealloc: None,
+            },
+        );
+        let mut ty_other = RinType { id: 0, env_id: 0 };
+        assert!(rin_resolve_type(r_other, c"i64".as_ptr(), &mut ty_other));
+        assert!(!rin_bind_resolved(r, c"bad_other".as_ptr(), ty_other, v7));
+        assert_eq!(
+            std::ffi::CStr::from_ptr((*rin_last_error(r)).rule)
+                .to_str()
+                .unwrap(),
+            "type.boundary"
+        );
+        rin_free(r_other);
+        rin_drop(r, v7);
+
+        let mut arity = 0usize;
+        assert!(rin_fn_arity_in(
+            r,
+            c"m".as_ptr(),
+            c"add".as_ptr(),
+            &mut arity
+        ));
+        assert_eq!(arity, 2);
+        let mut buf = [0u8; 64];
+        let needed = rin_fn_sig_format_in(
+            r,
+            c"m".as_ptr(),
+            c"add".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        );
+        assert!(needed > 0 && needed < buf.len());
+        let sig_c = std::ffi::CStr::from_ptr(buf.as_ptr().cast())
+            .to_str()
+            .unwrap();
+        assert_eq!(sig_c, "((a i64) (b i64)) -> i64");
+
+        assert!(rin_freeze(r));
+        let vx = rin_int(r, 3);
+        let binding = RinResolvedBinding {
+            name: c"x".as_ptr(),
+            ty,
+            value: vx,
+        };
+        let res = rin_eval_with_resolved(r, c"(m.add base x)".as_ptr(), &binding, 1);
+        assert!(res.ok);
+        let mut out_i = 0i64;
+        assert!(rin_as_int(r, res.value, &mut out_i));
+        assert_eq!(out_i, 10);
+        rin_drop(r, vx);
+        rin_free(r);
+    }
+}
+
+#[test]
+fn type_expr_nesting_limit_enforced() {
+    let mut src = String::from("(defschema Deep (struct Deep (x ");
+    for _ in 0..260 {
+        src.push_str("(list ");
+    }
+    src.push_str("i64");
+    for _ in 0..260 {
+        src.push(')');
+    }
+    src.push_str(")))");
+    let err = eval(&src).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "src.nesting-limit");
+}
+
+#[test]
+fn formatter_handles_defschema_type_annotations_and_datum_patterns() {
+    let input = "(defschema Element (variant Element (Plain) (Fire) (Frost)))\n(defschema HitCtx (struct HitCtx (atk i64) (element Element)))\n(def limit i64 10)\n(defn on-hit ((ctx HitCtx)) -> i64 (match ctx.element (game.Element.Fire (* ctx.atk 2)) (_ ctx.atk)))\n(defn sum-ints ((d datum)) -> i64 (match d (i64(n) n) (list(xs) (fold (fn ((acc i64) (x datum)) -> i64 (+ acc (sum-ints x))) 0 xs)) (_ 0)))\n";
+    let formatted = rin::fmt::format(input).expect("format should succeed");
+    // 冪等性
+    let formatted_again = rin::fmt::format(&formatted).expect("second format should succeed");
+    assert_eq!(formatted, formatted_again);
+    // 定義間に空行が入る
+    assert!(formatted.contains(")\n\n(defschema HitCtx"));
+    assert!(formatted.contains(")\n\n(def limit i64 10)"));
+    assert!(formatted.contains(")\n\n(defn on-hit"));
+    // 型パターン・モジュール修飾パターンの隣接関係が保たれる
+    assert!(formatted.contains("i64(n)"));
+    assert!(formatted.contains("list(xs)"));
+    assert!(formatted.contains("game.Element.Fire"));
+}

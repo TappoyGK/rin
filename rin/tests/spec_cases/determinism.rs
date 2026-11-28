@@ -42,17 +42,17 @@ fn snapshot() -> String {
         "(let (x 4) ((fn (y) (+ x y)) 3))",
         "(map (fn (x) (+ x 1)) (range 0 5))",
         "(fold (fn (a x) (+ a x)) 0 [1 2 3 4])",
-        "(defn sum (n a) (if (== n 0) a (sum (- n 1) (+ a n)))) (sum 5 0)",
-        "(defn inner (x) (/ x 0)) (defn outer (x) (+ 1 (inner x))) (outer 5)",
+        "(defn sum ((n i64) (a i64)) -> i64 (if (== n 0) a (sum (- n 1) (+ a n)))) (sum 5 0)",
+        "(defn inner ((x i64)) -> i64 (/ x 0)) (defn outer ((x i64)) -> i64 (+ 1 (inner x))) (outer 5)",
         "(sort_by (fn (x) (- 0 x)) [1 4 2 3])",
         "(let (answer 1) anwser)",
         "(reverse [1 2 3])",
-        "(with S { a: [1] b: 2 } { a: [3] })",
+        "(defschema S (struct S (a (list i64)) (b i64))) (with S { a: [1] b: 2 } { a: [3] })",
         "(unique [1 2 1 3 2])",
         r#"(sort ["あいう" "あいあ" "a"])"#,
         "(flat_map (fn (x) (range 0 x)) [1 2 3])",
-        "(== LongName { field: [1 2] } LongName { field: [1 2] })",
-        "(== [some([1 2]) 3] [some([1 2]) 4])",
+        "(defschema LongName (struct LongName (field (list i64)))) (== LongName { field: [1 2] } LongName { field: [1 2] })",
+        "(== (tuple some([1 2]) 3) (tuple some([1 2]) 4))",
         &nested,
     ];
     for (index, source) in programs.iter().enumerate() {
@@ -75,7 +75,7 @@ fn snapshot() -> String {
         }
     }
     for depth in 0..=8 {
-        let source = "(defn f (n) (+ 1 (f n))) (f 0)";
+        let source = "(defn f ((n i64)) -> i64 (+ 1 (f n))) (f 0)";
         record(
             &mut out,
             &format!("depth/{depth}"),
@@ -143,16 +143,16 @@ fn stateful(out: &mut String) {
     let mut alloc = HeapAllocator;
     let mut machine = Builder::new(Limits::default(), &mut alloc);
     for name in ["alpho", "alpha", "alphi"] {
-        machine.bind(name, &Value::Int(1)).unwrap();
+        machine.bind(name, "i64", &Value::Int(1)).unwrap();
     }
     for (name, source) in [
         (
             "base",
-            "(export zeta alpha) (def zeta 2) (defn alpha (x) (/ x 0)) (def hidden 9)",
+            "(export zeta alpha) (def zeta 2) (defn alpha ((x i64)) -> i64 (/ x 0)) (def hidden 9)",
         ),
         (
             "client",
-            "(import base) (defn call (x) (+ 1 (base.alpha x)))",
+            "(import base) (defn call ((x i64)) -> i64 (+ 1 (base.alpha x)))",
         ),
     ] {
         machine.load_module(name, source).unwrap();
@@ -171,12 +171,12 @@ fn stateful(out: &mut String) {
         let mut b2 = Builder::new(Limits::default(), &mut alloc2);
         b2.load_module(
             "base",
-            "(export zeta alpha) (def zeta 2) (defn alpha (x) (/ x 0)) (def hidden 9)",
+            "(export zeta alpha) (def zeta 2) (defn alpha ((x i64)) -> i64 (/ x 0)) (def hidden 9)",
         )
         .unwrap();
         b2.load_module(
             "client",
-            "(import base) (defn call (x) (+ 1 (base.alpha x)))",
+            "(import base) (defn call ((x i64)) -> i64 (+ 1 (base.alpha x)))",
         )
         .unwrap();
         let mut frozen = b2.freeze().unwrap();

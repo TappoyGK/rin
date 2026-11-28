@@ -6,7 +6,7 @@ use rin::{ArenaAllocator, Builder, ErrorKind, HeapAllocator, Limits, MemoryConfi
 fn oom_sweep_every_byte_across_phases() {
     let programs = [
         "(let (xs (range 0 20)) (fold + 0 (map (fn (x) (* x 2)) xs)))",
-        "Card { id: \"ember\" cost: 3 tags: [\"fire\" \"fast\"] }",
+        "(defschema Card (struct Card (id text) (cost i64) (tags (list text)))) Card { id: \"ember\" cost: 3 tags: [\"fire\" \"fast\"] }",
         "(sort_by (fn (x) (- 0 x)) [3 1 4 1 5 9 2 6])",
     ];
 
@@ -44,7 +44,8 @@ fn oom_sweep_every_byte_across_phases() {
 
     // 2. モジュール読み込みの OOM 網羅
     {
-        let mod_src = "(export f) (defn f (x) (map (fn (n) (+ n x)) [1 2 3 4]))";
+        let mod_src =
+            "(export f) (defn f ((x i64)) -> (list i64) (map (fn (n) (+ n x)) [1 2 3 4]))";
         let mut succeeded = false;
         let mut limit = 0usize;
         while limit <= 65_536 {
@@ -148,7 +149,7 @@ fn oom_sweep_every_byte_across_phases() {
             &mut arena,
         );
         builder
-            .eval_ref("(defn make_list (n) (map (fn (x) (+ x 1)) (range 0 n)))")
+            .eval_ref("(defn make_list ((n i64)) -> (list i64) (map (fn (x) (+ x 1)) (range 0 n)))")
             .unwrap();
         let mut machine = builder.into_machine();
         let baseline = machine.live_bytes();
@@ -169,8 +170,8 @@ fn oom_sweep_every_byte_across_phases() {
         let n_big = machine.val_int(5000);
         let err = machine
             .eval_with_vals(
-                "(let (xs (make_list n)) [lbl xs])",
-                &[("lbl", label), ("n", n_big)],
+                "(let (xs (make_list n)) (tuple lbl xs))",
+                &[("lbl", "text", label), ("n", "i64", n_big)],
             )
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::TooMuchMemory);
@@ -198,7 +199,7 @@ fn deep_non_tail_recursion_100k_on_256kb_stack() {
             let res = builder
                 .eval_ref(
                     r#"
-                    (defn count_down (n)
+                    (defn count_down ((n i64)) -> i64
                       (if (== n 0)
                         0
                         (+ 1 (count_down (- n 1)))))

@@ -382,15 +382,6 @@ impl Runner<'_, '_> {
         let res = (|| {
             let items = self.list_to_work_vec(*list_v, span)?;
             for &x in items.as_slice() {
-                let tx = x.type_name(self.pool);
-                let tt = target.type_name(self.pool);
-                if tx != tt {
-                    return Err(self.err_runtime_fmt(
-                        "fn.list",
-                        span,
-                        format_args!("cannot compare {tx} and {tt}"),
-                    ));
-                }
                 let Some(equal) = self.values_equal(x, *target) else {
                     return self.step_limit_result(span);
                 };
