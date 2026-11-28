@@ -465,6 +465,7 @@ Decl       ::= "(" "def" IDENT TypeExpr? Expr ")"
              | "(" "defschema" UpperIdent SchemaBody ")"
              | "(" "import" IDENT ")"
              | "(" "export" IDENT* ")"
+(* defn の仮引数型や "->" TypeExpr を省いた形も構文としては受け付け、[expr.defn] の型エラーとする *)
 SchemaBody ::= "(" ( "struct" | "open_struct" ) UpperIdent ( "(" IDENT TypeExpr ")" )* ")"
              | "(" "variant" UpperIdent ( "(" UpperIdent TypeExpr? ")" )* ")"
              | ( IDENT "." )? UpperIdent

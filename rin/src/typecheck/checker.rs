@@ -184,10 +184,10 @@ pub(crate) fn resolve_type_expr_perm<'a, 'alloc>(
 impl<'a> TypeChecker<'a, '_> {
     fn run(&mut self, exprs: &[Expr]) -> Result<WorkTypeId, ErrRecorded> {
         // 0. extra_bindings（eval_with の一時束縛）を最外スコープに積む
+        //    `scopes` は `run` 内部でのみ参照され永続化されないため、`'a` の `&str` を複製せず借用する。
         for &(name, tid) in self.opts.extra_bindings {
-            let Some(rs) = RawStr::from_work(self.work, self.core, name) else {
-                return Err(oom(self.core, Span::default()));
-            };
+            // SAFETY: `name` は `CheckOptions<'a>` の寿命 `'a` の間有効で、`scopes` は `run` を超えて生存しない。
+            let rs = unsafe { RawStr::from_borrowed(name) };
             let wty = self.wpool.alloc_node(
                 self.work,
                 self.core,
@@ -203,9 +203,8 @@ impl<'a> TypeChecker<'a, '_> {
             }
         }
         for (name, te) in self.opts.extra_binding_exprs {
-            let Some(rs) = RawStr::from_work(self.work, self.core, name) else {
-                return Err(oom(self.core, te.span));
-            };
+            // SAFETY: `name` は `CheckOptions<'a>` の寿命 `'a` の間有効で、`scopes` は `run` を超えて生存しない。
+            let rs = unsafe { RawStr::from_borrowed(name) };
             let wty = self.resolve_type_expr(te)?;
             if self
                 .scopes
@@ -849,7 +848,21 @@ impl<'a> TypeChecker<'a, '_> {
             return Err(emit(self.core, "cannot redefine existing global name"));
         }
         if crate::bytecode::static_sym_id(name).is_some() {
-            return Err(emit(self.core, "cannot redefine builtin name"));
+            return Err(if rule == "expr.defn" {
+                self.core.err_fmt(
+                    "expr.defn",
+                    ErrorKind::Runtime,
+                    span,
+                    format_args!("cannot redefine builtin '{name}'"),
+                )
+            } else {
+                self.core.err_fmt(
+                    "expr.def",
+                    ErrorKind::Runtime,
+                    span,
+                    format_args!("cannot redefine builtin '{name}'"),
+                )
+            });
         }
         if self.opts.module_name.is_none() && self.env.lookup_module(name).is_some() {
             return Err(emit(self.core, "cannot redefine loaded module name"));
@@ -868,6 +881,13 @@ impl<'a> TypeChecker<'a, '_> {
             let mod_slot = self
                 .imported_modules
                 .get_by(mh, |k| k.as_str() == mname.as_str())
+                .or_else(|| {
+                    if self.opts.module_name.is_none() {
+                        self.env.lookup_root_import(mname.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| {
                     if self.opts.frozen {
                         self.env.lookup_module(mname.as_str()).map(|(idx, _)| idx)

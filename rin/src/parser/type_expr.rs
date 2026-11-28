@@ -48,6 +48,20 @@ fn is_upper_ident(s: &str) -> bool {
 }
 
 impl Parser<'_, '_, '_> {
+    fn expect_type_token(
+        &mut self,
+        expected: WorkTokenKind,
+        what: &str,
+    ) -> Result<Span, ErrRecorded> {
+        let tok = self.peek();
+        if tok.kind == expected {
+            self.advance()?;
+            Ok(tok.span)
+        } else {
+            Err(self.parse_err_fmt("type.expr", tok.span, format_args!("expected {what}")))
+        }
+    }
+
     /// 型式 `TypeExpr` を非再帰で解析し、`(TypeExpr, 構文深さ)` を返す。
     pub(super) fn parse_type_expr(
         &mut self,
@@ -138,8 +152,10 @@ impl Parser<'_, '_, '_> {
                                     }
                                 }
                                 "fn" => {
-                                    let param_start = self
-                                        .expect(WorkTokenKind::LParen, "fn parameter types '('")?;
+                                    let param_start = self.expect_type_token(
+                                        WorkTokenKind::LParen,
+                                        "fn parameter types '('",
+                                    )?;
                                     if self.peek().kind == WorkTokenKind::RParen {
                                         self.advance()?;
                                         TypeFrame::FnRet {
@@ -184,7 +200,7 @@ impl Parser<'_, '_, '_> {
                     };
                     match frame {
                         TypeFrame::List { start } => {
-                            self.expect(WorkTokenKind::RParen, "')'")?;
+                            self.expect_type_token(WorkTokenKind::RParen, "')'")?;
                             let inner = self.alloc_box(ty, start)?;
                             let total = 1 + depth;
                             self.check_nesting(base_depth + stack.len() + total, start)?;
@@ -194,7 +210,7 @@ impl Parser<'_, '_, '_> {
                             );
                         }
                         TypeFrame::Array { start } => {
-                            self.expect(WorkTokenKind::RParen, "')'")?;
+                            self.expect_type_token(WorkTokenKind::RParen, "')'")?;
                             let inner = self.alloc_box(ty, start)?;
                             let total = 1 + depth;
                             self.check_nesting(base_depth + stack.len() + total, start)?;
@@ -204,7 +220,7 @@ impl Parser<'_, '_, '_> {
                             );
                         }
                         TypeFrame::Option { start } => {
-                            self.expect(WorkTokenKind::RParen, "')'")?;
+                            self.expect_type_token(WorkTokenKind::RParen, "')'")?;
                             let inner = self.alloc_box(ty, start)?;
                             let total = 1 + depth;
                             self.check_nesting(base_depth + stack.len() + total, start)?;
@@ -236,7 +252,7 @@ impl Parser<'_, '_, '_> {
                             ok,
                             ok_depth,
                         } => {
-                            self.expect(WorkTokenKind::RParen, "')'")?;
+                            self.expect_type_token(WorkTokenKind::RParen, "')'")?;
                             let err = self.alloc_box(ty, start)?;
                             let total = 1 + ok_depth.max(depth);
                             self.check_nesting(base_depth + stack.len() + total, start)?;
@@ -350,7 +366,7 @@ impl Parser<'_, '_, '_> {
                             params,
                             max_child,
                         } => {
-                            self.expect(WorkTokenKind::RParen, "')'")?;
+                            self.expect_type_token(WorkTokenKind::RParen, "')'")?;
                             let ret = self.alloc_box(ty, start)?;
                             let total = 1 + max_child.max(depth);
                             self.check_nesting(base_depth + stack.len() + total, start)?;

@@ -211,6 +211,14 @@ pub(crate) fn check_rval_against_type(
     pool: &mut Pool<'_>,
     span: Span,
 ) -> Result<(), ErrRecorded> {
+    match (env.get_type(ty), val) {
+        (PermTypeNode::I64, RVal::Int(_))
+        | (PermTypeNode::F64, RVal::Float(_))
+        | (PermTypeNode::Bool, RVal::Bool(_))
+        | (PermTypeNode::Char, RVal::Char(_))
+        | (PermTypeNode::Void, RVal::Void) => return Ok(()),
+        _ => {}
+    }
     check_rval_target(val, BoundaryTarget::Perm(ty), env, pool, span)
 }
 

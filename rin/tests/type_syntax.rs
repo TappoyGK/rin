@@ -113,10 +113,41 @@ fn typed_defn_fn_and_def_syntax_and_eval() {
         ])
     );
 
-    // 3 引数 def の型注釈に `any` を書いた場合は type.expr 構文エラー（指摘 8 の回帰テスト）
-    let err = eval("(def x any 1)").unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Parse);
-    assert_eq!(err.rule(), "type.expr");
+    // 3 引数 def の型注釈に不正な型を書いた場合は type.expr 構文エラー（指摘 8 の回帰テスト）
+    for bad in [
+        "(def x any 1)",
+        "(def x (list) 1)",
+        "(def x (map i64) 1)",
+        "(def x (list i64 i64) 1)",
+        "(def x (option) none)",
+        "(def x (fn i64) 1)",
+    ] {
+        let err = eval(bad).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "{bad}: {err}");
+        assert_eq!(err.rule(), "type.expr", "{bad}: {err}");
+    }
+
+    // 組み込み名の再定義メッセージには名前が含まれる（再レビュー指摘 2）
+    let err = eval("(def pi 1)").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Runtime);
+    assert_eq!(err.rule(), "expr.def");
+    assert_eq!(err.message, "cannot redefine builtin 'pi'");
+
+    // 前の Builder::eval で import したモジュールの型を後続の評価で参照できる（再レビュー指摘 1）
+    let mut alloc = HeapAllocator;
+    let mut b = Builder::new(Limits::default(), &mut alloc);
+    b.load_module(
+        "m",
+        "(defschema T (struct T (a i64))) (defn mk () -> T T { a: 3 }) (def k 7)",
+    )
+    .unwrap();
+    assert_eq!(b.eval("(import m) 1").unwrap(), Value::Int(1));
+    assert_eq!(b.eval("(def y m.k) y").unwrap(), Value::Int(7));
+    assert_eq!(b.eval("(def q m.T (m.mk)) q.a").unwrap(), Value::Int(3));
+    assert_eq!(
+        b.eval("(defn g ((t m.T)) -> i64 t.a) (g (m.mk))").unwrap(),
+        Value::Int(3)
+    );
 }
 
 #[test]

@@ -241,6 +241,92 @@ impl Parser<'_, '_, '_> {
         ))
     }
 
+    /// `(def name ...)` の 2 つ目の要素が型注釈（3 引数形）かどうかを先読みで判定する。
+    fn def_has_type_annotation(&mut self) -> Result<bool, ErrRecorded> {
+        let first = self.peek().kind;
+        // 型式は識別子または `(` で始まる。それ以外は 2 引数形 `(def name expr)`。
+        if !matches!(first, WorkTokenKind::Ident(_) | WorkTokenKind::LParen) {
+            return Ok(false);
+        }
+        // `UpperIdent` の直後が `{` または `.` のときは構造体・バリアント式であり型注釈ではない。
+        if let WorkTokenKind::Ident(id) = first
+            && id.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+            && matches!(
+                self.peek_next()?.map(|t| t.kind),
+                Some(WorkTokenKind::LBrace | WorkTokenKind::Dot)
+            )
+        {
+            return Ok(false);
+        }
+        let saved_lexer = self.lexer.save_state();
+        let saved_cur = self.cur;
+        let saved_next = self.next;
+        let saved_mark = self.work.mark(self.core);
+        let res = (|| -> Result<bool, ErrRecorded> {
+            match self.peek().kind {
+                WorkTokenKind::LParen => {
+                    self.advance()?;
+                    let mut depth = 1usize;
+                    while depth > 0 && !self.at_eof() {
+                        match self.peek().kind {
+                            WorkTokenKind::LParen => depth += 1,
+                            WorkTokenKind::RParen => depth -= 1,
+                            _ => {}
+                        }
+                        self.advance()?;
+                    }
+                }
+                WorkTokenKind::Ident(_) => {
+                    self.advance()?;
+                }
+                _ => return Ok(false),
+            }
+            // 後置アクセス（`.field`・隣接 `(...)`・隣接 `[...]`）があれば 1 式の一部として読み飛ばす。
+            loop {
+                let tok = self.peek();
+                match tok.kind {
+                    WorkTokenKind::Dot => {
+                        self.advance()?;
+                        if matches!(self.peek().kind, WorkTokenKind::Ident(_)) {
+                            self.advance()?;
+                        }
+                    }
+                    WorkTokenKind::LParen if tok.attached => {
+                        self.advance()?;
+                        let mut depth = 1usize;
+                        while depth > 0 && !self.at_eof() {
+                            match self.peek().kind {
+                                WorkTokenKind::LParen => depth += 1,
+                                WorkTokenKind::RParen => depth -= 1,
+                                _ => {}
+                            }
+                            self.advance()?;
+                        }
+                    }
+                    WorkTokenKind::LBracket if tok.attached => {
+                        self.advance()?;
+                        let mut depth = 1usize;
+                        while depth > 0 && !self.at_eof() {
+                            match self.peek().kind {
+                                WorkTokenKind::LBracket => depth += 1,
+                                WorkTokenKind::RBracket => depth -= 1,
+                                _ => {}
+                            }
+                            self.advance()?;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            Ok(self.peek().kind != WorkTokenKind::RParen && !self.at_eof())
+        })();
+        self.lexer.restore_state(saved_lexer);
+        self.cur = saved_cur;
+        self.next = saved_next;
+        self.work.rewind(self.core, saved_mark);
+        res
+    }
+
     fn start_paren(&mut self) -> Result<NextStep, ErrRecorded> {
         let start = self.expect(WorkTokenKind::LParen, "'('")?;
         if self.peek().kind == WorkTokenKind::RParen {
@@ -289,51 +375,12 @@ impl Parser<'_, '_, '_> {
                     self.advance()?; // def
                     let (name, _) = self.expect_ident("variable name")?;
                     // `(def name TypeExpr expr)` か `(def name expr)` かを先読みで判定する。
-                    // `UpperIdent` の直後が `{` または `.` のときは構造体・バリアント式であり型注釈ではない。
-                    let starts_struct_or_variant = matches!(
-                        self.peek().kind,
-                        WorkTokenKind::Ident(id)
-                            if id.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
-                    ) && matches!(
-                        self.peek_next()?.map(|t| t.kind),
-                        Some(WorkTokenKind::LBrace | WorkTokenKind::Dot)
-                    );
-                    // 3 引数位置の `any` は型エラー `[type.expr]` として報告する。
-                    let explicit_any_type = matches!(
-                        self.peek().kind,
-                        WorkTokenKind::Ident(id) if id.as_str() == "any"
-                    ) && !matches!(
-                        self.peek_next()?.map(|t| t.kind),
-                        Some(WorkTokenKind::RParen) | None
-                    );
-                    let parsed_ty = if starts_struct_or_variant {
-                        None
-                    } else if explicit_any_type {
-                        let (ty, ty_depth) = self.parse_type_expr(self.frames.len() + 1)?;
-                        Some((self.alloc_box(ty, start)?, ty_depth))
+                    let has_type_ann = self.def_has_type_annotation()?;
+                    let (ty, ty_depth) = if has_type_ann {
+                        let (t, d) = self.parse_type_expr(self.frames.len() + 1)?;
+                        (Some(self.alloc_box(t, start)?), d)
                     } else {
-                        let saved_lexer = self.lexer.save_state();
-                        let saved_cur = self.cur;
-                        let saved_next = self.next;
-                        let saved_mark = self.work.mark(self.core);
-                        match self.parse_type_expr(self.frames.len() + 1) {
-                            Ok((ty, ty_depth))
-                                if self.peek().kind != WorkTokenKind::RParen && !self.at_eof() =>
-                            {
-                                Some((self.alloc_box(ty, start)?, ty_depth))
-                            }
-                            _ => {
-                                self.lexer.restore_state(saved_lexer);
-                                self.cur = saved_cur;
-                                self.next = saved_next;
-                                self.work.rewind(self.core, saved_mark);
-                                None
-                            }
-                        }
-                    };
-                    let (ty, ty_depth) = match parsed_ty {
-                        Some((t, d)) => (Some(t), d),
-                        None => (None, 0),
+                        (None, 0)
                     };
                     self.push_frame(
                         ParseFrame::Def {
