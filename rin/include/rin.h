@@ -101,20 +101,26 @@ typedef struct RinError {
     const char *text;      /* 常に非 NULL。見出しと履歴の全体。 */
 } RinError;
 
-/* rin_eval_with に渡す 1 件の初期束縛。
- * name と type_expr は NUL 終端の UTF-8、value は同じ Rin で生成した有効な RinValue。
+/* rin_resolve_type で事前解決した型ハンドル。
+ * rin_resolve_type が書き込んだ値だけが有効であり、呼び出し側でフィールドを手動設定してはならない。
+ * 取得元の Rin でのみ有効であり、別の Rin で取得したハンドルや範囲外・ゼロ初期化した値を
+ * rin_bind_resolved / rin_eval_with_resolved に渡すと type.boundary の実行時エラー（位置 0:0）となる。
  */
 typedef struct RinType {
     uint32_t id;
     uint64_t env_id;
 } RinType;
 
+/* rin_eval_with に渡す 1 件の初期束縛。
+ * name と type_expr は NUL 終端の UTF-8、value は同じ Rin で生成した有効な RinValue。
+ */
 typedef struct RinBinding {
     const char *name;
     const char *type_expr;
     const RinValue *value;
 } RinBinding;
 
+/* rin_eval_with_resolved に渡す 1 件の初期束縛（型は同じ Rin で取得した RinType）。 */
 typedef struct RinResolvedBinding {
     const char *name;
     RinType ty;
