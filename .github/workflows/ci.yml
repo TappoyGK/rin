@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, release]
+    branches: [main, release, 'release/**']
   push:
-    branches: [main, release]
+    branches: [main, release, 'release/**']
   workflow_dispatch:
 
 permissions:
@@ -15,16 +15,44 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: classify changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      required: ${{ steps.filter.outputs.required }}
+    steps:
+      - name: Check out source and history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify change classification
+        run: python3 scripts/test-ci-changes.py
+
+      - name: Classify changed files
+        id: filter
+        run: python3 scripts/ci-changes.py
+
   work:
     name: work checks
+    needs: changes
     if: >-
-      (github.event_name == 'pull_request' && (github.event.pull_request.stack.base.ref || github.base_ref) == 'release') ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/release')
+      always() && !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') && (
+      (github.event_name == 'pull_request' && ((github.event.pull_request.stack.base.ref || github.base_ref) == 'release' || startsWith(github.event.pull_request.stack.base.ref || github.base_ref, 'release/'))) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/release/')))
+      )
     runs-on: macos-latest
     timeout-minutes: 10
     outputs:
       determinism: ${{ steps.determinism.outputs.digest }}
     steps:
+      - name: Require successful change classification
+        if: needs.changes.result != 'success'
+        run: exit 1
+
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,6 +69,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --locked --all-targets -- -D warnings
+          cargo clippy -p rin --no-default-features --locked --all-targets -- -D warnings
 
       - name: Check documentation
         env:
@@ -52,19 +81,29 @@ jobs:
         run: sh scripts/check-determinism.sh
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: |
+          cargo test --workspace --locked
+          cargo test -p rin --no-default-features --locked --all-targets
 
   release:
     name: release checks
+    needs: changes
     if: >-
+      always() && !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') && (
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && (github.event.pull_request.stack.base.ref || github.base_ref) == 'main') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      )
     runs-on: macos-latest
     timeout-minutes: 15
     outputs:
       determinism: ${{ steps.determinism.outputs.digest }}
     steps:
+      - name: Require successful change classification
+        if: needs.changes.result != 'success'
+        run: exit 1
+
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,6 +119,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --locked --all-targets -- -D warnings
+          cargo clippy -p rin --no-default-features --locked --all-targets -- -D warnings
 
       - name: Check documentation
         env:
@@ -90,10 +130,11 @@ jobs:
         id: determinism
         run: sh scripts/check-determinism.sh
 
-      - name: Run tests (debug and release)
+      - name: Run tests (debug, release, and no-default-features)
         run: |
           cargo test --workspace --locked
           cargo test --workspace --locked --release
+          cargo test -p rin --no-default-features --locked --all-targets
 
       - name: Verify release library artifact
         run: |
@@ -103,11 +144,19 @@ jobs:
 
   determinism-linux:
     name: determinism (Linux)
+    needs: changes
+    if: >-
+      always() && !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.required != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       determinism: ${{ steps.determinism.outputs.digest }}
     steps:
+      - name: Require successful change classification
+        if: needs.changes.result != 'success'
+        run: exit 1
+
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -120,8 +169,10 @@ jobs:
 
   determinism-platforms:
     name: determinism (platform comparison)
-    needs: [work, release, determinism-linux]
-    if: ${{ always() && !cancelled() }}
+    needs: [changes, work, release, determinism-linux]
+    if: >-
+      always() && !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.required != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
