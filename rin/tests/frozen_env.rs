@@ -1,0 +1,328 @@
+//! 大域環境の凍結（`[env.phase]`・`[env.frozen]`・`[env.modules]`・`[env.isolation]`）と
+//! C FFI の `rin_freeze` を検証する。
+
+use std::ffi::CStr;
+
+use rin::ffi::{
+    RinAllocator, RinBinding, RinErrorKind, rin_as_int, rin_bind, rin_build, rin_call, rin_call_in,
+    rin_drop, rin_eval, rin_eval_with, rin_free, rin_freeze, rin_int, rin_last_error,
+    rin_limits_default, rin_load, rin_new,
+};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
+
+#[test]
+fn frozen_rejects_declarations_and_module_forms_before_execution() {
+    let mut alloc = HeapAllocator;
+    let mut builder = Builder::new(Limits::default(), &mut alloc);
+    builder.bind("x", "i64", &Value::Int(10)).unwrap();
+    let mut machine = builder.freeze().unwrap();
+
+    for src in [
+        "(def a 1)",
+        "(defn f ((n i64)) -> i64 n)",
+        "(import m)",
+        "(export x)",
+        "(if false (def a 1) 0)",
+        "(fn () (defn f () -> i64 1))",
+        "(let (y 1) (import m) y)",
+        "(/ 1 0) (def late 1)", // 手前のゼロ除算より前に構文エラーで止まること
+    ] {
+        let err = machine.eval(src).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "{src}");
+        assert_eq!(err.rule(), "env.frozen", "{src}");
+    }
+
+    // 深い入れ子でも非再帰検査で安全に拒否する。
+    let deep = format!(
+        "{}(def nested 1){}",
+        "(let (a 1) ".repeat(200),
+        ")".repeat(200)
+    );
+    let err = machine.eval(&deep).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "env.frozen");
+}
+
+#[test]
+fn non_top_level_declarations_are_syntax_errors_even_during_loading() {
+    let mut alloc = HeapAllocator;
+    let mut builder = Builder::new(Limits::default(), &mut alloc);
+    for (src, rule) in [
+        ("(defn g () -> i64 (def y 1) y)", "expr.def"),
+        (
+            "(defn mk () -> i64 (defn made () -> i64 42) 0)",
+            "expr.defn",
+        ),
+        ("(defn late () -> i64 (import lib) 0)", "expr.module"),
+        ("(defn exp () -> i64 (export x) 0)", "expr.module"),
+        ("(if false (def y 1) 0)", "expr.def"),
+        ("(let (a 1) (def y 2) y)", "expr.def"),
+        ("(fn () (def y 1))", "expr.def"),
+    ] {
+        let err = builder.eval(src).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse, "{src}");
+        assert_eq!(err.rule(), rule, "{src}");
+    }
+    let mod_err = builder
+        .load_module("mm", "(def z 0) (defn h () -> i64 (def z (+ z 1)) z)")
+        .unwrap_err();
+    assert_eq!(mod_err.kind, ErrorKind::Parse);
+    assert_eq!(mod_err.rule(), "expr.def");
+}
+
+#[test]
+fn frozen_exposes_loaded_modules_without_import_and_keeps_isolation() {
+    let mut alloc = HeapAllocator;
+    let mut builder = Builder::new(Limits::default(), &mut alloc);
+    builder
+        .load_module(
+            "math_mod",
+            "(export add base_val) (def secret 99) (def base_val 40) (defn add ((a i64) (b i64)) -> i64 (+ a b))",
+        )
+        .unwrap();
+    let iso_err = builder
+        .load_module(
+            "other_mod",
+            "(defn read_unimported () -> i64 math_mod.base_val)",
+        )
+        .unwrap_err();
+    assert_eq!(iso_err.kind, ErrorKind::Type);
+    assert_eq!(iso_err.rule(), "expr.name");
+
+    let mut machine = builder.freeze().unwrap();
+
+    // 実行段階では import なしで公開シンボルを参照できる。
+    assert_eq!(
+        machine.eval("(math_mod.add math_mod.base_val 2)").unwrap(),
+        Value::Int(42)
+    );
+
+    // 非公開シンボルは依然として参照できない。
+    let priv_err = machine.eval("math_mod.secret").unwrap_err();
+    assert_eq!(priv_err.kind, ErrorKind::Type);
+    assert_eq!(priv_err.rule(), "expr.module");
+
+    // 凍結時の未定義名候補には読み込み済みモジュール名も含まれる。
+    let hint_err = machine.eval("math_mo").unwrap_err();
+    assert_eq!(hint_err.rule(), "expr.name");
+    assert!(
+        hint_err.message.contains("did you mean 'math_mod'?"),
+        "{}",
+        hint_err.message
+    );
+}
+
+#[test]
+fn eval_with_temporary_bindings_do_not_mutate_or_leak() {
+    let mut alloc = HeapAllocator;
+    let mut builder = Builder::new(
+        Limits {
+            memory_bytes: 32_768,
+            ..Limits::default()
+        },
+        &mut alloc,
+    );
+    builder.bind("x", "i64", &Value::Int(10)).unwrap();
+    builder.eval("(defn read_x () -> i64 x)").unwrap();
+    let mut machine = builder.freeze().unwrap();
+    let baseline = machine.live_bytes();
+
+    // 一時束縛はトップレベル評価中だけ有効で、大域 x を一時的に覆う。
+    let v = machine
+        .eval_with(
+            "(+ x y)",
+            &[("x", "i64", Value::Int(100)), ("y", "i64", Value::Int(23))],
+        )
+        .unwrap();
+    assert_eq!(v, Value::Int(123));
+    assert_eq!(machine.live_bytes(), baseline);
+
+    // 評価後は元の環境が保たれ、一時束縛 y は消えている。
+    assert_eq!(machine.eval("x").unwrap(), Value::Int(10));
+    assert_eq!(machine.call("read_x", &[]).unwrap(), Value::Int(10));
+    let err = machine.eval("y").unwrap_err();
+    assert_eq!(err.rule(), "expr.name");
+    assert_eq!(machine.live_bytes(), baseline);
+
+    // 一時束縛が実行時エラーやメモリ超過になっても解放される。
+    let err = machine
+        .eval_with("(/ x 0)", &[("tmp", "text", Value::text("hello"))])
+        .unwrap_err();
+    assert_eq!(err.rule(), "op.arith");
+    assert_eq!(machine.live_bytes(), baseline);
+
+    let big = Value::text("a".repeat(40_000));
+    let mem_err = machine
+        .eval_with(
+            "x",
+            &[("small", "text", Value::text("ok")), ("big", "text", big)],
+        )
+        .unwrap_err();
+    assert_eq!(mem_err.kind, ErrorKind::TooMuchMemory);
+    assert_eq!(machine.live_bytes(), baseline);
+
+    // 9 個以上の束縛（ヒープ経路）と同名上書きも正しく評価・解放される。
+    let many = [
+        ("a1", "i64", Value::Int(1)),
+        ("a2", "i64", Value::Int(2)),
+        ("a3", "i64", Value::Int(3)),
+        ("a4", "i64", Value::Int(4)),
+        ("a5", "i64", Value::Int(5)),
+        ("a6", "i64", Value::Int(6)),
+        ("a7", "i64", Value::Int(7)),
+        ("a8", "i64", Value::Int(8)),
+        ("a9", "i64", Value::Int(9)),
+        ("a1", "i64", Value::Int(10)),
+    ];
+    let sum = machine
+        .eval_with(
+            "(+ (+ (+ a1 a2) (+ a3 a4)) (+ (+ a5 a6) (+ (+ a7 a8) a9)))",
+            &many,
+        )
+        .unwrap();
+    assert_eq!(sum, Value::Int(54));
+    assert_eq!(machine.live_bytes(), baseline);
+}
+
+#[test]
+fn c_ffi_freeze_blocks_mutations_and_enables_direct_module_access() {
+    let alloc = RinAllocator {
+        ctx: std::ptr::null_mut(),
+        alloc: None,
+        dealloc: None,
+    };
+    let m = rin_new(rin_limits_default(), alloc);
+    assert!(!m.is_null());
+
+    unsafe {
+        assert!(!rin_freeze(std::ptr::null_mut()));
+
+        let v10 = rin_int(m, 10);
+        assert!(rin_bind(m, c"g".as_ptr(), c"i64".as_ptr(), v10));
+        rin_drop(m, v10);
+
+        let load_res = rin_load(
+            m,
+            c"mod_a".as_ptr(),
+            c"(defn twice ((n i64)) -> i64 (* n 2))".as_ptr(),
+        );
+        assert!(load_res.ok);
+
+        let def_res = rin_build(m, c"(defn add_g ((n i64)) -> i64 (+ n g))".as_ptr());
+        assert!(def_res.ok);
+
+        // 凍結前の rin_eval / rin_eval_with は env.phase エラー
+        let pre_eval = rin_eval(m, c"g".as_ptr());
+        assert!(!pre_eval.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.phase");
+        assert!(
+            CStr::from_ptr((*err).message)
+                .to_str()
+                .unwrap()
+                .contains("rin_eval requires")
+        );
+
+        let pre_eval_with = rin_eval_with(m, c"g".as_ptr(), std::ptr::null(), 0);
+        assert!(!pre_eval_with.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.phase");
+        assert!(
+            CStr::from_ptr((*err).message)
+                .to_str()
+                .unwrap()
+                .contains("rin_eval_with requires")
+        );
+
+        // 凍結（2 回目も冪等に成功）
+        assert!(rin_freeze(m));
+        assert!(rin_last_error(m).is_null());
+        assert!(rin_freeze(m));
+
+        // 凍結後の rin_build は env.frozen エラー
+        let post_build = rin_build(m, c"(def z 1)".as_ptr());
+        assert!(!post_build.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.frozen");
+
+        // 凍結後の rin_bind は env.frozen エラー
+        let v20 = rin_int(m, 20);
+        assert!(!rin_bind(m, c"g".as_ptr(), c"i64".as_ptr(), v20));
+        rin_drop(m, v20);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.frozen");
+
+        // 凍結後の rin_load も env.frozen エラー
+        let load2 = rin_load(m, c"mod_b".as_ptr(), c"(def z 1)".as_ptr());
+        assert!(!load2.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Runtime);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.frozen");
+
+        // 凍結後の def を含む eval は env.frozen の構文エラー
+        let bad_eval = rin_eval(m, c"(def z 1)".as_ptr());
+        assert!(!bad_eval.ok);
+        let err = rin_last_error(m);
+        assert!(!err.is_null());
+        assert_eq!((*err).kind, RinErrorKind::Parse);
+        assert_eq!(CStr::from_ptr((*err).rule).to_str().unwrap(), "env.frozen");
+
+        // 凍結後は import なしでモジュールを参照でき、eval_with / call / call_in も動く
+        let ok_eval = rin_eval(m, c"(mod_a.twice g)".as_ptr());
+        assert!(ok_eval.ok);
+        let mut out = 0;
+        assert!(rin_as_int(m, ok_eval.value, &mut out));
+        assert_eq!(out, 20);
+
+        // rin_eval_with で一時束縛を渡し、大域 g を上書きせず元に戻ること
+        let tmp_g = rin_int(m, 100);
+        let tmp_y = rin_int(m, 7);
+        let binds = [
+            RinBinding {
+                name: c"g".as_ptr(),
+                type_expr: c"i64".as_ptr(),
+                value: tmp_g,
+            },
+            RinBinding {
+                name: c"y".as_ptr(),
+                type_expr: c"i64".as_ptr(),
+                value: tmp_y,
+            },
+        ];
+        let with_res = rin_eval_with(m, c"(+ g y)".as_ptr(), binds.as_ptr(), binds.len());
+        rin_drop(m, tmp_g);
+        rin_drop(m, tmp_y);
+        assert!(with_res.ok);
+        assert!(rin_as_int(m, with_res.value, &mut out));
+        assert_eq!(out, 107);
+
+        let after_g = rin_eval(m, c"g".as_ptr());
+        assert!(after_g.ok);
+        assert!(rin_as_int(m, after_g.value, &mut out));
+        assert_eq!(out, 10);
+
+        let arg = rin_int(m, 5);
+        let args = [arg as *const _];
+        let call_res = rin_call(m, c"add_g".as_ptr(), args.as_ptr(), 1);
+        assert!(call_res.ok);
+        assert!(rin_as_int(m, call_res.value, &mut out));
+        assert_eq!(out, 15);
+
+        let call_in_res = rin_call_in(m, c"mod_a".as_ptr(), c"twice".as_ptr(), args.as_ptr(), 1);
+        assert!(call_in_res.ok);
+        assert!(rin_as_int(m, call_in_res.value, &mut out));
+        assert_eq!(out, 10);
+        rin_drop(m, arg);
+
+        rin_free(m);
+    }
+}

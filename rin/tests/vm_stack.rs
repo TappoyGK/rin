@@ -1,20 +1,20 @@
 //! VM の既定深さを 2 MiB のネイティブスタック上で検証する。abort は子プロセスに隔離する。
-use rin::{ErrorKind, HeapAllocator, Limits, Machine};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits};
 
 fn chain(count: usize, builtin: &str, leaf: &str) -> String {
     let mut source = String::new();
-    let (params, args, result) = match builtin {
-        "fold" => ("acc x", "0 1", "acc"),
-        "any" | "all" | "find" | "filter" => ("x", "1", "true"),
-        "flat_map" => ("x", "1", "[x]"),
-        _ => ("x", "1", "x"),
+    let (params, ret_ty, args, result, err_expr) = match builtin {
+        "fold" => ("(acc i64) (x i64)", "i64", "0 1", "acc", "(/ 1 0)"),
+        "any" | "all" | "find" | "filter" => ("(x i64)", "bool", "1", "true", "(== (/ 1 0) 0)"),
+        "flat_map" => ("(x i64)", "(list i64)", "1", "[x]", "[(/ 1 0)]"),
+        _ => ("(x i64)", "i64", "1", "x", "(/ 1 0)"),
     };
     for i in 0..count {
         let body = if i + 1 == count {
             if leaf == "ok" {
                 result.to_string()
             } else {
-                "(/ 1 0)".to_string()
+                err_expr.to_string()
             }
         } else if builtin == "direct" {
             format!("(+ 1 (f{} x))", i + 1)
@@ -33,7 +33,7 @@ fn chain(count: usize, builtin: &str, leaf: &str) -> String {
             };
             format!("(if (== x 0) {first} (let () {body}))")
         };
-        source.push_str(&format!("(defn f{i} ({params}) {body})\n"));
+        source.push_str(&format!("(defn f{i} ({params}) -> {ret_ty} {body})\n"));
     }
     source.push_str(&format!("(f0 {args})"));
     source
@@ -50,9 +50,10 @@ fn default_depth_is_safe_on_two_mib_stack() {
                 let count = parts[1].parse::<usize>().unwrap();
                 let source = chain(count, parts[0], parts[2]);
                 let mut alloc = HeapAllocator;
-                let mut machine = Machine::new(Limits::default(), &mut alloc);
+                let mut machine = Builder::new(Limits::default(), &mut alloc);
                 let (definitions, call) = source.rsplit_once('\n').unwrap();
                 machine.eval(definitions).unwrap();
+                let mut machine = machine.freeze().unwrap();
                 let live_before = machine.live_bytes();
                 let result = if parts[3] == "host" {
                     let args = if parts[0] == "fold" {
@@ -150,11 +151,11 @@ fn callback_arity_errors_release_owned_arguments() {
                 continue;
             }
             let mut alloc = HeapAllocator;
-            let mut machine = Machine::new(Limits::default(), &mut alloc);
+            let mut machine = Builder::new(Limits::default(), &mut alloc);
             let live_before = machine.live_bytes();
             let args = " [\"owned\"]".repeat(argc);
             let error = machine.eval(&format!("({builtin}{args})")).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Runtime, "{builtin}/{argc}");
+            assert_eq!(error.kind, ErrorKind::Type, "{builtin}/{argc}");
             assert_eq!(error.rule(), "fn.list", "{builtin}/{argc}");
             assert_eq!(machine.live_bytes(), live_before, "{builtin}/{argc}");
             assert_eq!(machine.eval("(+ 1 2)").unwrap(), rin::Value::Int(3));

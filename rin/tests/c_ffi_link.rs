@@ -48,29 +48,27 @@ int main(void) {
     Bump bump;
     bump.offset = 0;
     RinAllocator alloc = { &bump, bump_alloc, NULL };
-    RinMachine *m = rin_new(rin_limits_default(), alloc);
+    Rin *m = rin_new(rin_limits_default(), alloc);
     assert(m != NULL);
 
-    RinEvalResult lr = rin_load(m, "base", "(defn make_card (c) Card { id: \"ember\", cost: (- c 1) })");
+    RinEvalResult lr = rin_load(m, "base", "(defschema Card (struct Card (id text) (cost i64))) (defn make_card ((c i64)) -> Card Card { id: \"ember\" cost: (- c 1) })");
     assert(lr.ok && lr.value == NULL);
     assert(rin_last_error(m) == NULL);
-    rin_res_free(&lr);
 
-    RinValue *arg = rin_int(4);
+    RinValue *arg = rin_int(m, 4);
     const RinValue *args[1] = { arg };
     RinEvalResult cr = rin_call_in(m, "base", "make_card", args, 1);
-    rin_drop(arg);
+    rin_drop(m, arg);
     assert(cr.ok);
-    assert(rin_check_str(cr.value, "(struct Card (id string) (cost i64))"));
+    assert(rin_check_str(m, cr.value, "(struct Card (id text) (cost i64))"));
 
-    RinValue *cost_v = rin_field(cr.value, "cost");
+    RinValue *cost_v = rin_field(m, cr.value, "cost");
     int64_t cost = 0;
-    assert(rin_as_int(cost_v, &cost));
+    assert(rin_as_int(m, cost_v, &cost));
     assert(cost == 3);
-    rin_drop(cost_v);
+    rin_drop(m, cost_v);
 
-    rin_res_free(&cr);
-    RinEvalResult failed = rin_load(m, "broken", "(defn fail () (/ 1 0)) (fail)");
+    RinEvalResult failed = rin_load(m, "broken", "(defn fail () -> i64 (/ 1 0)) (fail)");
     assert(!failed.ok && failed.value == NULL);
     const RinError *error = rin_last_error(m);
     assert(error != NULL && error->kind == RIN_ERR_RUNTIME);
@@ -80,10 +78,10 @@ int main(void) {
     assert(error->backtrace != NULL && strstr(error->backtrace, "fail") != NULL);
     assert(strstr(error->text, "broken") != NULL);
     assert(strstr(error->text, "[op.arith]\n") != NULL);
-    rin_res_free(&failed);
     assert(rin_last_error(m) == error);
     assert(strstr(error->text, "division by zero") != NULL);
 
+    assert(rin_freeze(m));
     failed = rin_eval(m, NULL);
     assert(!failed.ok);
     error = rin_last_error(m);
@@ -91,10 +89,17 @@ int main(void) {
     assert(error->module == NULL && strcmp(error->rule, "host.argument") == 0 && error->backtrace == NULL);
     assert(error->line == 0 && error->col == 0);
     assert(error->message != NULL && error->text != NULL);
-    rin_res_free(&failed);
     RinEvalResult success = rin_eval(m, "42");
     assert(success.ok && success.value != NULL && rin_last_error(m) == NULL);
-    rin_res_free(&success);
+    RinValue *bx = rin_int(m, 10);
+    RinValue *by = rin_int(m, 32);
+    RinBinding binds[2] = { { "x", "i64", bx }, { "y", "i64", by } };
+    RinEvalResult with_res = rin_eval_with(m, "(+ x y)", binds, 2);
+    rin_drop(m, bx);
+    rin_drop(m, by);
+    assert(with_res.ok && with_res.value != NULL && rin_last_error(m) == NULL);
+    int64_t sum = 0;
+    assert(rin_as_int(m, with_res.value, &sum) && sum == 42);
     assert(rin_last_error(NULL) == NULL);
     rin_free(m);
     assert(bump.offset > 0);

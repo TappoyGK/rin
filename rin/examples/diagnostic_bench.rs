@@ -1,6 +1,6 @@
 //! cargo run --release --example diagnostic_bench -- 2000
 //! 引数は各ケースの反復回数。比較する各コミットで同じソースを使う。
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -20,7 +20,7 @@ fn measure(label: &str, iterations: usize, mut run: impl FnMut()) {
 
 fn eval_case(label: &str, source: &str, iterations: usize) {
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     machine.eval("(defn identity (x) x)").unwrap();
     measure(label, iterations, || {
         black_box(machine.eval(black_box(source)).unwrap());
@@ -91,12 +91,17 @@ fn main() {
     );
 
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     for i in 0..500 {
         machine
-            .bind(&format!("{}{:03}", "z".repeat(1997), i), &Value::Int(0))
+            .bind(
+                &format!("{}{:03}", "z".repeat(1997), i),
+                "i64",
+                &Value::Int(0),
+            )
             .unwrap();
     }
+    let mut machine = machine.freeze().unwrap();
     let query = "a".repeat(2000);
     measure("distant names", (iterations / 10).max(1), || {
         black_box(machine.call(black_box(&query), &[]).unwrap_err());

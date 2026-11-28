@@ -1,30 +1,28 @@
-//! エラー時だけ候補を検索し、既存メッセージに修正の手がかりを付ける。
-use std::collections::BTreeSet;
+//! エラー時だけ候補を検索し、既存メッセージに修正の手がかりを付ける（システムヒープ不使用）。
 use std::fmt::Write;
 
 /// 呼び出し側から名前順・重複なしで渡す。表示しない名前は保持しない。
-pub(crate) fn available<'a>(
-    mut message: String,
+pub(crate) fn write_available<'a>(
+    out: &mut (impl Write + ?Sized),
     label: &str,
     mut names: impl Iterator<Item = &'a str>,
-) -> String {
-    write!(message, "; {label}: ").unwrap();
+) {
+    let _ = write!(out, "; {label}: ");
     let mut shown = 0;
     for name in names.by_ref().take(16) {
         if shown > 0 {
-            message.push_str(", ");
+            let _ = out.write_str(", ");
         }
-        message.push_str(name);
+        let _ = out.write_str(name);
         shown += 1;
     }
     if shown == 0 {
-        message.push_str("(none)");
+        let _ = out.write_str("(none)");
     }
     let remaining = names.count();
     if remaining > 0 {
-        write!(message, ", ... and {remaining} more").unwrap();
+        let _ = write!(out, ", ... and {remaining} more");
     }
-    message
 }
 
 /// 2 文字以下には候補を出さないため、コンパイラも名前情報を記録しなくてよい。
@@ -36,39 +34,73 @@ pub(crate) fn needs_name_candidates(name: &str) -> bool {
     }
 }
 
+/// スタック上の固定配列だけで編集距離の上位 3 候補を選び、`out` へ直接書き出す（システムヒープ不使用）。
+pub(crate) fn write_suggest<'a>(
+    out: &mut (impl Write + ?Sized),
+    name: &str,
+    names: impl Iterator<Item = &'a str>,
+) {
+    if !needs_name_candidates(name) {
+        return;
+    }
+    let mut query_buf = ['\0'; 128];
+    let mut query_len = 0;
+    for ch in name.chars() {
+        if query_len >= query_buf.len() {
+            return;
+        }
+        query_buf[query_len] = ch;
+        query_len += 1;
+    }
+    let query = &query_buf[..query_len];
+    let limit = if query.len() <= 5 { 1 } else { 2 };
+    // 最大 3 件だけ保持する。同距離は名前順、重複候補は 1 件とする。
+    let mut best: [(usize, &str); 3] = [(usize::MAX, ""); 3];
+    let mut best_len = 0;
+    for candidate in names {
+        if candidate == name {
+            continue;
+        }
+        let Some(dist) = distance(query, candidate, limit) else {
+            continue;
+        };
+        let entry = (dist, candidate);
+        if best[..best_len].contains(&entry) {
+            continue;
+        }
+        let pos = best[..best_len]
+            .iter()
+            .position(|existing| entry < *existing)
+            .unwrap_or(best_len);
+        if pos >= best.len() {
+            continue;
+        }
+        let new_len = (best_len + 1).min(best.len());
+        for i in (pos + 1..new_len).rev() {
+            best[i] = best[i - 1];
+        }
+        best[pos] = entry;
+        best_len = new_len;
+    }
+    if best_len > 0 {
+        let _ = out.write_str("; did you mean ");
+        for (i, &(_, candidate)) in best[..best_len].iter().enumerate() {
+            if i > 0 {
+                let _ = out.write_str(", ");
+            }
+            let _ = write!(out, "'{candidate}'");
+        }
+        let _ = out.write_char('?');
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn suggest<'a>(
     mut message: String,
     name: &str,
     names: impl Iterator<Item = &'a str>,
 ) -> String {
-    if !needs_name_candidates(name) {
-        return message;
-    }
-    let query: Vec<char> = name.chars().collect();
-    let limit = if query.len() <= 5 { 1 } else { 2 };
-    // 最大 3 件だけ保持する。同距離は名前順、重複候補は 1 件とする。
-    let mut best = BTreeSet::new();
-    for candidate in names {
-        if candidate == name {
-            continue;
-        }
-        if let Some(distance) = distance(&query, candidate, limit) {
-            best.insert((distance, candidate));
-            if best.len() > 3 {
-                best.pop_last();
-            }
-        }
-    }
-    if !best.is_empty() {
-        message.push_str("; did you mean ");
-        for (i, (_, candidate)) in best.into_iter().enumerate() {
-            if i > 0 {
-                message.push_str(", ");
-            }
-            write!(message, "'{candidate}'").unwrap();
-        }
-        message.push('?');
-    }
+    write_suggest(&mut message, name, names);
     message
 }
 

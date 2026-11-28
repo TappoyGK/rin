@@ -1,377 +1,826 @@
 //! AST をスロット解決付きのバイトコードチャンクへコンパイルする。
 //!
 //! 深い入れ子でもネイティブスタックを消費しないよう、明示的タスクスタックでコンパイルする。
+//! 一時データは作業領域 (`WorkArena`)、出力チャンクは読み込み段階なら永続領域 (`PermArena`)、
+//! 凍結後の評価なら作業領域 (`WorkArena`) へ配置し、システムヒープを一切使わない。
 
-use std::cell::OnceCell;
-use std::num::NonZeroUsize;
-use std::rc::Rc;
+mod lower;
+mod scope;
+mod shallow;
+mod steps;
+#[cfg(all(test, feature = "std-value"))]
+mod tests;
+use scope::Scope;
+use steps::*;
 
-use crate::ast::{Expr, ExprKind, MatchArm, Pattern};
+use std::num::NonZeroU32;
+use std::ptr::NonNull;
+
+use crate::ast::{Datum, DatumKind, Expr, ExprKind, MatchArm, Pattern};
 use crate::bytecode::{
-    Capture, Chunk, FnProto, NameInfo, NameNode, NameSite, NameTable, Op, StructDesc, SymTable,
+    Capture, Chunk, FnProto, FnProtoPtr, NameInfo, NameNode, NameSite, NameTable, Op, StructDesc,
+    SymTable,
 };
 use crate::diagnostic::needs_name_candidates;
-use crate::error::{Error, Span};
-use crate::pool::RVal;
+use crate::error::{ErrRecorded, ErrorKind, Span};
+use crate::eval::{EnvSlots, global_slot};
+use crate::mem::{RawMap, RawStr, RawVec, WorkBox, fnv1a_bytes};
+use crate::pool::{CodeRegion, Pool};
 
-const SHALLOW_COMPILE_DEPTH: usize = 6;
+const SHALLOW_COMPILE_DEPTH: usize = 3;
+
+/// `eval_with` / `eval_with_vals` の初期束縛名ビュー（コピーや一時配列確保なし）。
+#[derive(Clone, Copy)]
+pub(crate) enum InitialBindingNames<'a> {
+    #[cfg(feature = "std-value")]
+    Values(&'a [(&'a str, &'a str, crate::Value)]),
+    Vals(&'a [(&'a str, &'a str, crate::Val)]),
+    TypedVals(&'a [(&'a str, crate::TypeHandle, crate::Val)]),
+}
+
+impl<'a> InitialBindingNames<'a> {
+    #[inline]
+    pub(crate) fn len(self) -> usize {
+        match self {
+            #[cfg(feature = "std-value")]
+            Self::Values(slice) => slice.len(),
+            Self::Vals(slice) => slice.len(),
+            Self::TypedVals(slice) => slice.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub(crate) fn get(self, idx: usize) -> &'a str {
+        match self {
+            #[cfg(feature = "std-value")]
+            Self::Values(slice) => slice[idx].0,
+            Self::Vals(slice) => slice[idx].0,
+            Self::TypedVals(slice) => slice[idx].0,
+        }
+    }
+}
+
+/// `compile_program_with_bindings` が返す、参照された初期束縛の添字列。
+pub(crate) enum UsedBindings {
+    /// 0..=8 件の初期束縛（参照された束縛のみをスタック上に保持、作業領域確保ゼロ）。
+    Small { indices: [u32; 8], len: u8 },
+    /// 9 件以上の初期束縛（参照された束縛の添字列、厳密降順）。
+    Many(RawVec<u32>),
+}
+
+struct InitialBindingState<'a> {
+    names: InitialBindingNames<'a>,
+    /// `true` のとき `names.len() <= 8` のオンデマンド解決経路を使う。
+    lazy_small: bool,
+    small_slots: [u32; 8],
+    small_used: [u32; 8],
+    small_used_len: u8,
+    saved_name_head: Option<usize>,
+}
 
 /// AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
 pub(crate) fn compile_program(
     exprs: &[Expr],
     module: Option<u32>,
     syms: &mut SymTable,
-    globals: &[Option<RVal>],
-) -> Result<Chunk, Error> {
-    let mut compiler = Compiler {
-        scopes: vec![Scope::new(module)],
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
+    frozen: bool,
+) -> Result<Chunk, ErrRecorded> {
+    compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)
+}
+
+/// 初期レキシカル束縛名付きで AST 式列をトップレベルのバイトコードチャンクへコンパイルする。
+pub(crate) fn compile_program_with_bindings(
+    exprs: &[Expr],
+    module: Option<u32>,
+    syms: &mut SymTable,
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
+    frozen: bool,
+    initial: InitialBindingNames<'_>,
+) -> Result<(Chunk, UsedBindings), ErrRecorded> {
+    let initial_len = initial.len();
+    if initial_len == 0 {
+        let chunk = compile_program_parts(exprs, &[], module, syms, pool, globals, frozen)?;
+        return Ok((
+            chunk,
+            UsedBindings::Small {
+                indices: [0; 8],
+                len: 0,
+            },
+        ));
+    }
+    if initial_len <= 8 {
+        let mut state = InitialBindingState {
+            names: initial,
+            lazy_small: true,
+            small_slots: [u32::MAX; 8],
+            small_used: [0; 8],
+            small_used_len: 0,
+            saved_name_head: None,
+        };
+        let mut root_scope = Scope::new(module);
+        // `let` / `match` のスロットは `initial_len` 以降から確保し、オンデマンド割り当てする `0..initial_len` と衝突させない。
+        root_scope.next_slot = initial_len as u32;
+        let chunk = compile_program_inner(
+            exprs,
+            &[],
+            module,
+            syms,
+            pool,
+            globals,
+            frozen,
+            root_scope,
+            Some(&mut state),
+        )?;
+        Ok((
+            chunk,
+            UsedBindings::Small {
+                indices: state.small_used,
+                len: state.small_used_len,
+            },
+        ))
+    } else {
+        compile_program_with_many_bindings(exprs, module, syms, pool, globals, frozen, initial)
+    }
+}
+
+#[inline(never)]
+fn compile_program_with_many_bindings(
+    exprs: &[Expr],
+    module: Option<u32>,
+    syms: &mut SymTable,
+    pool: &mut Pool<'_>,
+    globals: &EnvSlots,
+    frozen: bool,
+    initial: InitialBindingNames<'_>,
+) -> Result<(Chunk, UsedBindings), ErrRecorded> {
+    let mut root_scope = Scope::new(module);
+    let mut used_indices = RawVec::<u32>::new();
+    let mut idents = collect_expr_idents(exprs, &[], pool)?;
+    if !idents.is_empty() {
+        // 後ろから走査することで、同名重複の後勝ちと `used_indices` の厳密降順を同時に得る。
+        for idx in (0..initial.len()).rev() {
+            let name = initial.get(idx);
+            let hash = fnv1a_bytes(name.as_bytes());
+            if let Some(u32::MAX) = idents.get_by(hash, |k| k.as_str() == name) {
+                // SAFETY: `initial` の `&str` はこのコンパイル呼び出し全体を通して有効。
+                let raw = unsafe {
+                    RawStr::from_raw_utf8(
+                        NonNull::new(name.as_ptr().cast_mut()).unwrap_or(NonNull::dangling()),
+                        name.len(),
+                    )
+                };
+                let slot = root_scope.alloc_slot(pool, raw, Span::default())?;
+                // 既に存在するキーの更新なので確保は起きない。
+                let _ =
+                    idents.insert_work(&mut pool.work, &mut pool.core, hash, raw, slot, |a, b| {
+                        a.as_str() == b.as_str()
+                    });
+                if used_indices
+                    .push_work(&mut pool.work, &mut pool.core, idx as u32)
+                    .is_none()
+                {
+                    return Err(pool.core.err_oom(Span::default()));
+                }
+            }
+        }
+    }
+    let mut state = InitialBindingState {
+        names: initial,
+        lazy_small: false,
+        small_slots: [u32::MAX; 8],
+        small_used: [0; 8],
+        small_used_len: 0,
+        saved_name_head: None,
+    };
+    let chunk = compile_program_inner(
+        exprs,
+        &[],
         module,
         syms,
+        pool,
         globals,
-        name_table: NameTable::default(),
-        shared_names: None,
-    };
-    if exprs.is_empty() {
-        compiler.chunk().emit(Op::Void, Span::default());
+        frozen,
+        root_scope,
+        Some(&mut state),
+    )?;
+    Ok((chunk, UsedBindings::Many(used_indices)))
+}
+
+/// ソース中に現れる識別子（`ExprKind::Ident`）を非再帰で収集する。
+fn collect_expr_idents(
+    exprs: &[Expr],
+    body: &[Expr],
+    pool: &mut Pool<'_>,
+) -> Result<RawMap<RawStr, u32>, ErrRecorded> {
+    let mut idents: RawMap<RawStr, u32> = RawMap::new();
+    let mut expr_stack: RawVec<&Expr> = RawVec::new();
+    let mut datum_stack: RawVec<&Datum> = RawVec::new();
+
+    for e in exprs.iter().chain(body.iter()) {
+        if expr_stack
+            .push_work(&mut pool.work, &mut pool.core, e)
+            .is_none()
+        {
+            return Err(pool.core.err_oom(Span::default()));
+        }
+    }
+
+    fn push_e<'a>(
+        stack: &mut RawVec<&'a Expr>,
+        pool: &mut Pool<'_>,
+        e: &'a Expr,
+    ) -> Result<(), ErrRecorded> {
+        if stack.push_work(&mut pool.work, &mut pool.core, e).is_none() {
+            return Err(pool.core.err_oom(Span::default()));
+        }
+        Ok(())
+    }
+
+    while !expr_stack.is_empty() || !datum_stack.is_empty() {
+        while let Some(expr) = expr_stack.pop() {
+            match &expr.kind {
+                ExprKind::Ident(raw) => {
+                    let hash = fnv1a_bytes(raw.as_str().as_bytes());
+                    if idents
+                        .insert_work(
+                            &mut pool.work,
+                            &mut pool.core,
+                            hash,
+                            *raw,
+                            u32::MAX,
+                            |a, b| a.as_str() == b.as_str(),
+                        )
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Char(_)
+                | ExprKind::Str(_)
+                | ExprKind::None
+                | ExprKind::DefSchema(_)
+                | ExprKind::Import { .. }
+                | ExprKind::Export { .. }
+                | ExprKind::Quote(_) => {}
+                ExprKind::Quasiquote(d) => {
+                    if datum_stack
+                        .push_work(&mut pool.work, &mut pool.core, d.as_ref())
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+                ExprKind::Template(items) | ExprKind::List(items) | ExprKind::Tuple(items) => {
+                    for item in items.as_slice() {
+                        push_e(&mut expr_stack, pool, item)?;
+                    }
+                }
+                ExprKind::Struct(s) => {
+                    for (_, val) in s.as_ref().fields.as_slice() {
+                        push_e(&mut expr_stack, pool, val)?;
+                    }
+                }
+                ExprKind::Variant(v) => {
+                    if let Some(data) = &v.as_ref().data {
+                        push_e(&mut expr_stack, pool, data.as_ref())?;
+                    }
+                }
+                ExprKind::Def(d) => {
+                    push_e(&mut expr_stack, pool, d.as_ref().value.as_ref())?;
+                }
+                ExprKind::Some(e)
+                | ExprKind::Ok(e)
+                | ExprKind::Err(e)
+                | ExprKind::Field { target: e, .. } => {
+                    push_e(&mut expr_stack, pool, e.as_ref())?;
+                }
+                ExprKind::Index { target, index } => {
+                    push_e(&mut expr_stack, pool, target.as_ref())?;
+                    push_e(&mut expr_stack, pool, index.as_ref())?;
+                }
+                ExprKind::With { target, fields } => {
+                    push_e(&mut expr_stack, pool, target.as_ref())?;
+                    for (_, val) in fields.as_slice() {
+                        push_e(&mut expr_stack, pool, val)?;
+                    }
+                }
+                ExprKind::Defn(d) => {
+                    for e in d.as_ref().body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::Fn(f) => {
+                    for e in f.as_ref().body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::Let(l) => {
+                    let l = l.as_ref();
+                    for (_, val) in l.bindings.as_slice() {
+                        push_e(&mut expr_stack, pool, val)?;
+                    }
+                    for e in l.body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => {
+                    push_e(&mut expr_stack, pool, cond.as_ref())?;
+                    push_e(&mut expr_stack, pool, then_branch.as_ref())?;
+                    push_e(&mut expr_stack, pool, else_branch.as_ref())?;
+                }
+                ExprKind::When { cond, body } => {
+                    push_e(&mut expr_stack, pool, cond.as_ref())?;
+                    for e in body.as_slice() {
+                        push_e(&mut expr_stack, pool, e)?;
+                    }
+                }
+                ExprKind::Match { scrutinee, arms } => {
+                    push_e(&mut expr_stack, pool, scrutinee.as_ref())?;
+                    for arm in arms.as_slice() {
+                        for e in arm.body.as_slice() {
+                            push_e(&mut expr_stack, pool, e)?;
+                        }
+                    }
+                }
+                ExprKind::Call { callee, args } => {
+                    push_e(&mut expr_stack, pool, callee.as_ref())?;
+                    for arg in args.as_slice() {
+                        push_e(&mut expr_stack, pool, arg)?;
+                    }
+                }
+            }
+        }
+        while let Some(datum) = datum_stack.pop() {
+            match &datum.kind {
+                DatumKind::List(items) => {
+                    for item in items.as_slice() {
+                        if datum_stack
+                            .push_work(&mut pool.work, &mut pool.core, item)
+                            .is_none()
+                        {
+                            return Err(pool.core.err_oom(Span::default()));
+                        }
+                    }
+                }
+                DatumKind::Unquote(e) | DatumKind::UnquoteSplicing(e) => {
+                    if expr_stack
+                        .push_work(&mut pool.work, &mut pool.core, e.as_ref())
+                        .is_none()
+                    {
+                        return Err(pool.core.err_oom(Span::default()));
+                    }
+                }
+                DatumKind::Int(_)
+                | DatumKind::Float(_)
+                | DatumKind::Bool(_)
+                | DatumKind::Char(_)
+                | DatumKind::Str(_)
+                | DatumKind::None
+                | DatumKind::Ident(_) => {}
+            }
+        }
+    }
+
+    Ok(idents)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_program_parts<'a, 'p>(
+    exprs: &'a [Expr],
+    body: &'a [Expr],
+    module: Option<u32>,
+    syms: &'a mut SymTable,
+    pool: &'a mut Pool<'p>,
+    globals: &'a EnvSlots,
+    frozen: bool,
+) -> Result<Chunk, ErrRecorded> {
+    compile_program_inner(
+        exprs,
+        body,
+        module,
+        syms,
+        pool,
+        globals,
+        frozen,
+        Scope::new(module),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_program_inner<'a, 'p>(
+    exprs: &'a [Expr],
+    body: &'a [Expr],
+    module: Option<u32>,
+    syms: &'a mut SymTable,
+    pool: &'a mut Pool<'p>,
+    globals: &'a EnvSlots,
+    frozen: bool,
+    root_scope: Scope,
+    initial: Option<&mut InitialBindingState<'a>>,
+) -> Result<Chunk, ErrRecorded> {
+    let region = if frozen {
+        CodeRegion::Work
     } else {
-        compiler.compile_body_shallow(exprs, false, 0)?;
-        compiler.flush_ticks();
+        CodeRegion::Perm
+    };
+    let mut scopes = RawVec::new();
+    if scopes
+        .push_work(&mut pool.work, &mut pool.core, root_scope)
+        .is_none()
+    {
+        return Err(pool.core.err_oom(Span::default()));
     }
-    if let Some(names) = compiler.shared_names.take() {
-        names
-            .set(compiler.name_table)
-            .expect("name nodes are set once");
+    let initial_ptr = initial.map(NonNull::from);
+    let mut compiler = Compiler {
+        scopes,
+        module,
+        region,
+        syms,
+        pool,
+        globals,
+        frozen,
+        name_table: None,
+        initial: initial_ptr,
+    };
+    if exprs.is_empty() && body.is_empty() {
+        compiler.emit_raw(Op::Void, Span::default())?;
+    } else {
+        if !exprs.is_empty() {
+            compiler.compile_top_level(exprs)?;
+            if !body.is_empty() {
+                compiler.emit(Op::Pop, Span::default())?;
+            }
+        }
+        if !body.is_empty() {
+            compiler.compile_top_level(body)?;
+        }
+        compiler.flush_ticks(Span::default())?;
     }
+    // SAFETY: `initial_ptr` はこの関数内の `initial` への排他的参照から作られ、`compiler` は直後に破棄される。
+    let small_used_len = compiler
+        .initial
+        .map_or(0, |p| unsafe { p.as_ref().small_used_len as u32 });
     let mut finished = compiler.scopes.pop().unwrap();
-    finished.chunk.local_count = finished.max_slots;
+    finished.chunk.local_count = finished.max_slots.max(small_used_len);
+    if !frozen && !finished.chunk.strings.is_empty() {
+        let mut objs = RawVec::new();
+        for &s in finished.chunk.strings.as_slice() {
+            let Some(raw) = RawStr::from_perm(&mut pool.perm, &mut pool.core, s.as_str()) else {
+                return Err(pool.core.err_oom(Span::default()));
+            };
+            let Some(id) = pool.intern_perm_str(raw) else {
+                return Err(pool.core.err_oom(Span::default()));
+            };
+            if objs.push_work(&mut pool.work, &mut pool.core, id).is_none() {
+                return Err(pool.core.err_oom(Span::default()));
+            }
+        }
+        if finished
+            .chunk
+            .set_str_objs(pool, CodeRegion::Work, objs)
+            .is_none()
+        {
+            return Err(pool.core.err_oom(Span::default()));
+        }
+    }
     Ok(finished.chunk)
 }
 
-struct Scope<'a> {
-    module: Option<u32>,
-    // AST の名前を借用し、診断に必要になった束縛だけノードの添字 + 1 を記録する。
-    // NonZero により未記録状態も 1 ワードに収める。
-    locals: Vec<(&'a str, u32, Option<NonZeroUsize>)>,
-    outer_local_count: usize,
-    next_slot: u32,
-    max_slots: u32,
-    captures: Vec<(String, Capture)>,
-    // 未発行の Tick が参照する範囲の開始位置。位置情報は最終格納先へ直接書く。
-    pending_tick_start: usize,
-    chunk: Chunk,
-}
-
-impl<'a> Scope<'a> {
-    fn new(module: Option<u32>) -> Self {
-        Self {
-            module,
-            locals: Vec::new(),
-            outer_local_count: 0,
-            next_slot: 0,
-            max_slots: 0,
-            captures: Vec::new(),
-            pending_tick_start: 0,
-            chunk: Chunk::default(),
-        }
-    }
-
-    fn alloc_slot(&mut self, name: &'a str, span: Span) -> Result<u32, Error> {
-        let slot = self.next_slot;
-        self.next_slot = self
-            .next_slot
-            .checked_add(1)
-            .ok_or_else(|| Error::parse("compile.capacity", span, "too many local variables"))?;
-        if self.next_slot > self.max_slots {
-            self.max_slots = self.next_slot;
-        }
-        self.locals.push((name, slot, None));
-        Ok(slot)
-    }
-
-    fn find_local(&self, name: &str) -> Option<u32> {
-        self.locals
-            .iter()
-            .rev()
-            .find(|(n, _, _)| *n == name)
-            .map(|(_, slot, _)| *slot)
-    }
-
-    fn find_or_add_capture(&mut self, name: &str, cap: Capture, span: Span) -> Result<u32, Error> {
-        if let Some(pos) = self.captures.iter().position(|(n, _)| n == name) {
-            return Ok(pos as u32);
-        }
-        let idx = u32::try_from(self.captures.len())
-            .map_err(|_| Error::parse("compile.capacity", span, "too many captured variables"))?;
-        self.captures.push((name.to_string(), cap));
-        Ok(idx)
-    }
-}
-
-struct IfAfterCondStep<'a> {
-    then_branch: &'a Expr,
-    else_branch: &'a Expr,
-    is_tail: bool,
-    cond_span: Span,
-    span: Span,
-}
-
-struct IfAfterThenStep<'a> {
-    j_else: usize,
-    else_branch: &'a Expr,
-    is_tail: bool,
-    span: Span,
-}
-
-struct MatchArmsStep<'a> {
-    arms: &'a [MatchArm],
-    idx: usize,
-    end_jumps: Vec<usize>,
-    is_tail: bool,
-    span: Span,
-}
-
-struct MatchAfterArmStep<'a> {
-    arms: &'a [MatchArm],
-    idx: usize,
-    try_ip: usize,
-    saved_locals_len: usize,
-    saved_next_slot: u32,
-    end_jumps: Vec<usize>,
-    is_tail: bool,
-    span: Span,
-}
-
-struct ShortCircuitStep<'a> {
-    is_and: bool,
-    args: &'a [Expr],
-    idx: usize,
-    jumps: Vec<usize>,
-    span: Span,
-}
-
-struct FinishStructStep<'a> {
-    name: &'a str,
-    field_names: Vec<Rc<str>>,
-    span: Span,
-}
-
-struct WhenAfterCondStep<'a> {
-    body: &'a [Expr],
-    cond_span: Span,
-    span: Span,
-}
-
-struct FinishFnStep {
-    name: Option<String>,
-    arity: u32,
-    is_defn: bool,
-    span: Span,
-}
-
-enum Step<'a> {
-    Expr {
-        expr: &'a Expr,
-        is_tail: bool,
-    },
-    EmitFlushed {
-        op: Op,
-        span: Span,
-    },
-    EmitRaw {
-        op: Op,
-        span: Span,
-    },
-    FlushTicks,
-    BindLocal {
-        name: &'a str,
-        span: Span,
-    },
-    RestoreLocals {
-        saved_locals_len: usize,
-        saved_next_slot: u32,
-    },
-    FinishStruct(Box<FinishStructStep<'a>>),
-    FinishWith {
-        field_names: Vec<Rc<str>>,
-        span: Span,
-    },
-    FinishFn(Box<FinishFnStep>),
-    IfAfterCond(Box<IfAfterCondStep<'a>>),
-    IfAfterThen(Box<IfAfterThenStep<'a>>),
-    PatchJump {
-        op_idx: usize,
-    },
-    WhenAfterCond(Box<WhenAfterCondStep<'a>>),
-    WhenAfterBody {
-        j_end: usize,
-        span: Span,
-    },
-    MatchStartArms(Box<MatchArmsStep<'a>>),
-    MatchAfterArm(Box<MatchAfterArmStep<'a>>),
-    ShortCircuitAfterArg(Box<ShortCircuitStep<'a>>),
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "std-value"))]
 pub(crate) fn step_size() -> usize {
     std::mem::size_of::<Step<'_>>()
 }
 
-struct Compiler<'a> {
-    scopes: Vec<Scope<'a>>,
+type Failed = ErrRecorded;
+
+struct Compiler<'a, 'p> {
+    scopes: RawVec<Scope>,
     module: Option<u32>,
+    region: CodeRegion,
     syms: &'a mut SymTable,
-    globals: &'a [Option<RVal>],
-    name_table: NameTable,
-    shared_names: Option<Rc<OnceCell<NameTable>>>,
+    pool: &'a mut Pool<'p>,
+    globals: &'a EnvSlots,
+    frozen: bool,
+    name_table: Option<NonNull<NameTable>>,
+    initial: Option<NonNull<InitialBindingState<'a>>>,
 }
 
-impl<'a> Compiler<'a> {
-    fn new_scope(&self) -> Scope<'a> {
-        let parent = self.scopes.last().unwrap();
-        let mut inner = Scope::new(self.module);
-        inner.outer_local_count = parent.outer_local_count + parent.locals.len();
-        inner
+impl<'a, 'p> Compiler<'a, 'p> {
+    #[cold]
+    fn fail_parse(&mut self, rule: &'static str, span: Span, msg: &str) -> Failed {
+        self.pool.core.err_str(rule, ErrorKind::Parse, span, msg)
     }
 
-    // 最後に記録したノードまで戻り、増えた束縛だけを追加する。
-    // 兄弟の関数・クロージャは同じ親ノードを参照する。
-    fn visible_name_head(&mut self) -> Option<usize> {
-        let mut pending_from = None;
-        let mut head = None;
-        'scopes: for (scope_index, scope) in self.scopes.iter().enumerate().rev() {
-            for (local_index, (_, _, saved)) in scope.locals.iter().enumerate().rev() {
-                if let Some(saved) = saved {
-                    head = Some(saved.get() - 1);
-                    break 'scopes;
-                }
-                pending_from = Some((scope_index, local_index));
-            }
+    #[cold]
+    fn fail_oom(&mut self, span: Span) -> Failed {
+        self.pool.core.err_oom(span)
+    }
+
+    fn intern_sym(&mut self, name: &str, span: Span) -> Result<u32, Failed> {
+        match self.syms.intern(self.pool, name) {
+            Some(id) => Ok(id),
+            None => Err(self.fail_oom(span)),
         }
-        if let Some((first_scope, first_local)) = pending_from {
-            for (index, scope) in self.scopes.iter_mut().enumerate().skip(first_scope) {
-                let start = if index == first_scope { first_local } else { 0 };
-                for (name, _, saved) in &mut scope.locals[start..] {
-                    debug_assert!(saved.is_none());
-                    let table = &mut self.name_table;
-                    let index = table.nodes.len();
-                    let start = table.text.len();
-                    table.text.push_str(name);
-                    table.nodes.push(NameNode {
-                        start,
-                        end: table.text.len(),
-                        parent: head,
-                    });
-                    *saved = NonZeroUsize::new(index + 1);
-                    head = Some(index);
-                }
-            }
+    }
+
+    fn alloc_step_box<T>(&mut self, val: T, span: Span) -> Result<WorkBox<T>, Failed> {
+        match WorkBox::new(&mut self.pool.work, &mut self.pool.core, val) {
+            Some(b) => Ok(b),
+            None => Err(self.fail_oom(span)),
         }
-        head
+    }
+
+    fn push_step(
+        &mut self,
+        steps: &mut RawVec<Step<'a>>,
+        step: Step<'a>,
+        span: Span,
+    ) -> Result<(), Failed> {
+        if steps
+            .push_work(&mut self.pool.work, &mut self.pool.core, step)
+            .is_none()
+        {
+            return Err(self.fail_oom(span));
+        }
+        Ok(())
+    }
+
+    fn push_scope(&mut self, scope: Scope, span: Span) -> Result<(), Failed> {
+        if self
+            .scopes
+            .push_work(&mut self.pool.work, &mut self.pool.core, scope)
+            .is_none()
+        {
+            return Err(self.fail_oom(span));
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn fail_decl(&mut self, form: &str, span: Span) -> Failed {
+        if self.frozen {
+            self.pool.core.err_fmt(
+                "env.frozen",
+                ErrorKind::Parse,
+                span,
+                format_args!("'{form}' is not allowed in a frozen environment"),
+            )
+        } else {
+            let rule = match form {
+                "def" => "expr.def",
+                "defn" => "expr.defn",
+                "defschema" => "type.defschema",
+                _ => "expr.module",
+            };
+            self.pool.core.err_fmt(
+                rule,
+                ErrorKind::Parse,
+                span,
+                format_args!("'{form}' is only allowed at top level"),
+            )
+        }
     }
 
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.scopes.last_mut().unwrap().chunk
     }
 
-    fn flush_ticks(&mut self) {
+    fn current_region(&self) -> CodeRegion {
+        // コンパイル中は作業領域で構築し、`alloc_proto` で永続領域へ余剰容量ゼロでコピーする。
+        CodeRegion::Work
+    }
+
+    fn push_tick_span(&mut self, span: Span) -> Result<(), Failed> {
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        if self
+            .pool
+            .push_code(region, &mut top.chunk.tick_spans, span)
+            .is_none()
+        {
+            return Err(self.fail_oom(span));
+        }
+        Ok(())
+    }
+
+    fn emit_raw(&mut self, op: Op, span: Span) -> Result<usize, Failed> {
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.emit(self.pool, region, op, span) {
+            Some(ip) => Ok(ip),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    fn add_string(&mut self, s: &str, span: Span) -> Result<u32, Failed> {
+        if u32::try_from(s.len()).is_err() {
+            return Err(self.pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                span,
+                "text length limit exceeded (4294967295 bytes)",
+            ));
+        }
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top
+            .chunk
+            .add_string(self.pool, region, &mut top.string_map, s)
+        {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    fn add_float(&mut self, x: f64, span: Span) -> Result<u32, Failed> {
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.add_float(self.pool, region, x) {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    fn add_struct(
+        &mut self,
+        name: &str,
+        fields: RawVec<RawStr>,
+        span: Span,
+    ) -> Result<u32, Failed> {
+        let region = self.current_region();
+        let Some(name_raw) = self.pool.alloc_code_str(region, name) else {
+            return Err(self.fail_oom(span));
+        };
+        let desc = StructDesc {
+            name: name_raw,
+            fields,
+        };
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.add_struct(self.pool, region, desc) {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    fn build_field_names(
+        &mut self,
+        fields: &[(RawStr, Expr)],
+        span: Span,
+    ) -> Result<RawVec<RawStr>, Failed> {
+        let region = self.current_region();
+        let mut out = RawVec::new();
+        for (k, _) in fields {
+            let Some(raw) = self.pool.alloc_code_str(region, k.as_str()) else {
+                return Err(self.fail_oom(span));
+            };
+            if self.pool.push_code(region, &mut out, raw).is_none() {
+                return Err(self.fail_oom(span));
+            }
+        }
+        Ok(out)
+    }
+
+    fn add_pattern(&mut self, pat: Pattern, span: Span) -> Result<u32, Failed> {
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.add_pattern(self.pool, region, pat) {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    fn add_splice_mask(&mut self, mask: RawVec<u8>, span: Span) -> Result<u32, Failed> {
+        let region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.add_splice_mask(self.pool, region, mask) {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    #[inline(never)]
+    fn alloc_proto(
+        &mut self,
+        finished: &Scope,
+        name: Option<&str>,
+        arity: u32,
+        span: Span,
+    ) -> Result<FnProtoPtr, Failed> {
+        let proto_region = self.region;
+        let name_raw = match name {
+            Some(s) => match self.pool.alloc_code_str(proto_region, s) {
+                Some(raw) => Some(raw),
+                None => return Err(self.fail_oom(span)),
+            },
+            None => None,
+        };
+        let mut captures = RawVec::new();
+        for &(_, c) in finished.captures.as_slice() {
+            if self
+                .pool
+                .push_code(proto_region, &mut captures, c)
+                .is_none()
+            {
+                return Err(self.fail_oom(span));
+            }
+        }
+        let chunk = if proto_region == CodeRegion::Perm {
+            match finished.chunk.copy_to_perm(self.pool) {
+                Some(c) => c,
+                None => return Err(self.fail_oom(span)),
+            }
+        } else {
+            finished.chunk
+        };
+        let proto = FnProto {
+            name: name_raw,
+            module: finished.module,
+            arity,
+            local_count: finished.max_slots,
+            captures,
+            chunk,
+        };
+        let Some(ptr) = self.pool.alloc_code_val(proto_region, proto) else {
+            return Err(self.fail_oom(span));
+        };
+        Ok(FnProtoPtr::new(ptr))
+    }
+
+    fn add_proto_ptr(&mut self, proto: FnProtoPtr, span: Span) -> Result<u32, Failed> {
+        let chunk_region = self.current_region();
+        let top = self.scopes.last_mut().unwrap();
+        match top.chunk.add_proto(self.pool, chunk_region, proto) {
+            Some(idx) => Ok(idx),
+            None => Err(self.fail_oom(span)),
+        }
+    }
+
+    #[inline(never)]
+    fn finish_proto(
+        &mut self,
+        finished: &Scope,
+        name: Option<&str>,
+        arity: u32,
+        span: Span,
+    ) -> Result<u32, Failed> {
+        let proto = self.alloc_proto(finished, name, arity, span)?;
+        self.add_proto_ptr(proto, span)
+    }
+
+    fn flush_ticks(&mut self, span: Span) -> Result<(), Failed> {
+        let region = self.current_region();
         let top = self.scopes.last_mut().unwrap();
         let end = top.chunk.tick_spans.len();
         if top.pending_tick_start != end {
             let start = top.pending_tick_start;
             let first_span = top.chunk.tick_spans[start];
-            top.chunk
-                .emit(Op::Tick(start as u32, (end - start) as u32), first_span);
+            if top
+                .chunk
+                .emit(
+                    self.pool,
+                    region,
+                    Op::Tick(start as u32, (end - start) as u32),
+                    first_span,
+                )
+                .is_none()
+            {
+                return Err(self.fail_oom(span));
+            }
             top.pending_tick_start = end;
         }
+        Ok(())
     }
 
-    fn emit(&mut self, op: Op, span: Span) -> usize {
-        self.flush_ticks();
-        let ip = self.chunk().emit(op, span);
+    fn emit(&mut self, op: Op, span: Span) -> Result<usize, Failed> {
+        self.flush_ticks(span)?;
+        let ip = self.emit_raw(op, span)?;
         if let Op::GetGlobal(id) = op
-            && !matches!(self.globals.get(id as usize), Some(Some(_)))
+            && global_slot(self.globals, id).is_none()
         {
-            self.record_name_site(id, ip);
+            self.record_name_site(id, ip, span)?;
         }
-        ip
-    }
-
-    // 大域の束縛は上書きされても消えない。既存の値があれば未定義名にならない。
-    // 再読込で消えるモジュールの束縛は、この判定に含めない。
-    // 通常の emit を小さく保ち、診断記録の処理を分離する。
-    #[cold]
-    fn record_name_site(&mut self, id: u32, ip: usize) {
-        let scope = self.scopes.last().unwrap();
-        // ローカルが見えない場所では文字数も調べず、表の準備にも入らない。
-        if scope.outer_local_count == 0 && scope.locals.is_empty() {
-            return;
-        }
-        if !needs_name_candidates(&self.syms.names[id as usize]) {
-            return;
-        }
-        if self.shared_names.is_none() {
-            self.shared_names = Some(Rc::new(OnceCell::new()));
-        }
-        if let Some(head) = self.visible_name_head() {
-            let previous = self.chunk().names.as_ref().map(|names| names.last_site);
-            let site = self.name_table.sites.len();
-            self.name_table.sites.push(NameSite { ip, head, previous });
-            if let Some(names) = &mut self.chunk().names {
-                names.last_site = site;
-            } else {
-                let table = Rc::clone(self.shared_names.as_ref().unwrap());
-                self.chunk().names = Some(NameInfo {
-                    table,
-                    last_site: site,
-                });
-            }
-        }
-    }
-
-    fn resolve_var(&mut self, name: &str, span: Span) -> Result<Op, Error> {
-        let top = self.scopes.len() - 1;
-        if let Some(slot) = self.scopes[top].find_local(name) {
-            return Ok(Op::GetLocal(slot));
-        }
-        if top > 0
-            && let Some(cap_idx) = self.resolve_capture(top, name, span)?
-        {
-            return Ok(Op::GetCapture(cap_idx));
-        }
-        let id = self.syms.intern(name);
-        Ok(Op::GetGlobal(id))
-    }
-
-    fn resolve_capture(
-        &mut self,
-        scope_idx: usize,
-        name: &str,
-        span: Span,
-    ) -> Result<Option<u32>, Error> {
-        if scope_idx == 0 {
-            return Ok(None);
-        }
-        let parent = scope_idx - 1;
-        if let Some(slot) = self.scopes[parent].find_local(name) {
-            let cap_idx =
-                self.scopes[scope_idx].find_or_add_capture(name, Capture::Local(slot), span)?;
-            return Ok(Some(cap_idx));
-        }
-        if parent > 0
-            && let Some(parent_cap) = self.resolve_capture(parent, name, span)?
-        {
-            let cap_idx = self.scopes[scope_idx].find_or_add_capture(
-                name,
-                Capture::Upvalue(parent_cap),
-                span,
-            )?;
-            return Ok(Some(cap_idx));
-        }
-        Ok(None)
+        Ok(ip)
     }
 
     fn patch_jump(&mut self, op_idx: usize, target: usize) {
-        let code = &mut self.chunk().code;
+        let target = u32::try_from(target).expect("bytecode chunk exceeds u32::MAX");
+        let code = self.chunk().code.as_mut_slice();
         match &mut code[op_idx] {
             Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfFalsePeek(t) | Op::JumpIfTruePeek(t) => {
                 *t = target
@@ -381,1047 +830,64 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn push_body(&self, steps: &mut Vec<Step<'a>>, body: &'a [Expr], is_tail: bool) {
+    fn push_body(
+        &mut self,
+        steps: &mut RawVec<Step<'a>>,
+        body: &'a [Expr],
+        is_tail: bool,
+        span: Span,
+    ) -> Result<(), Failed> {
         if body.is_empty() {
-            steps.push(Step::EmitRaw {
-                op: Op::Void,
-                span: Span::default(),
-            });
-            return;
+            self.push_step(
+                steps,
+                Step::EmitRaw {
+                    op: Op::Void,
+                    span: Span::default(),
+                },
+                span,
+            )?;
+            return Ok(());
         }
-        steps.push(Step::FlushTicks);
+        self.push_step(steps, Step::FlushTicks, span)?;
         for (i, expr) in body.iter().enumerate().rev() {
             let last = i + 1 == body.len();
             if !last {
-                steps.push(Step::EmitFlushed {
-                    op: Op::Pop,
-                    span: expr.span,
-                });
+                self.push_step(
+                    steps,
+                    Step::EmitFlushed {
+                        op: Op::Pop,
+                        span: expr.span,
+                    },
+                    expr.span,
+                )?;
             }
-            steps.push(Step::Expr {
-                expr,
-                is_tail: last && is_tail,
-            });
-        }
-    }
-
-    fn compile_body_shallow(
-        &mut self,
-        exprs: &'a [Expr],
-        is_tail: bool,
-        depth: usize,
-    ) -> Result<(), Error> {
-        for (i, expr) in exprs.iter().enumerate() {
-            let last = i + 1 == exprs.len();
-            self.compile_expr_shallow(expr, last && is_tail, depth)?;
-            if !last {
-                self.emit(Op::Pop, expr.span);
-            }
-        }
-        if !exprs.is_empty() {
-            self.flush_ticks();
-        }
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn compile_expr_iter(&mut self, expr: &'a Expr, is_tail: bool) -> Result<(), Error> {
-        let mut steps = Vec::with_capacity(16);
-        steps.push(Step::Expr { expr, is_tail });
-        self.run_steps(&mut steps)
-    }
-
-    fn compile_expr_shallow(
-        &mut self,
-        expr: &'a Expr,
-        is_tail: bool,
-        depth: usize,
-    ) -> Result<(), Error> {
-        if depth >= SHALLOW_COMPILE_DEPTH {
-            return self.compile_expr_iter(expr, is_tail);
-        }
-        let span = expr.span;
-        self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
-
-        match &expr.kind {
-            ExprKind::Int(n) => {
-                self.chunk().emit(Op::Int(*n), span);
-            }
-            ExprKind::Float(x) => {
-                let idx = self.chunk().add_float(*x);
-                self.chunk().emit(Op::Float(idx), span);
-            }
-            ExprKind::Bool(b) => {
-                self.chunk().emit(Op::Bool(*b), span);
-            }
-            ExprKind::Char(c) => {
-                self.chunk().emit(Op::Char(*c), span);
-            }
-            ExprKind::Str(s) => {
-                let idx = self.chunk().add_string(s);
-                self.emit(Op::Str(idx), span);
-            }
-            ExprKind::None => {
-                self.chunk().emit(Op::None, span);
-            }
-            ExprKind::Ident(name) => {
-                let op = self.resolve_var(name, span)?;
-                match op {
-                    Op::GetGlobal(_) => {
-                        self.emit(op, span);
-                    }
-                    _ => {
-                        self.chunk().emit(op, span);
-                    }
-                }
-            }
-            ExprKind::List(items) => {
-                let count = u32::try_from(items.len()).map_err(|_| {
-                    Error::parse("compile.capacity", span, "list literal too large")
-                })?;
-                if count == 0 {
-                    self.emit(Op::EmptyList, span);
-                } else {
-                    for item in items {
-                        self.compile_expr_shallow(item, false, depth + 1)?;
-                    }
-                    self.emit(Op::MakeList(count), span);
-                }
-            }
-            ExprKind::Tuple(items) => {
-                let count = u32::try_from(items.len()).map_err(|_| {
-                    Error::parse("compile.capacity", span, "tuple literal too large")
-                })?;
-                for item in items {
-                    self.compile_expr_shallow(item, false, depth + 1)?;
-                }
-                self.emit(Op::MakeTuple(count), span);
-            }
-            ExprKind::Struct { name, fields } => {
-                let field_names: Vec<Rc<str>> =
-                    fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
-                for (_, fexpr) in fields {
-                    self.compile_expr_shallow(fexpr, false, depth + 1)?;
-                }
-                let s_idx = self.chunk().add_struct(StructDesc {
-                    name: Rc::from(name.as_str()),
-                    fields: field_names,
-                });
-                self.emit(Op::MakeStruct(s_idx), span);
-            }
-            ExprKind::With { target, fields } => {
-                self.compile_expr_shallow(target, false, depth + 1)?;
-                self.emit(Op::WithCheckStruct, span);
-                let field_names: Vec<Rc<str>> =
-                    fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
-                for (idx, (fname, fexpr)) in fields.iter().enumerate() {
-                    let f_idx = self.chunk().add_string(fname);
-                    self.emit(Op::WithCheckField(f_idx, idx as u32), span);
-                    self.compile_expr_shallow(fexpr, false, depth + 1)?;
-                }
-                let s_idx = self.chunk().add_struct(StructDesc {
-                    name: Rc::from(""),
-                    fields: field_names,
-                });
-                self.emit(Op::WithFinish(s_idx), span);
-            }
-            ExprKind::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                let t_idx = self.chunk().add_string(type_name);
-                let v_idx = self.chunk().add_string(variant);
-                let op = Op::MakeVariant {
-                    type_name: t_idx,
-                    variant: v_idx,
-                    has_data: data.is_some(),
-                };
-                if let Some(d) = data {
-                    self.compile_expr_shallow(d, false, depth + 1)?;
-                }
-                self.emit(op, span);
-            }
-            ExprKind::Some(inner) => {
-                self.compile_expr_shallow(inner, false, depth + 1)?;
-                self.emit(Op::MakeSome, span);
-            }
-            ExprKind::Ok(inner) => {
-                self.compile_expr_shallow(inner, false, depth + 1)?;
-                self.emit(Op::MakeOk, span);
-            }
-            ExprKind::Err(inner) => {
-                self.compile_expr_shallow(inner, false, depth + 1)?;
-                self.emit(Op::MakeErr, span);
-            }
-            ExprKind::Field { target, field } => {
-                self.compile_expr_shallow(target, false, depth + 1)?;
-                let f_idx = self.chunk().add_string(field);
-                self.emit(Op::GetField(f_idx), span);
-            }
-            ExprKind::Index { target, index } => {
-                self.compile_expr_shallow(target, false, depth + 1)?;
-                self.compile_expr_shallow(index, false, depth + 1)?;
-                self.emit(Op::GetIndex, span);
-            }
-            ExprKind::Def { name, value } => {
-                self.compile_expr_shallow(value, false, depth + 1)?;
-                let n_idx = self.syms.intern(name);
-                self.emit(Op::DefGlobal(n_idx), span);
-            }
-            ExprKind::Defn { name, params, body } => {
-                let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
-                for p in params {
-                    inner.alloc_slot(p, span)?;
-                }
-                self.scopes.push(inner);
-                self.compile_body_shallow(body, true, depth + 1)?;
-                let finished = self.scopes.pop().unwrap();
-                let captures: Vec<Capture> =
-                    finished.captures.into_iter().map(|(_, c)| c).collect();
-                let proto = Rc::new(FnProto {
-                    name: Some(name.clone()),
-                    module: finished.module,
-                    arity,
-                    local_count: finished.max_slots,
-                    captures,
-                    chunk: finished.chunk,
-                });
-                let p_idx = self.chunk().add_proto(proto);
-                let n_idx = self.syms.intern(name);
-                self.emit(Op::DefFn(n_idx, p_idx), span);
-            }
-            ExprKind::Fn { params, body } => {
-                let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
-                for p in params {
-                    inner.alloc_slot(p, span)?;
-                }
-                self.scopes.push(inner);
-                self.compile_body_shallow(body, true, depth + 1)?;
-                let finished = self.scopes.pop().unwrap();
-                let captures: Vec<Capture> =
-                    finished.captures.into_iter().map(|(_, c)| c).collect();
-                let proto = Rc::new(FnProto {
-                    name: None,
-                    module: finished.module,
-                    arity,
-                    local_count: finished.max_slots,
-                    captures,
-                    chunk: finished.chunk,
-                });
-                let p_idx = self.chunk().add_proto(proto);
-                self.emit(Op::MakeClosure(p_idx), span);
-            }
-            ExprKind::Let { bindings, body } => {
-                let saved_locals_len = self.scopes.last().unwrap().locals.len();
-                let saved_next_slot = self.scopes.last().unwrap().next_slot;
-                for (name, val_expr) in bindings {
-                    self.compile_expr_shallow(val_expr, false, depth + 1)?;
-                    let slot = self
-                        .scopes
-                        .last_mut()
-                        .unwrap()
-                        .alloc_slot(name, val_expr.span)?;
-                    self.chunk().emit(Op::SetLocal(slot), val_expr.span);
-                }
-                self.compile_body_shallow(body, is_tail, depth + 1)?;
-                let scope = self.scopes.last_mut().unwrap();
-                scope.locals.truncate(saved_locals_len);
-                scope.next_slot = saved_next_slot;
-            }
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.compile_expr_shallow(cond, false, depth + 1)?;
-                let j_else = self.emit(Op::JumpIfFalse(0), cond.span);
-                self.compile_expr_shallow(then_branch, is_tail, depth + 1)?;
-                let j_end = self.emit(Op::Jump(0), span);
-                let else_ip = self.chunk().code.len();
-                self.patch_jump(j_else, else_ip);
-                self.compile_expr_shallow(else_branch, is_tail, depth + 1)?;
-                self.flush_ticks();
-                let end_ip = self.chunk().code.len();
-                self.patch_jump(j_end, end_ip);
-            }
-            ExprKind::When { cond, body } => {
-                self.compile_expr_shallow(cond, false, depth + 1)?;
-                let j_end = self.emit(Op::JumpIfFalse(0), cond.span);
-                self.compile_body_shallow(body, false, depth + 1)?;
-                self.emit(Op::Pop, span);
-                let end_ip = self.chunk().code.len();
-                self.patch_jump(j_end, end_ip);
-                self.chunk().emit(Op::Void, span);
-            }
-            ExprKind::Match { scrutinee, arms } => {
-                self.compile_expr_shallow(scrutinee, false, depth + 1)?;
-                let mut end_jumps = Vec::with_capacity(arms.len());
-                for arm in arms {
-                    let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
-                    let try_ip = self.emit(
-                        Op::TryMatch {
-                            pat_idx,
-                            fail_ip: 0,
-                        },
-                        arm.span,
-                    );
-                    let saved_locals_len = self.scopes.last().unwrap().locals.len();
-                    let saved_next_slot = self.scopes.last().unwrap().next_slot;
-                    if let Some(bind_name) = pattern_binding(&arm.pattern) {
-                        let slot = self
-                            .scopes
-                            .last_mut()
-                            .unwrap()
-                            .alloc_slot(bind_name, arm.span)?;
-                        self.chunk().emit(Op::SetLocal(slot), arm.span);
-                    }
-                    self.chunk().emit(Op::Pop, arm.span);
-                    self.compile_body_shallow(&arm.body, is_tail, depth + 1)?;
-                    let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
-                    scope.next_slot = saved_next_slot;
-                    end_jumps.push(self.emit(Op::Jump(0), arm.span));
-                    let fail_ip = self.chunk().code.len();
-                    self.patch_jump(try_ip, fail_ip);
-                }
-                self.chunk().emit(Op::Pop, span);
-                self.emit(Op::MatchFail, span);
-                let end_ip = self.chunk().code.len();
-                for j in end_jumps {
-                    self.patch_jump(j, end_ip);
-                }
-            }
-            ExprKind::Call { callee, args } => {
-                if let ExprKind::Ident(op) = &callee.kind
-                    && (op == "and" || op == "or")
-                {
-                    let is_and = op == "and";
-                    if args.is_empty() {
-                        self.emit(if is_and { Op::And } else { Op::Or }, span);
-                    } else {
-                        let mut jumps = Vec::with_capacity(args.len());
-                        for arg in args {
-                            self.compile_expr_shallow(arg, false, depth + 1)?;
-                            let j = if is_and {
-                                self.emit(Op::JumpIfFalsePeek(0), arg.span)
-                            } else {
-                                self.emit(Op::JumpIfTruePeek(0), arg.span)
-                            };
-                            jumps.push(j);
-                        }
-                        self.chunk().emit(Op::Bool(is_and), span);
-                        let end_ip = self.chunk().code.len();
-                        for jmp in jumps {
-                            self.patch_jump(jmp, end_ip);
-                        }
-                    }
-                    return Ok(());
-                }
-                let argc = u32::try_from(args.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many arguments"))?;
-                self.compile_expr_shallow(callee, false, depth + 1)?;
-                for arg in args {
-                    self.compile_expr_shallow(arg, false, depth + 1)?;
-                }
-                let call_op = if is_tail {
-                    Op::TailCall(argc)
-                } else {
-                    Op::Call(argc)
-                };
-                self.emit(call_op, span);
-            }
-            ExprKind::Import { name } => {
-                let idx = self.syms.intern(name);
-                self.emit(Op::Import(idx), span);
-            }
-            ExprKind::Export { names } => {
-                let idx = self.chunk().add_exports(names.clone());
-                self.emit(Op::Export(idx), span);
-            }
-        }
-        Ok(())
-    }
-
-    fn run_steps(&mut self, steps: &mut Vec<Step<'a>>) -> Result<(), Error> {
-        while let Some(step) = steps.pop() {
-            match step {
-                Step::Expr { expr, is_tail } => self.step_expr(expr, is_tail, steps)?,
-                Step::EmitFlushed { op, span } => {
-                    self.emit(op, span);
-                }
-                Step::EmitRaw { op, span } => {
-                    self.chunk().emit(op, span);
-                }
-                Step::FlushTicks => {
-                    self.flush_ticks();
-                }
-                Step::BindLocal { name, span } => {
-                    let slot = self.scopes.last_mut().unwrap().alloc_slot(name, span)?;
-                    self.chunk().emit(Op::SetLocal(slot), span);
-                }
-                Step::RestoreLocals {
-                    saved_locals_len,
-                    saved_next_slot,
-                } => {
-                    let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(saved_locals_len);
-                    scope.next_slot = saved_next_slot;
-                }
-                Step::FinishStruct(fs) => {
-                    let s_idx = self.chunk().add_struct(StructDesc {
-                        name: Rc::from(fs.name),
-                        fields: fs.field_names,
-                    });
-                    self.emit(Op::MakeStruct(s_idx), fs.span);
-                }
-                Step::FinishWith { field_names, span } => {
-                    let s_idx = self.chunk().add_struct(StructDesc {
-                        name: Rc::from(""),
-                        fields: field_names,
-                    });
-                    self.emit(Op::WithFinish(s_idx), span);
-                }
-                Step::FinishFn(ff) => {
-                    let finished = self.scopes.pop().unwrap();
-                    let captures: Vec<Capture> =
-                        finished.captures.into_iter().map(|(_, c)| c).collect();
-                    let proto = Rc::new(FnProto {
-                        name: ff.name.clone(),
-                        module: finished.module,
-                        arity: ff.arity,
-                        local_count: finished.max_slots,
-                        captures,
-                        chunk: finished.chunk,
-                    });
-                    let p_idx = self.chunk().add_proto(proto);
-                    if ff.is_defn {
-                        let n_idx = self.syms.intern(ff.name.as_deref().unwrap());
-                        self.emit(Op::DefFn(n_idx, p_idx), ff.span);
-                    } else {
-                        self.emit(Op::MakeClosure(p_idx), ff.span);
-                    }
-                }
-                Step::IfAfterCond(ic) => {
-                    let j_else = self.emit(Op::JumpIfFalse(0), ic.cond_span);
-                    steps.push(Step::IfAfterThen(Box::new(IfAfterThenStep {
-                        j_else,
-                        else_branch: ic.else_branch,
-                        is_tail: ic.is_tail,
-                        span: ic.span,
-                    })));
-                    steps.push(Step::Expr {
-                        expr: ic.then_branch,
-                        is_tail: ic.is_tail,
-                    });
-                }
-                Step::IfAfterThen(it) => {
-                    let j_end = self.emit(Op::Jump(0), it.span);
-                    let else_ip = self.chunk().code.len();
-                    self.patch_jump(it.j_else, else_ip);
-                    steps.push(Step::PatchJump { op_idx: j_end });
-                    steps.push(Step::FlushTicks);
-                    steps.push(Step::Expr {
-                        expr: it.else_branch,
-                        is_tail: it.is_tail,
-                    });
-                }
-                Step::PatchJump { op_idx } => {
-                    let end_ip = self.chunk().code.len();
-                    self.patch_jump(op_idx, end_ip);
-                }
-                Step::WhenAfterCond(wc) => {
-                    let j_end = self.emit(Op::JumpIfFalse(0), wc.cond_span);
-                    steps.push(Step::WhenAfterBody {
-                        j_end,
-                        span: wc.span,
-                    });
-                    self.push_body(steps, wc.body, false);
-                }
-                Step::WhenAfterBody { j_end, span } => {
-                    self.emit(Op::Pop, span);
-                    let end_ip = self.chunk().code.len();
-                    self.patch_jump(j_end, end_ip);
-                    self.chunk().emit(Op::Void, span);
-                }
-                Step::MatchStartArms(ms) => {
-                    if ms.idx >= ms.arms.len() {
-                        self.chunk().emit(Op::Pop, ms.span);
-                        self.emit(Op::MatchFail, ms.span);
-                        let end_ip = self.chunk().code.len();
-                        for j in ms.end_jumps {
-                            self.patch_jump(j, end_ip);
-                        }
-                        continue;
-                    }
-                    let arm = &ms.arms[ms.idx];
-                    let pat_idx = self.chunk().add_pattern(arm.pattern.clone());
-                    let try_ip = self.emit(
-                        Op::TryMatch {
-                            pat_idx,
-                            fail_ip: 0,
-                        },
-                        arm.span,
-                    );
-                    let saved_locals_len = self.scopes.last().unwrap().locals.len();
-                    let saved_next_slot = self.scopes.last().unwrap().next_slot;
-                    if let Some(bind_name) = pattern_binding(&arm.pattern) {
-                        let slot = self
-                            .scopes
-                            .last_mut()
-                            .unwrap()
-                            .alloc_slot(bind_name, arm.span)?;
-                        self.chunk().emit(Op::SetLocal(slot), arm.span);
-                    }
-                    self.chunk().emit(Op::Pop, arm.span);
-                    steps.push(Step::MatchAfterArm(Box::new(MatchAfterArmStep {
-                        arms: ms.arms,
-                        idx: ms.idx,
-                        try_ip,
-                        saved_locals_len,
-                        saved_next_slot,
-                        end_jumps: ms.end_jumps,
-                        is_tail: ms.is_tail,
-                        span: ms.span,
-                    })));
-                    self.push_body(steps, &arm.body, ms.is_tail);
-                }
-                Step::MatchAfterArm(mut ma) => {
-                    let arm = &ma.arms[ma.idx];
-                    let scope = self.scopes.last_mut().unwrap();
-                    scope.locals.truncate(ma.saved_locals_len);
-                    scope.next_slot = ma.saved_next_slot;
-                    ma.end_jumps.push(self.emit(Op::Jump(0), arm.span));
-                    let fail_ip = self.chunk().code.len();
-                    self.patch_jump(ma.try_ip, fail_ip);
-                    steps.push(Step::MatchStartArms(Box::new(MatchArmsStep {
-                        arms: ma.arms,
-                        idx: ma.idx + 1,
-                        end_jumps: ma.end_jumps,
-                        is_tail: ma.is_tail,
-                        span: ma.span,
-                    })));
-                }
-                Step::ShortCircuitAfterArg(mut sc) => {
-                    let arg_span = sc.args[sc.idx].span;
-                    let j = if sc.is_and {
-                        self.emit(Op::JumpIfFalsePeek(0), arg_span)
-                    } else {
-                        self.emit(Op::JumpIfTruePeek(0), arg_span)
-                    };
-                    sc.jumps.push(j);
-                    let next_idx = sc.idx + 1;
-                    if next_idx < sc.args.len() {
-                        let next_expr = &sc.args[next_idx];
-                        sc.idx = next_idx;
-                        steps.push(Step::ShortCircuitAfterArg(sc));
-                        steps.push(Step::Expr {
-                            expr: next_expr,
-                            is_tail: false,
-                        });
-                    } else {
-                        self.chunk().emit(Op::Bool(sc.is_and), sc.span);
-                        let end_ip = self.chunk().code.len();
-                        for jmp in sc.jumps {
-                            self.patch_jump(jmp, end_ip);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn step_expr(
-        &mut self,
-        expr: &'a Expr,
-        is_tail: bool,
-        steps: &mut Vec<Step<'a>>,
-    ) -> Result<(), Error> {
-        let span = expr.span;
-        self.scopes.last_mut().unwrap().chunk.tick_spans.push(span);
-
-        match &expr.kind {
-            ExprKind::Int(n) => {
-                self.chunk().emit(Op::Int(*n), span);
-            }
-            ExprKind::Float(x) => {
-                let idx = self.chunk().add_float(*x);
-                self.chunk().emit(Op::Float(idx), span);
-            }
-            ExprKind::Bool(b) => {
-                self.chunk().emit(Op::Bool(*b), span);
-            }
-            ExprKind::Char(c) => {
-                self.chunk().emit(Op::Char(*c), span);
-            }
-            ExprKind::Str(s) => {
-                let idx = self.chunk().add_string(s);
-                self.emit(Op::Str(idx), span);
-            }
-            ExprKind::None => {
-                self.chunk().emit(Op::None, span);
-            }
-            ExprKind::Ident(name) => {
-                let op = self.resolve_var(name, span)?;
-                match op {
-                    Op::GetGlobal(_) => {
-                        self.emit(op, span);
-                    }
-                    _ => {
-                        self.chunk().emit(op, span);
-                    }
-                }
-            }
-            ExprKind::List(items) => {
-                let count = u32::try_from(items.len()).map_err(|_| {
-                    Error::parse("compile.capacity", span, "list literal too large")
-                })?;
-                if count == 0 {
-                    self.emit(Op::EmptyList, span);
-                } else {
-                    steps.push(Step::EmitFlushed {
-                        op: Op::MakeList(count),
-                        span,
-                    });
-                    for item in items.iter().rev() {
-                        steps.push(Step::Expr {
-                            expr: item,
-                            is_tail: false,
-                        });
-                    }
-                }
-            }
-            ExprKind::Tuple(items) => {
-                let count = u32::try_from(items.len()).map_err(|_| {
-                    Error::parse("compile.capacity", span, "tuple literal too large")
-                })?;
-                steps.push(Step::EmitFlushed {
-                    op: Op::MakeTuple(count),
-                    span,
-                });
-                for item in items.iter().rev() {
-                    steps.push(Step::Expr {
-                        expr: item,
-                        is_tail: false,
-                    });
-                }
-            }
-            ExprKind::Struct { name, fields } => {
-                let field_names: Vec<Rc<str>> =
-                    fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
-                steps.push(Step::FinishStruct(Box::new(FinishStructStep {
-                    name,
-                    field_names,
-                    span,
-                })));
-                for (_, fexpr) in fields.iter().rev() {
-                    steps.push(Step::Expr {
-                        expr: fexpr,
-                        is_tail: false,
-                    });
-                }
-            }
-            ExprKind::With { target, fields } => {
-                let field_names: Vec<Rc<str>> =
-                    fields.iter().map(|(k, _)| Rc::from(k.as_str())).collect();
-                steps.push(Step::FinishWith { field_names, span });
-                for (idx, (fname, fexpr)) in fields.iter().enumerate().rev() {
-                    let f_idx = self.chunk().add_string(fname);
-                    steps.push(Step::Expr {
-                        expr: fexpr,
-                        is_tail: false,
-                    });
-                    steps.push(Step::EmitFlushed {
-                        op: Op::WithCheckField(f_idx, idx as u32),
-                        span,
-                    });
-                }
-                steps.push(Step::EmitFlushed {
-                    op: Op::WithCheckStruct,
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: target,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Variant {
-                type_name,
-                variant,
-                data,
-            } => {
-                let t_idx = self.chunk().add_string(type_name);
-                let v_idx = self.chunk().add_string(variant);
-                let op = Op::MakeVariant {
-                    type_name: t_idx,
-                    variant: v_idx,
-                    has_data: data.is_some(),
-                };
-                if let Some(d) = data {
-                    steps.push(Step::EmitFlushed { op, span });
-                    steps.push(Step::Expr {
-                        expr: d,
-                        is_tail: false,
-                    });
-                } else {
-                    self.emit(op, span);
-                }
-            }
-            ExprKind::Some(inner) => {
-                steps.push(Step::EmitFlushed {
-                    op: Op::MakeSome,
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: inner,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Ok(inner) => {
-                steps.push(Step::EmitFlushed {
-                    op: Op::MakeOk,
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: inner,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Err(inner) => {
-                steps.push(Step::EmitFlushed {
-                    op: Op::MakeErr,
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: inner,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Field { target, field } => {
-                let f_idx = self.chunk().add_string(field);
-                steps.push(Step::EmitFlushed {
-                    op: Op::GetField(f_idx),
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: target,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Index { target, index } => {
-                steps.push(Step::EmitFlushed {
-                    op: Op::GetIndex,
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: index,
-                    is_tail: false,
-                });
-                steps.push(Step::Expr {
-                    expr: target,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Def { name, value } => {
-                let n_idx = self.syms.intern(name);
-                steps.push(Step::EmitFlushed {
-                    op: Op::DefGlobal(n_idx),
-                    span,
-                });
-                steps.push(Step::Expr {
-                    expr: value,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Defn { name, params, body } => {
-                let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
-                for p in params {
-                    inner.alloc_slot(p, span)?;
-                }
-                self.scopes.push(inner);
-                steps.push(Step::FinishFn(Box::new(FinishFnStep {
-                    name: Some(name.clone()),
-                    arity,
-                    is_defn: true,
-                    span,
-                })));
-                self.push_body(steps, body, true);
-            }
-            ExprKind::Fn { params, body } => {
-                let arity = u32::try_from(params.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many parameters"))?;
-                let mut inner = self.new_scope();
-                for p in params {
-                    inner.alloc_slot(p, span)?;
-                }
-                self.scopes.push(inner);
-                steps.push(Step::FinishFn(Box::new(FinishFnStep {
-                    name: None,
-                    arity,
-                    is_defn: false,
-                    span,
-                })));
-                self.push_body(steps, body, true);
-            }
-            ExprKind::Let { bindings, body } => {
-                let saved_locals_len = self.scopes.last().unwrap().locals.len();
-                let saved_next_slot = self.scopes.last().unwrap().next_slot;
-                steps.push(Step::RestoreLocals {
-                    saved_locals_len,
-                    saved_next_slot,
-                });
-                self.push_body(steps, body, is_tail);
-                for (name, val_expr) in bindings.iter().rev() {
-                    steps.push(Step::BindLocal {
-                        name,
-                        span: val_expr.span,
-                    });
-                    steps.push(Step::Expr {
-                        expr: val_expr,
-                        is_tail: false,
-                    });
-                }
-            }
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                steps.push(Step::IfAfterCond(Box::new(IfAfterCondStep {
-                    then_branch,
-                    else_branch,
-                    is_tail,
-                    cond_span: cond.span,
-                    span,
-                })));
-                steps.push(Step::Expr {
-                    expr: cond,
-                    is_tail: false,
-                });
-            }
-            ExprKind::When { cond, body } => {
-                steps.push(Step::WhenAfterCond(Box::new(WhenAfterCondStep {
-                    body,
-                    cond_span: cond.span,
-                    span,
-                })));
-                steps.push(Step::Expr {
-                    expr: cond,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Match { scrutinee, arms } => {
-                steps.push(Step::MatchStartArms(Box::new(MatchArmsStep {
-                    arms,
-                    idx: 0,
-                    end_jumps: Vec::with_capacity(arms.len()),
-                    is_tail,
-                    span,
-                })));
-                steps.push(Step::Expr {
-                    expr: scrutinee,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Call { callee, args } => {
-                if let ExprKind::Ident(op) = &callee.kind
-                    && (op == "and" || op == "or")
-                {
-                    let is_and = op == "and";
-                    if args.is_empty() {
-                        self.emit(if is_and { Op::And } else { Op::Or }, span);
-                    } else {
-                        steps.push(Step::ShortCircuitAfterArg(Box::new(ShortCircuitStep {
-                            is_and,
-                            args,
-                            idx: 0,
-                            jumps: Vec::with_capacity(args.len()),
-                            span,
-                        })));
-                        steps.push(Step::Expr {
-                            expr: &args[0],
-                            is_tail: false,
-                        });
-                    }
-                    return Ok(());
-                }
-                let argc = u32::try_from(args.len())
-                    .map_err(|_| Error::parse("compile.capacity", span, "too many arguments"))?;
-                let call_op = if is_tail {
-                    Op::TailCall(argc)
-                } else {
-                    Op::Call(argc)
-                };
-                steps.push(Step::EmitFlushed { op: call_op, span });
-                for arg in args.iter().rev() {
-                    steps.push(Step::Expr {
-                        expr: arg,
-                        is_tail: false,
-                    });
-                }
-                steps.push(Step::Expr {
-                    expr: callee,
-                    is_tail: false,
-                });
-            }
-            ExprKind::Import { name } => {
-                let idx = self.syms.intern(name);
-                self.emit(Op::Import(idx), span);
-            }
-            ExprKind::Export { names } => {
-                let idx = self.chunk().add_exports(names.clone());
-                self.emit(Op::Export(idx), span);
-            }
+            self.push_step(
+                steps,
+                Step::Expr {
+                    expr,
+                    is_tail: last && is_tail,
+                },
+                expr.span,
+            )?;
         }
         Ok(())
     }
 }
 
-fn pattern_binding(pat: &Pattern) -> Option<&str> {
-    match pat {
-        Pattern::Var(name) => Some(name.as_str()),
+fn pattern_binding(pat: &Pattern) -> Option<RawStr> {
+    match *pat {
+        Pattern::Var(name) => Some(name),
         Pattern::Some(Some(name))
         | Pattern::Ok(Some(name))
         | Pattern::Err(Some(name))
+        | Pattern::DatumType {
+            binding: Some(name),
+            ..
+        }
         | Pattern::Variant {
             binding: Some(name),
             ..
-        } => Some(name.as_str()),
+        } => Some(name),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ErrorKind;
-
-    fn compile(source: &str) -> Chunk {
-        let mut scratch = crate::parser::ParseScratch::new();
-        let exprs = crate::parser::parse_program_with_scratch(source, &mut scratch).unwrap();
-        compile_program(exprs, None, &mut SymTable::default(), &[]).unwrap()
-    }
-
-    #[test]
-    fn sparse_diagnostics_do_not_retain_capacity_for_unrelated_ast() {
-        for width in [0, 20, 2000] {
-            let source = format!("{}(let (damage 1) damge)", "(abs 1) ".repeat(width));
-            let chunk = compile(&source);
-            let table = chunk.names.as_ref().unwrap().table.get().unwrap();
-            let bytes = table.text.capacity()
-                + table.nodes.capacity() * std::mem::size_of::<NameNode>()
-                + table.sites.capacity() * std::mem::size_of::<NameSite>();
-            assert!(bytes <= 512, "width={width}, retained bytes={bytes}");
-            assert_eq!(table.nodes.len(), 1);
-            assert_eq!(table.sites.len(), 1);
-        }
-    }
-
-    #[test]
-    fn names_are_only_kept_at_global_lookups_and_shared_between_closures() {
-        for source in [
-            "(let (damage 7) damage)",
-            "(let (damage 7) (fn () damage))",
-            // `*` は GetGlobal だが、2 文字以下には候補を表示しない。
-            "(let (damage 7) (* damage damage))",
-            "(let (damage 7) (fn (x) (* damage x)))",
-        ] {
-            let chunk = compile(source);
-            assert!(chunk.names.is_none());
-            assert!(chunk.protos.iter().all(|proto| proto.chunk.names.is_none()));
-        }
-        for depth in [0, 12] {
-            let bindings = (0..20).map(|i| format!("local{i} 1 ")).collect::<String>();
-            let children = "(fn (argument) missing) ".repeat(20);
-            let source = format!(
-                "{}(let ({bindings}) {children} 0){}",
-                "(let () ".repeat(depth),
-                ")".repeat(depth)
-            );
-            let chunk = compile(&source);
-            // 親自身に GetGlobal がなくても、子は必要な外側の束縛を参照できる。
-            assert!(chunk.names.is_none());
-            let first = chunk.protos[0].chunk.names.as_ref().unwrap();
-            assert_eq!(first.table.get().unwrap().nodes.len(), 40); // 外側 20 + 各関数の引数 1
-            assert_eq!(chunk.protos.len(), 20);
-            for proto in &chunk.protos {
-                let names = proto.chunk.names.as_ref().unwrap();
-                assert!(Rc::ptr_eq(&names.table, &first.table));
-                let ip = names.table.get().unwrap().sites[names.last_site].ip;
-                assert_eq!(proto.chunk.visible_names(ip).count(), 21);
-            }
-        }
-    }
-
-    #[test]
-    fn lookup_sites_keep_their_own_scope_snapshot() {
-        for depth in [0, 12] {
-            let source = format!(
-                "{}(let (damage 1) known (let (health 2) known)) (let (armor 3) known){}",
-                "(let () ".repeat(depth),
-                ")".repeat(depth)
-            );
-            let chunk = compile(&source);
-            let names = chunk.names.as_ref().unwrap();
-            let table = names.table.get().unwrap();
-            let mut sites = Vec::new();
-            let mut site = Some(names.last_site);
-            while let Some(index) = site {
-                let entry = &table.sites[index];
-                sites.push((entry.ip, entry.head));
-                site = entry.previous;
-            }
-            sites.reverse();
-            assert_eq!(sites.len(), 3);
-            assert_eq!(names.table.get().unwrap().nodes.len(), 3);
-            for ((ip, _), expected) in
-                sites
-                    .into_iter()
-                    .zip([vec!["damage"], vec!["health", "damage"], vec!["armor"]])
-            {
-                assert_eq!(chunk.visible_names(ip).collect::<Vec<_>>(), expected);
-            }
-            assert_eq!(chunk.visible_names(usize::MAX).count(), 0);
-        }
-    }
-
-    #[test]
-    fn nested_name_nodes_grow_linearly() {
-        let depth = 30;
-        let source = format!(
-            "{}0{}",
-            "(fn (a b c d e) missing ".repeat(depth),
-            ")".repeat(depth)
-        );
-        let chunk = compile(&source);
-        let mut current = &chunk;
-        let first = chunk.protos[0].chunk.names.as_ref().unwrap();
-        assert_eq!(first.table.get().unwrap().nodes.len(), depth * 5);
-        for _ in 0..depth {
-            current = &current.protos[0].chunk;
-            let names = current.names.as_ref().unwrap();
-            assert!(Rc::ptr_eq(&names.table, &first.table));
-        }
-    }
-
-    #[test]
-    fn local_slot_overflow_reports_capacity_rule() {
-        // 巨大なソースを確保せず、個数上限の直前の状態から検査する。
-        let mut scope = Scope::new(None);
-        scope.next_slot = u32::MAX - 1;
-        let at = Span::new(3, 5);
-        assert_eq!(scope.alloc_slot("last", at).unwrap(), u32::MAX - 1);
-        let err = scope.alloc_slot("overflow", at).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.rule(), "compile.capacity");
-        assert_eq!(err.at, at);
     }
 }

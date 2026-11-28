@@ -129,9 +129,9 @@ fn run_in_small_stack() {
 
             // 後置アクセスと括弧の混在（上限ちょうどは成功、超過は構文エラー）。
             let mix_ok = format!("(+ 1 {})", nested_field(LIMIT - 1));
-            // `x` が未定義なので実行時エラーにはなるが構文解析・コンパイルは成功する。
+            // `x` が未定義なので型エラーにはなるが構文解析は成功する。
             let mix_ok_err = eval(&mix_ok).unwrap_err();
-            assert_eq!(mix_ok_err.kind, ErrorKind::Runtime);
+            assert_eq!(mix_ok_err.kind, ErrorKind::Type);
 
             let mix_over = format!("(+ 1 {})", nested_field(LIMIT));
             assert_eq!(eval(&mix_over).unwrap_err().kind, ErrorKind::Parse);

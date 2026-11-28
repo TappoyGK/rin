@@ -2,6 +2,27 @@
 
 利用者に関わる変更をバージョンごとに記載し、関連する PR のリンクを付ける。イシューへのリンクは記載しない。
 
+## v0.2.0
+
+- **破壊的変更（静的型付けへの移行）**：`defschema`・型注釈・`datum` 型と型パターン・モジュール修飾の構造体／バリアント構築とパターンを導入し、`defn` の型注釈を必須とし、実行前にゼロヒープの型検査を行う（[PR #83](https://github.com/TappoyGK/rin/pull/83)）。
+- **破壊的変更（ホスト境界の型検証と型照会 API）**：スキーマ DSL の `any` を `datum` に置き換え、`bind` / `eval_with` 系 API に型指定と実行時検証（`[type.boundary]`）を導入した。関数シグネチャ・型照会 API と事前解決型ハンドル（`TypeHandle` / `RinType`）も追加した（[PR #83](https://github.com/TappoyGK/rin/pull/83)）。
+- **破壊的変更（`eval_with` のレキシカルスコープ化と再定義の禁止）**：`eval_with` の初期束縛をレキシカルスコープに変更した。読み込み段階での同名再定義・組み込み名の上書き・ホストによるモジュールの再読み込み（`load_module` / `rin_load`）をエラーとし、失敗した評価の追加束縛はロールバックする（[PR #81](https://github.com/TappoyGK/rin/pull/81)）。
+- 複数行文字列リテラル `"""..."""`（閉じ行基準のインデント除去と `${式}` 埋め込み対応）を追加した（[PR #79](https://github.com/TappoyGK/rin/pull/79)）。
+- **破壊的変更（`text` 改名・テンプレート埋め込み・`f64` 表示統一）**：文字列型を `string` から `text` に改名し、`"..."` 内の `${式}` 埋め込み・添字・スライス・大小比較を追加した。`f64` の表示を Suz 共通の最短往復規則に統一した（[PR #78](https://github.com/TappoyGK/rin/pull/78)）。
+- **破壊的変更（文字リテラル `\` 形式への移行）**：文字リテラルを `'a'` から `\a` / `\u{H}` / 名前つき文字形式に変更し、`'` を `quote` 専用とした。文字列エスケープも Suz と共通化した（[PR #77](https://github.com/TappoyGK/rin/pull/77)）。
+- **破壊的変更（字句整理・`quote` / `quasiquote`・`ident`・`(tuple ...)`）**：リスト・構造体・`with` を空白区切りに、タプルを `(tuple ...)` に変更した。`quote` / `quasiquote`・正規 S 式構文・識別子値型 `ident` を追加し、値の表示をそのまま再入力できる形に統一した（[PR #75](https://github.com/TappoyGK/rin/pull/75)）。
+- **破壊的変更（`Allocator` の `unsafe trait` 化）**：`Allocator` トレイトを `unsafe trait` に変更し、サイズ 0 確保を含む安全性契約を定めた（[PR #73](https://github.com/TappoyGK/rin/pull/73)）。
+- `ArenaAllocator` の整列計算にバッファ開始アドレスを反映するよう修正した（[PR #72](https://github.com/TappoyGK/rin/pull/72)）。
+- **破壊的変更（ゼロヒープ化とホスト境界・C FFI 刷新）**：内部メモリ管理を 3 領域（永続・オブジェクト・作業）に移行し、システムヒープ確保 0 回で動作するようにした。Rust にゼロヒープ API（`Val` / `ValueRef` / `ErrorRef`）を追加し、C FFI もアロケータ配置・借用戻り値へ刷新した（[PR #70](https://github.com/TappoyGK/rin/pull/70)）。
+- **破壊的変更（C FFI の読み込み／実行分離）**：C FFI のハンドルを `Rin` に改名し、`rin_build` と `rin_eval_with` を追加、凍結後専用の `rin_eval` と分離した（[PR #65](https://github.com/TappoyGK/rin/pull/65)）。
+- **破壊的変更（大域環境の凍結）**：`Builder`（読み込み段階）と `Machine`（実行段階）を分離し、`def` / `defn` / `import` / `export` を読み込み段階のトップレベル専用とした（[PR #63](https://github.com/TappoyGK/rin/pull/63)）。
+- `sin` / `cos` を決定的な自前実装に置き換え、`MathFma` 設定を追加した（[PR #62](https://github.com/TappoyGK/rin/pull/62)）。
+- 組み込み関数の走査・比較・生成と `with` の複製をステップ上限に計上するようにした（[PR #58](https://github.com/TappoyGK/rin/pull/58)）。
+- 決定性の規則（`sin` / `cos`、NaN、メモリ確保失敗、スタック保証範囲）を明文化した（[PR #57](https://github.com/TappoyGK/rin/pull/57)）。
+- ソース整形 API `rin::fmt::format` と `rin fmt` CLI を追加した（[PR #54](https://github.com/TappoyGK/rin/pull/54)）。
+- テスト構文（`deftest` / `check` / `check_eq`）と `rin test` CLI を追加し、`unicode-width` 依存を削除した（[PR #53](https://github.com/TappoyGK/rin/pull/53)）。
+- **破壊的変更**：行コメントを `//` から `;` に変更した（[PR #49](https://github.com/TappoyGK/rin/pull/49)）。
+
 ## v0.1.1
 
 - バイトコード VM へ移行し、ローカル変数とキャプチャをスロットで解決するようにした。末尾呼び出し最適化を導入し、最適化される呼び出しは深さ上限に数えない。`and` / `or` を値として扱えるようにした（[PR #4](https://github.com/TappoyGK/rin/pull/4)）。

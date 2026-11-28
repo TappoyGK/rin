@@ -1,0 +1,12 @@
+[package]
+name = "rin-cli"
+version = "0.2.0"
+edition = "2024"
+
+[[bin]]
+name = "rin"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+rin = { path = "../rin" }

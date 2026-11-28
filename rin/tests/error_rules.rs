@@ -8,7 +8,12 @@ use std::path::Path;
 fn all_implementation_rules_are_documented() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut rules = BTreeSet::new();
-    for doc in ["docs/spec.md", "docs/schema.md"] {
+    for doc in [
+        "docs/spec.md",
+        "docs/schema.md",
+        "docs/testing.md",
+        "docs/fmt.md",
+    ] {
         for line in fs::read_to_string(root.join(doc)).unwrap().lines() {
             if let Some(rest) = line.trim_start().strip_prefix("**[") {
                 let (id, _) = rest.split_once("]**").expect("closed rule definition");
@@ -32,9 +37,36 @@ fn all_implementation_rules_are_documented() {
             "Error::lex(",
             "Error::parse(",
             "Error::runtime(",
+            ".err_str(",
+            ".err_fmt(",
+            ".err_runtime(",
+            ".err_runtime_fmt(",
+            ".begin_msg(",
+            ".err_lex(",
+            ".err_lex_fmt(",
+            ".err_parse(",
+            ".err_parse_fmt(",
         ] {
             for rest in source.split(constructor).skip(1) {
                 let rest = rest.trim_start();
+                if path.ends_with("error/store.rs") && rest.starts_with("self.rule") {
+                    continue;
+                }
+                if !rest.starts_with('"')
+                    && matches!(
+                        constructor,
+                        ".err_str("
+                            | ".err_fmt("
+                            | ".err_runtime("
+                            | ".err_runtime_fmt("
+                            | ".begin_msg("
+                    )
+                {
+                    // 転送ラッパー (例: `self.pool.core.err_str(rule, ...)`) はスキップする。
+                    if rest.starts_with("rule") {
+                        continue;
+                    }
+                }
                 let literal = rest.strip_prefix('"').unwrap_or_else(|| {
                     panic!(
                         "{}: {constructor} must specify a literal rule",
@@ -50,13 +82,19 @@ fn all_implementation_rules_are_documented() {
                 sites += 1;
             }
         }
-        // C API の Host エラーは Rust Error を介さず保存する。
-        if path.ends_with("ffi/error.rs") {
-            for rest in source.split("Self::new(").skip(1) {
-                if let Some(literal) = rest.trim_start().strip_prefix('"') {
-                    let (rule, _) = literal.split_once('"').unwrap();
-                    assert!(rules.contains(rule), "undocumented FFI rule {rule}");
-                    sites += 1;
+        // C API の Host / phase エラーは Rust Error を介さず保存する。
+        if path.ends_with("ffi/error.rs") || path.ends_with("ffi/mod.rs") {
+            for pat in [
+                "set_simple(",
+                "record_simple_error(",
+                "record_simple_error_fmt(",
+            ] {
+                for rest in source.split(pat).skip(1) {
+                    if let Some(literal) = rest.trim_start().strip_prefix('"') {
+                        let (rule, _) = literal.split_once('"').unwrap();
+                        assert!(rules.contains(rule), "undocumented FFI rule {rule}");
+                        sites += 1;
+                    }
                 }
             }
         }
@@ -69,34 +107,38 @@ fn language_diagnostics_and_display() {
     for (source, kind, rule) in [
         ("@", ErrorKind::Lex, "src.token"),
         ("\"\\q\"", ErrorKind::Lex, "src.escape"),
-        ("'\\q'", ErrorKind::Lex, "src.escape"),
+        ("\\u{}", ErrorKind::Lex, "src.escape"),
         ("9223372036854775808", ErrorKind::Lex, "src.int"),
         ("1e", ErrorKind::Lex, "src.float"),
-        ("'ab'", ErrorKind::Lex, "src.char"),
+        ("\\ab", ErrorKind::Lex, "src.char"),
         ("(", ErrorKind::Parse, "src.syntax"),
         ("(fn ())", ErrorKind::Parse, "expr.body"),
         ("(match 1 (1.5 0))", ErrorKind::Parse, "pat.kinds"),
-        ("missing", ErrorKind::Runtime, "expr.name"),
-        ("(if 1 2 3)", ErrorKind::Runtime, "expr.condition"),
-        ("(when 1 2)", ErrorKind::Runtime, "expr.condition"),
+        ("missing", ErrorKind::Type, "expr.name"),
+        ("(if 1 2 3)", ErrorKind::Type, "expr.condition"),
+        ("(when 1 2)", ErrorKind::Type, "expr.condition"),
         ("(import missing)", ErrorKind::Runtime, "expr.module"),
-        ("(1)", ErrorKind::Runtime, "expr.call"),
-        ("((fn (x) x))", ErrorKind::Runtime, "expr.call"),
+        ("(1)", ErrorKind::Type, "expr.call"),
+        ("((fn (x) x))", ErrorKind::Type, "expr.call"),
         ("(+ 9223372036854775807 1)", ErrorKind::Runtime, "op.arith"),
         (
-            "(def add +) (add 9223372036854775807 1)",
+            "(let (add +) (add 9223372036854775807 1))",
             ErrorKind::Runtime,
             "op.arith",
         ),
-        ("(== 1 true)", ErrorKind::Runtime, "op.cmp"),
-        ("(and 1 true)", ErrorKind::Runtime, "op.logic"),
-        ("(as_i64 true)", ErrorKind::Runtime, "fn.convert"),
+        ("(== 1 true)", ErrorKind::Type, "op.cmp"),
+        ("(and 1 true)", ErrorKind::Type, "op.logic"),
+        ("(as_i64 true)", ErrorKind::Type, "fn.convert"),
         ("(abs -9223372036854775808)", ErrorKind::Runtime, "fn.math"),
-        ("(sort [true false])", ErrorKind::Runtime, "fn.list"),
-        ("(filter (fn (x) x) [1])", ErrorKind::Runtime, "fn.list"),
-        ("(match 1 (2 0))", ErrorKind::Runtime, "expr.match"),
-        ("Point{x: 1}.y", ErrorKind::Runtime, "expr.field"),
-        ("(with 1 {x: 2})", ErrorKind::Runtime, "expr.with"),
+        ("(sort [true false])", ErrorKind::Type, "fn.list"),
+        ("(filter 1 [1])", ErrorKind::Type, "fn.list"),
+        ("(match 1 (2 0))", ErrorKind::Type, "expr.match"),
+        (
+            "(defschema Point (struct Point (x i64))) Point{x: 1}.y",
+            ErrorKind::Type,
+            "expr.field",
+        ),
+        ("(with 1 {x: 2})", ErrorKind::Type, "expr.with"),
     ] {
         let err = eval(source).unwrap_err();
         assert_eq!(err.kind, kind, "{source}: {err}");
@@ -134,10 +176,22 @@ fn schema_diagnostics() {
     }
     for (schema, value, rule) in [
         ("i64", "true", "schema.type"),
-        ("(tuple i64 i64)", "(1, 2, 3)", "schema.tuple"),
-        ("(struct Point (x i64))", "Point{}", "schema.struct"),
-        ("(variant Color (Red))", "Color.Blue", "schema.variant"),
-        ("(variant Color (Red))", "Color.Red(1)", "schema.variant"),
+        ("(tuple i64 i64)", "(tuple 1 2 3)", "schema.tuple"),
+        (
+            "(struct Point (x i64))",
+            "(defschema Point (struct Point)) Point{}",
+            "schema.struct",
+        ),
+        (
+            "(variant Color (Red))",
+            "(defschema Color (variant Color (Blue))) Color.Blue",
+            "schema.variant",
+        ),
+        (
+            "(variant Color (Red))",
+            "(defschema Color (variant Color (Red i64))) Color.Red(1)",
+            "schema.variant",
+        ),
         (
             "(defschema A B) (defschema B A) A",
             "1",

@@ -1,5 +1,8 @@
 //! 固定深度までの直接変換。上限以降は反復経路だけで処理する。
+use std::collections::BTreeMap;
+
 use super::*;
+
 impl Pool<'_> {
     #[inline(always)]
     pub(super) fn export_shallow(&self, val: RVal, depth: usize) -> Value {
@@ -21,7 +24,7 @@ impl Pool<'_> {
         if depth == 32
             && !matches!(
                 self.get(id),
-                Obj::Str(_) | Obj::Closure { .. } | Obj::Module { .. }
+                Obj::Str(_) | Obj::Ident(_) | Obj::Closure { .. } | Obj::Module { .. }
             )
         {
             return self.export_deep(val);
@@ -39,7 +42,8 @@ impl Pool<'_> {
                 }
                 Value::list(items)
             }
-            Obj::Str(s) => Value::str(s.as_ref()),
+            Obj::Str(s) => Value::text(s.as_str()),
+            Obj::Ident(s) => Value::ident(s.as_str()),
             Obj::Array(xs) => Value::array(
                 xs.iter()
                     .map(|v| self.export_shallow(*v, depth + 1))
@@ -50,30 +54,41 @@ impl Pool<'_> {
                     .map(|v| self.export_shallow(*v, depth + 1))
                     .collect(),
             ),
-            Obj::Struct { name, fields } => {
-                // 少数フィールドでは中間 Vec とソートを省く。
-                // 大きな map は標準の一括構築で木の逐次更新を避ける。
-                let map = if fields.len() <= 4 {
+            Obj::Struct { desc, values } => {
+                let desc = *desc;
+                let values = *values;
+                let name = self.struct_desc_name(desc);
+                let count = values.len();
+                let map = if count <= 4 {
                     let mut map = BTreeMap::new();
-                    for (k, v) in fields {
-                        map.insert(k.to_string(), self.export_shallow(*v, depth + 1));
+                    for (i, &v) in values.iter().enumerate() {
+                        map.insert(
+                            self.struct_desc_field_name(desc, i).to_string(),
+                            self.export_shallow(v, depth + 1),
+                        );
                     }
                     map
                 } else {
-                    fields
+                    values
                         .iter()
-                        .map(|(k, v)| (k.to_string(), self.export_shallow(*v, depth + 1)))
+                        .enumerate()
+                        .map(|(i, &v)| {
+                            (
+                                self.struct_desc_field_name(desc, i).to_string(),
+                                self.export_shallow(v, depth + 1),
+                            )
+                        })
                         .collect()
                 };
-                Value::structure(name.as_ref(), map)
+                Value::structure(name, map)
             }
             Obj::Variant {
                 type_name,
                 variant,
                 data,
             } => Value::variant(
-                type_name.as_ref(),
-                variant.as_ref(),
+                type_name.as_str(),
+                variant.as_str(),
                 data.map(|d| self.export_shallow(d, depth + 1)),
             ),
             Obj::Some(v) => Value::some(self.export_shallow(*v, depth + 1)),
@@ -84,6 +99,7 @@ impl Pool<'_> {
                 None => "<fn>",
             }),
             Obj::Module { .. } => Value::Builtin("<module>"),
+            Obj::StructDesc { .. } => unreachable!(),
         }
     }
 
@@ -92,7 +108,7 @@ impl Pool<'_> {
         val: &Value,
         span: Span,
         depth: usize,
-    ) -> Result<RVal, Error> {
+    ) -> Result<RVal, ErrRecorded> {
         if depth == 32
             && matches!(
                 val,
@@ -121,11 +137,25 @@ impl Pool<'_> {
                 .find(|b| b.name() == *name)
                 .map(RVal::Builtin)
                 .ok_or_else(|| {
-                    Error::runtime("host.value", span, format!("cannot import '{name}'"))
+                    self.core.err_fmt(
+                        "host.value",
+                        ErrorKind::Runtime,
+                        span,
+                        format_args!("cannot import '{name}'"),
+                    )
                 }),
-            Value::Str(s) => self
-                .alloc_obj(Obj::Str(Rc::from(s.as_str())), span)
-                .map(RVal::Obj),
+            Value::Text(s) => self.alloc_str(s.as_str(), span).map(RVal::Obj),
+            Value::Ident(s) => {
+                if !crate::lexer::is_valid_ident(s.as_str()) {
+                    return Err(self.core.err_fmt(
+                        "host.value",
+                        ErrorKind::Runtime,
+                        span,
+                        format_args!("invalid identifier '{s}'"),
+                    ));
+                }
+                self.alloc_ident(s.as_str(), span).map(RVal::Obj)
+            }
             Value::List(xs) => {
                 let items: Vec<_> = xs.iter().collect();
                 let mut acc = RVal::EmptyList;
@@ -162,36 +192,39 @@ impl Pool<'_> {
                         }
                     }
                 }
-                let obj = if matches!(val, Value::Array(_)) {
-                    Obj::Array(values)
+                if matches!(val, Value::Array(_)) {
+                    self.alloc_array_owned(&values, span).map(RVal::Obj)
                 } else {
-                    Obj::Tuple(values)
-                };
-                self.alloc_obj(obj, span).map(RVal::Obj)
+                    self.alloc_tuple_owned(&values, span).map(RVal::Obj)
+                }
             }
             Value::Struct { name, fields } => {
-                let mut values = BTreeMap::new();
+                let mut field_names = Vec::with_capacity(fields.len());
+                let mut values = Vec::with_capacity(fields.len());
                 for (key, x) in fields.iter() {
                     match self.import_shallow(x, span, depth + 1) {
                         Ok(v) => {
-                            values.insert(Rc::from(key.as_str()), v);
+                            field_names.push(key.as_str());
+                            values.push(v);
                         }
                         Err(e) => {
-                            for v in values.into_values() {
+                            for v in values {
                                 self.release_val(v);
                             }
                             return Err(e);
                         }
                     }
                 }
-                self.alloc_obj(
-                    Obj::Struct {
-                        name: Rc::from(name.as_str()),
-                        fields: values,
-                    },
-                    span,
-                )
-                .map(RVal::Obj)
+                let desc = match self.intern_struct_desc(name.as_str(), &field_names, span) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        for v in values {
+                            self.release_val(v);
+                        }
+                        return Err(e);
+                    }
+                };
+                self.alloc_struct_owned(desc, &values, span).map(RVal::Obj)
             }
             Value::Variant {
                 type_name,
@@ -202,15 +235,8 @@ impl Pool<'_> {
                     Some(x) => Some(self.import_shallow(x, span, depth + 1)?),
                     None => None,
                 };
-                self.alloc_obj(
-                    Obj::Variant {
-                        type_name: Rc::from(type_name.as_str()),
-                        variant: Rc::from(variant.as_str()),
-                        data,
-                    },
-                    span,
-                )
-                .map(RVal::Obj)
+                self.alloc_variant_owned(type_name.as_str(), variant.as_str(), data, span)
+                    .map(RVal::Obj)
             }
             Value::Some(x) | Value::Ok(x) | Value::Err(x) => {
                 let x = self.import_shallow(x, span, depth + 1)?;

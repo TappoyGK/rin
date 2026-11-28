@@ -1,5 +1,5 @@
 //! cargo run --release --example value_bench で浅い値の処理時間と確保回数を測る。
-use rin::{HeapAllocator, Limits, Machine, Schema, Value};
+use rin::{Builder, HeapAllocator, Limits, Schema, Value};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,7 +48,7 @@ fn main() {
         return;
     }
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     let value = Value::list((0..8).map(Value::Int).collect());
     let other = Value::list((0..8).map(Value::Int).collect());
     let schema = Schema::parse("(list i64)").unwrap();
@@ -56,8 +56,11 @@ fn main() {
         black_box(m.eval("42").unwrap());
     });
     measure("bind list8", || {
-        m.bind("x", black_box(&value)).unwrap();
+        let mut alloc2 = HeapAllocator;
+        let mut m2 = Builder::new(Limits::default(), &mut alloc2);
+        m2.bind("x", "(list i64)", black_box(&value)).unwrap();
     });
+    m.bind("x", "(list i64)", &value).unwrap();
     measure("export list8", || {
         black_box(m.eval("x").unwrap());
     });
@@ -104,20 +107,27 @@ fn make_case(case: &str) -> Value {
             BTreeMap::from([
                 ("a".into(), Value::Int(1)),
                 ("b".into(), Value::Float(2.0)),
-                ("c".into(), Value::str("abc")),
+                ("c".into(), Value::text("abc")),
                 ("d".into(), Value::Bool(true)),
                 ("e".into(), Value::list(vec![Value::Int(1), Value::Int(2)])),
                 ("f".into(), Value::some(Value::Int(3))),
                 ("g".into(), Value::None),
-                ("h".into(), Value::str("xyz")),
+                ("h".into(), Value::text("xyz")),
             ]),
         ),
         _ => unreachable!(),
     }
 }
 fn extended() {
-    for case in [
-        "list8", "list1000", "struct8", "tree4x4", "tree8x2", "arr1000",
+    for (case, ty_str, schema_src) in [
+        ("list8", "(list i64)", ""),
+        ("list1000", "(list i64)", ""),
+        (
+            "struct8",
+            "S",
+            "(defschema S (struct S (a i64) (b f64) (c text) (d bool) (e (list i64)) (f (option i64)) (g (option i64)) (h text)))",
+        ),
+        ("arr1000", "(array (tuple i64 i64))", ""),
     ] {
         let n = if matches!(case, "list8" | "struct8") {
             20_000
@@ -127,12 +137,22 @@ fn extended() {
         let v = make_case(case);
         let other = make_case(case);
         let mut alloc = HeapAllocator;
-        let mut m = Machine::new(Limits::default(), &mut alloc);
-        m.eval("(defn id (x) x)").unwrap();
-        m.bind("x", &v).unwrap();
+        let mut m = Builder::new(Limits::default(), &mut alloc);
+        if !schema_src.is_empty() {
+            m.eval(schema_src).unwrap();
+        }
+        m.eval(&format!("(defn id ((x {ty_str})) -> {ty_str} x)"))
+            .unwrap();
+        m.bind("x", ty_str, &v).unwrap();
         measure_n(&format!("{case} bind"), n, || {
-            m.bind("x", black_box(&v)).unwrap();
+            let mut a2 = HeapAllocator;
+            let mut m2 = Builder::new(Limits::default(), &mut a2);
+            if !schema_src.is_empty() {
+                m2.eval(schema_src).unwrap();
+            }
+            m2.bind("x", ty_str, black_box(&v)).unwrap();
         });
+        let mut m = m.freeze().unwrap();
         measure_n(&format!("{case} export"), n, || {
             black_box(m.eval("x").unwrap());
         });
@@ -156,8 +176,9 @@ fn extended() {
         });
     }
     let mut alloc = HeapAllocator;
-    let mut m = Machine::new(Limits::default(), &mut alloc);
+    let mut m = Builder::new(Limits::default(), &mut alloc);
     m.eval("(defn dedup () (unique (range 0 1000)))").unwrap();
+    let mut m = m.freeze().unwrap();
     measure_n("VM unique1000", 50, || {
         black_box(m.call("dedup", &[]).unwrap());
     });

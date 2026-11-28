@@ -8,7 +8,7 @@ Rin の値（`Value`）がホスト側の期待する形に適合するかを検
 
 ```rin
 (defschema Element (variant Element (Plain) (Fire) (Frost)))
-(defschema Card (struct Card (id string) (cost i64) (element Element)))
+(defschema Card (struct Card (id text) (cost i64) (element Element)))
 (list Card)
 ```
 
@@ -18,10 +18,10 @@ Rin の値（`Value`）がホスト側の期待する形に適合するかを検
 
 **[schema.type]** 値の種類は要求された型に一致し、コンテナの要素は対応する型に適合しなければならない。構造体・バリアントの型名も一致しなければならない。型・型名の不一致は検証エラーである。
 
-### 2.1 プリミティブ・ワイルドカード
+### 2.1 プリミティブ・動的データ型
 
-- `void`、`i64`、`f64`、`bool`、`char`、`string`
-- `any`：任意の型・値を受け入れる。
+- `void`、`i64`、`f64`、`bool`、`char`、`text`、`ident`
+- `datum`：`i64`・`f64`・`bool`・`char`・`text`・`ident`・`none`・要素が `datum` の `list` を受け入れる（`quote` / `quasiquote` のデータ表現に一致する）。
 
 ### 2.2 コンテナ・合成型
 

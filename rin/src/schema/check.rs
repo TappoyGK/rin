@@ -1,5 +1,7 @@
 //! 値の深さに依存しないスキーマ検証。パスは 1 本の文字列を伸縮して保持する。
-use super::*;
+use super::{Schema, TypeExpr};
+use crate::{Error, Span, Value};
+use std::collections::BTreeMap;
 
 enum Segment<'a> {
     None,
@@ -110,14 +112,27 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
         }
         let base = path.len();
         match ty {
-            TypeExpr::Any => {}
+            TypeExpr::Datum => match value {
+                Value::Int(_)
+                | Value::Float(_)
+                | Value::Bool(_)
+                | Value::Char(_)
+                | Value::Text(_)
+                | Value::Ident(_)
+                | Value::None => {}
+                Value::List(xs) => {
+                    work.push(Task::List(xs.iter(), ty, base, 0));
+                }
+                _ => return mismatch("datum", value.type_name(), &path),
+            },
             TypeExpr::Void => expect_match(matches!(value, Value::Void), "void", value, &path)?,
             TypeExpr::I64 => expect_match(matches!(value, Value::Int(_)), "i64", value, &path)?,
             TypeExpr::F64 => expect_match(matches!(value, Value::Float(_)), "f64", value, &path)?,
             TypeExpr::Bool => expect_match(matches!(value, Value::Bool(_)), "bool", value, &path)?,
             TypeExpr::Char => expect_match(matches!(value, Value::Char(_)), "char", value, &path)?,
-            TypeExpr::String => {
-                expect_match(matches!(value, Value::Str(_)), "string", value, &path)?
+            TypeExpr::Text => expect_match(matches!(value, Value::Text(_)), "text", value, &path)?,
+            TypeExpr::Ident => {
+                expect_match(matches!(value, Value::Ident(_)), "ident", value, &path)?
             }
             TypeExpr::List(ty) => {
                 let Value::List(xs) = value else {
@@ -224,4 +239,20 @@ pub(super) fn check(schema: &Schema, value: &Value) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn expect_match(ok: bool, expected: &str, actual: &Value, path: &str) -> Result<(), Error> {
+    if ok {
+        Ok(())
+    } else {
+        mismatch(expected, actual.type_name(), path)
+    }
+}
+
+fn mismatch(expected: &str, actual: &str, path: &str) -> Result<(), Error> {
+    Err(Error::runtime(
+        "schema.type",
+        Span::default(),
+        format!("{path}: expected {expected}, got {actual}"),
+    ))
 }

@@ -1,5 +1,5 @@
 //! 遠い候補が増えても距離計算用の確保回数が増えないことを検証する。
-use rin::{HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, HeapAllocator, Limits, Value};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -34,28 +34,33 @@ static ALLOCATOR: Counting = Counting;
 
 #[test]
 fn distant_candidates_do_not_allocate_dp_rows() {
-    let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
     let query = "a".repeat(2000);
-    let measure = |machine: &mut Machine<'_>| {
+    let measure = |bindings: usize| {
+        let mut alloc = HeapAllocator;
+        let mut builder = Builder::new(Limits::default(), &mut alloc);
+        for i in 0..bindings {
+            builder
+                .bind(
+                    &format!("{}{:03}", "z".repeat(1997), i),
+                    "i64",
+                    &Value::Int(0),
+                )
+                .unwrap();
+        }
+        let mut machine = builder.freeze().unwrap();
         COUNT.set(Some(0));
         let error = machine.call(&query, &[]).unwrap_err();
         let count = COUNT.replace(None).unwrap();
         assert!(!error.message.contains("did you mean"));
         count
     };
-    let empty = measure(&mut machine);
-    for i in 0..500 {
-        machine
-            .bind(&format!("{}{:03}", "z".repeat(1997), i), &Value::Int(0))
-            .unwrap();
-    }
-    assert_eq!(measure(&mut machine), empty);
+    let empty = measure(0);
+    assert_eq!(measure(500), empty);
 }
 
 fn eval_allocations(source: &str) -> usize {
     let mut alloc = HeapAllocator;
-    let mut machine = Machine::new(Limits::default(), &mut alloc);
+    let mut machine = Builder::new(Limits::default(), &mut alloc);
     for _ in 0..5 {
         machine.eval(source).unwrap();
     }
@@ -103,8 +108,8 @@ fn no_locals_need_no_hint_allocations() {
 fn unrelated_global_references_do_not_inflate_diagnostic_storage() {
     for width in [0, 20, 2000] {
         let prefix = "(abs 1) ".repeat(width);
-        let short = format!("{prefix}(let (xx 1) (fn () yy))");
-        let long = format!("{prefix}(let (xx 1) (fn () yyy))");
+        let short = format!("{prefix}(let (xx 1) (fn () xx))");
+        let long = format!("{prefix}(let (xx 1) (fn () (+ xx 1)))");
         BYTES.set(0);
         let short_count = eval_allocations(&short);
         let short_bytes = BYTES.get();

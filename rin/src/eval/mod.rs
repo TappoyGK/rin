@@ -1,622 +1,526 @@
-//! バイトコード VM の実行環境 `Machine` と `Runner` を定義する。
+//! バイトコード VM の実行環境 `Builder`・`Machine` と `Runner` を定義する。
 
 mod builtins;
+mod host_api;
+pub use host_api::TypeArg;
+mod host_vals;
+mod machine;
+mod modules;
 mod ops;
+mod runner;
 mod vm;
 
-use std::collections::BTreeMap;
-use std::rc::Rc;
-
-use crate::alloc::{Allocator, HeapAllocator};
-use crate::bytecode::{BuiltinId, Capture, Chunk, FnProto, SymTable};
-use crate::compiler::compile_program;
-use crate::diagnostic::{available, suggest};
-use crate::error::{Error, ErrorKind, Limits, Span};
-use crate::parser::{ParseScratch, ParseScratchGuard};
+use crate::alloc::Allocator;
+#[cfg(feature = "std-value")]
+use crate::alloc::HeapAllocator;
+use crate::bytecode::{
+    BuiltinId, Capture, Chunk, FnProtoPtr, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name,
+};
+#[cfg(feature = "std-value")]
+use crate::compiler::compile_program_parts;
+use crate::compiler::{
+    InitialBindingNames, UsedBindings, compile_program, compile_program_with_bindings,
+};
+use crate::diagnostic::{write_available, write_suggest};
+#[cfg(feature = "std-value")]
+use crate::error::Error;
+use crate::error::{ErrRecorded, ErrorKind, ErrorRef, Limits, Span};
+use crate::math::MathFma;
+use crate::mem::{AllocCore, MemoryConfig, RawMap, RawStr, RawVec, WorkArena, fnv1a_bytes};
+use crate::parser::{parse_program_work, parse_type_expr_work};
 use crate::pool::{Obj, Pool, RVal};
+use crate::typecheck::{
+    CheckOptions, FnSig, TypeEnv, ValBinding, check_program_work, check_rval_against_type,
+    check_rval_against_type_expr, reject_fn_in_perm_type, resolve_type_expr_perm,
+    validate_boundary_type_expr,
+};
+#[cfg(feature = "std-value")]
 use crate::value::Value;
+use crate::value_ref::{Val, ValueRef};
 
 /// 既定の `HeapAllocator` を用いて Rin ソースを評価する。
-pub fn eval_with(source: &str, bindings: &[(&str, Value)], limits: Limits) -> Result<Value, Error> {
+///
+/// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
+#[cfg(feature = "std-value")]
+pub fn eval_with(
+    source: &str,
+    bindings: &[(&str, &str, Value)],
+    limits: Limits,
+) -> Result<Value, Error> {
     let mut alloc = HeapAllocator;
     eval_with_allocator(source, bindings, limits, &mut alloc)
 }
 
 /// 呼び出し側が指定した `Allocator` を用いて Rin ソースを評価する。
+///
+/// 読み込み段階の環境で 1 回評価する（`def`・`defn` 等も書ける）。
+#[cfg(feature = "std-value")]
 pub fn eval_with_allocator(
     source: &str,
-    bindings: &[(&str, Value)],
+    bindings: &[(&str, &str, Value)],
     limits: Limits,
     alloc: &mut dyn Allocator,
 ) -> Result<Value, Error> {
-    let mut machine = Machine::new(limits, alloc);
-    for (k, v) in bindings {
-        machine.bind(k, v)?;
+    let mut builder = Builder::new(limits, alloc);
+    for (k, ty, v) in bindings {
+        builder.bind(k, *ty, v)?;
     }
-    machine.eval(source)
+    builder.eval(source)
 }
 
-/// 呼び出し側の `Allocator` 上で動作する永続的な Rin 実行環境。
+/// 読み込み段階の Rin 環境。
 ///
-/// トップレベル定義（`def` / `defn`）は `eval` 呼び出しをまたいで保持され、
-/// 評価中に作られた一時値は参照カウントとフリーリストで即座に再利用する。
+/// `bind`・`load_module`・`eval` で大域環境とモジュールを構築し、
+/// [`Builder::freeze`] で実行専用の [`Machine`] へ移行する。
+pub struct Builder<'a> {
+    inner: EnvState<'a>,
+}
+
+/// 凍結された実行段階の Rin 環境。
+///
+/// 大域環境と読み込み済みモジュールを変更せず、各評価は互いに独立して実行される。
+/// 読み込み済みのすべてのモジュールは `import` なしで `mod_name.symbol` として参照できる。
 pub struct Machine<'a> {
+    inner: EnvState<'a>,
+}
+
+/// 永続領域 (`PermArena`) 上に配置する環境スロット。
+///
+/// ユーザー定義変数 (`id >= STATIC_SYM_COUNT`) を 0 始まりの密な配列に格納する。
+#[derive(Clone, Copy)]
+pub(crate) struct EnvSlots {
+    dynamic: RawVec<Option<RVal>>,
+}
+
+impl EnvSlots {
+    pub(crate) const fn new() -> Self {
+        Self {
+            dynamic: RawVec::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn get(&self, id: u32) -> Option<RVal> {
+        if id >= STATIC_SYM_COUNT {
+            let idx = (id - STATIC_SYM_COUNT) as usize;
+            if idx < self.dynamic.len() {
+                self.dynamic.get_copy(idx)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn set(
+        &mut self,
+        pool: &mut Pool<'_>,
+        id: u32,
+        val: RVal,
+        span: Span,
+    ) -> Result<Option<RVal>, ErrRecorded> {
+        debug_assert!(id >= STATIC_SYM_COUNT);
+        set_slot_perm(&mut self.dynamic, pool, id - STATIC_SYM_COUNT, val, span)
+    }
+
+    /// 追加確保なしで指定スロットの束縛を取り消し、保持値を解放する。
+    pub(crate) fn unset_no_alloc(&mut self, pool: &mut Pool<'_>, id: u32) {
+        if id >= STATIC_SYM_COUNT {
+            let idx = (id - STATIC_SYM_COUNT) as usize;
+            if let Some(slot) = self.dynamic.as_mut_slice().get_mut(idx)
+                && let Some(v) = slot.take()
+            {
+                pool.release_val(v);
+            }
+        }
+    }
+
+    pub(crate) fn clear(&mut self, pool: &mut Pool<'_>) {
+        for slot in self.dynamic.as_mut_slice() {
+            if let Some(v) = slot.take() {
+                pool.release_val(v);
+            }
+        }
+    }
+
+    pub(crate) fn iter_defined(&self) -> impl Iterator<Item = (u32, RVal)> + '_ {
+        self.dynamic
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| v.map(|val| (STATIC_SYM_COUNT + i as u32, val)))
+    }
+}
+
+/// 永続領域 (`PermArena`) 上に配置する読み込み済みモジュール表。
+pub(super) struct ModuleTable {
+    ids: RawMap<RawStr, u32>,
+    names: RawVec<RawStr>,
+    vals: RawVec<Option<RVal>>,
+    envs: RawVec<EnvSlots>,
+}
+
+impl ModuleTable {
+    pub(super) const fn new() -> Self {
+        Self {
+            ids: RawMap::new(),
+            names: RawVec::new(),
+            vals: RawVec::new(),
+            envs: RawVec::new(),
+        }
+    }
+
+    pub(super) fn get_id(&self, name: &str) -> Option<u32> {
+        let hash = fnv1a_bytes(name.as_bytes());
+        self.ids.get_by(hash, |k| k.as_str() == name)
+    }
+
+    pub(super) fn get_val(&self, name: &str) -> Option<RVal> {
+        let id = self.get_id(name)?;
+        self.vals.as_slice()[id as usize]
+    }
+
+    pub(super) fn name(&self, id: u32) -> &str {
+        self.names.as_slice()[id as usize].as_str()
+    }
+
+    pub(super) fn loaded_names(&self) -> impl Iterator<Item = &str> {
+        let names = self.names.as_slice();
+        let vals = self.vals.as_slice();
+        (0..names.len()).filter_map(move |i| vals[i].map(|_| names[i].as_str()))
+    }
+
+    pub(super) fn ensure_module(
+        &mut self,
+        pool: &mut Pool<'_>,
+        name: &str,
+    ) -> Result<u32, ErrRecorded> {
+        if let Some(id) = self.get_id(name) {
+            return Ok(id);
+        }
+        let id = self.names.len() as u32;
+        let Some(raw) = RawStr::from_perm(&mut pool.perm, &mut pool.core, name) else {
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        };
+        if self
+            .names
+            .push_perm(&mut pool.perm, &mut pool.core, raw)
+            .is_none()
+        {
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        }
+        if self
+            .vals
+            .push_perm(&mut pool.perm, &mut pool.core, None)
+            .is_none()
+        {
+            self.names.pop();
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        }
+        if self
+            .envs
+            .push_perm(&mut pool.perm, &mut pool.core, EnvSlots::new())
+            .is_none()
+        {
+            self.vals.pop();
+            self.names.pop();
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        }
+        let hash = fnv1a_bytes(name.as_bytes());
+        if self
+            .ids
+            .insert_perm(&mut pool.perm, &mut pool.core, hash, raw, id, |a, b| {
+                a.as_str() == b.as_str()
+            })
+            .is_none()
+        {
+            self.envs.pop();
+            self.vals.pop();
+            self.names.pop();
+            return Err(pool.core.err_str(
+                "eval.limits",
+                ErrorKind::TooMuchMemory,
+                Span::default(),
+                "memory limit exceeded",
+            ));
+        }
+        Ok(id)
+    }
+
+    pub(super) fn env(&self, id: u32) -> &EnvSlots {
+        &self.envs.as_slice()[id as usize]
+    }
+
+    pub(super) fn set_env_slot(
+        &mut self,
+        pool: &mut Pool<'_>,
+        mod_id: u32,
+        sym_id: u32,
+        val: RVal,
+        span: Span,
+    ) -> Result<Option<RVal>, ErrRecorded> {
+        self.envs.as_mut_slice()[mod_id as usize].set(pool, sym_id, val, span)
+    }
+
+    pub(super) fn clear_env(&mut self, id: u32, pool: &mut Pool<'_>) {
+        self.envs.as_mut_slice()[id as usize].clear(pool);
+    }
+
+    pub(super) fn set_val(&mut self, id: u32, val: RVal) -> Option<RVal> {
+        self.vals.as_mut_slice()[id as usize].replace(val)
+    }
+
+    pub(super) fn release_all(&mut self, pool: &mut Pool<'_>) {
+        for slot in self.vals.as_mut_slice() {
+            if let Some(v) = slot.take() {
+                pool.release_val(v);
+            }
+        }
+        for env in self.envs.as_mut_slice() {
+            env.clear(pool);
+        }
+    }
+}
+
+pub(super) struct EnvState<'a> {
     limits: Limits,
+    math_fma: MathFma,
     pool: Pool<'a>,
     syms: SymTable,
-    globals: Vec<Option<RVal>>,
-    modules: BTreeMap<String, RVal>,
-    module_ids: BTreeMap<String, u32>,
-    module_names: Vec<String>,
-    module_envs: Vec<Vec<Option<RVal>>>,
-    parse_scratch: ParseScratch,
+    globals: EnvSlots,
+    global_sigs: RawVec<Option<FnSig>>,
+    modules: ModuleTable,
+    type_env: TypeEnv,
+    last_result: RVal,
 }
 
-fn bound_names<'a>(
+#[inline(always)]
+pub(crate) fn global_slot(globals: &EnvSlots, id: u32) -> Option<RVal> {
+    if let Some(v) = globals.get(id) {
+        return Some(v);
+    }
+    let idx = id as usize;
+    if idx < BuiltinId::ALL.len() {
+        Some(RVal::Builtin(BuiltinId::ALL[idx]))
+    } else if id == PI_SYM_ID {
+        Some(RVal::Float(std::f64::consts::PI))
+    } else {
+        None
+    }
+}
+
+fn global_bound_names<'a>(
     syms: &'a SymTable,
-    values: &'a [Option<RVal>],
-) -> impl Iterator<Item = &'a str> {
-    values
+    globals: &'a EnvSlots,
+) -> impl Iterator<Item = &'a str> + 'a {
+    let statics = (0..STATIC_SYM_COUNT).filter_map(|id| -> Option<&'a str> { static_sym_name(id) });
+    let dynamics = globals
+        .dynamic
+        .as_slice()
         .iter()
         .enumerate()
-        .filter_map(|(id, value)| value.map(|_| syms.names[id].as_ref()))
+        .filter_map(|(i, value)| value.and_then(|_| syms.name(STATIC_SYM_COUNT + i as u32)));
+    statics.chain(dynamics)
 }
 
-fn set_slot(slots: &mut Vec<Option<RVal>>, id: u32, val: RVal) -> Option<RVal> {
+fn env_bound_names<'a>(
+    syms: &'a SymTable,
+    env: &'a EnvSlots,
+) -> impl Iterator<Item = &'a str> + 'a {
+    env.iter_defined().filter_map(|(id, _)| syms.name(id))
+}
+
+fn set_slot_perm(
+    slots: &mut RawVec<Option<RVal>>,
+    pool: &mut Pool<'_>,
+    id: u32,
+    val: RVal,
+    span: Span,
+) -> Result<Option<RVal>, ErrRecorded> {
     let idx = id as usize;
-    if idx >= slots.len() {
-        slots.resize(idx + 1, None);
+    if idx >= slots.len()
+        && slots
+            .resize_perm(&mut pool.perm, &mut pool.core, idx + 1, None)
+            .is_none()
+    {
+        return Err(pool.core.err_str(
+            "eval.limits",
+            ErrorKind::TooMuchMemory,
+            span,
+            "memory limit exceeded",
+        ));
     }
-    slots[idx].replace(val)
-}
-
-impl<'a> Machine<'a> {
-    pub fn new(limits: Limits, alloc: &'a mut dyn Allocator) -> Self {
-        let mut syms = SymTable::default();
-        let mut globals = Vec::new();
-        for &b in BuiltinId::ALL {
-            let id = syms.intern(b.name());
-            set_slot(&mut globals, id, RVal::Builtin(b));
-        }
-        let pi_id = syms.intern("pi");
-        set_slot(&mut globals, pi_id, RVal::Float(std::f64::consts::PI));
-        Self {
-            limits,
-            pool: Pool::new(alloc, limits.memory_bytes),
-            syms,
-            globals,
-            modules: BTreeMap::new(),
-            module_ids: BTreeMap::new(),
-            module_names: Vec::new(),
-            module_envs: Vec::new(),
-            parse_scratch: ParseScratch::new(),
-        }
-    }
-
-    pub fn bind(&mut self, name: &str, value: &Value) -> Result<(), Error> {
-        let rval = self.pool.import(value, Span::default())?;
-        let id = self.syms.intern(name);
-        if let Some(prev) = set_slot(&mut self.globals, id, rval) {
-            self.pool.release_val(prev);
-        }
-        Ok(())
-    }
-
-    pub fn live_bytes(&self) -> usize {
-        self.pool.live_bytes()
-    }
-
-    /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
-    pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error> {
-        let with_mod = |mut err: Error| {
-            err.resolve_module(Some(name.to_string()));
-            err
-        };
-        let mod_id = match self.module_ids.get(name).copied() {
-            Some(id) => id,
-            None => {
-                let id = self.module_envs.len() as u32;
-                self.module_ids.insert(name.to_string(), id);
-                self.module_names.push(name.to_string());
-                self.module_envs.push(Vec::new());
-                id
-            }
-        };
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source).map_err(with_mod)?;
-            compile_program(exprs, Some(mod_id), &mut self.syms, &self.globals).map_err(with_mod)?
-        };
-        for v in std::mem::take(&mut self.module_envs[mod_id as usize])
-            .into_iter()
-            .flatten()
-        {
-            self.pool.release_val(v);
-        }
-        let mut runner = self.runner(Some(mod_id));
-        let v = runner.run_top_chunk(&chunk).map_err(with_mod)?;
-        runner.pool.release_val(v);
-        let export_filter = runner.export_list.take();
-        let mod_env = &self.module_envs[mod_id as usize];
-        let mut exports = BTreeMap::new();
-        match export_filter {
-            Some(names) => {
-                for sym in names {
-                    let Some(val) = self
-                        .syms
-                        .get(&sym)
-                        .and_then(|id| mod_env.get(id as usize).copied().flatten())
-                    else {
-                        for v in exports.into_values() {
-                            self.pool.release_val(v);
-                        }
-                        return Err(Error::runtime(
-                            "expr.module",
-                            Span::default(),
-                            format!("module '{name}' cannot export unknown symbol '{sym}'"),
-                        ));
-                    };
-                    self.pool.retain_val(val);
-                    exports.insert(Rc::from(sym.as_str()), val);
-                }
-            }
-            None => {
-                for (id, val_opt) in mod_env.iter().enumerate() {
-                    let Some(val) = *val_opt else { continue };
-                    let is_module = matches!(val, RVal::Obj(id) if matches!(self.pool.get(id), Obj::Module { .. }));
-                    if !is_module {
-                        self.pool.retain_val(val);
-                        exports.insert(Rc::clone(&self.syms.names[id]), val);
-                    }
-                }
-            }
-        }
-        let mod_id = self.pool.alloc_obj(
-            Obj::Module {
-                name: Rc::from(name),
-                exports,
-            },
-            Span::default(),
-        )?;
-        if let Some(prev) = self.modules.insert(name.to_string(), RVal::Obj(mod_id)) {
-            self.pool.release_val(prev);
-        }
-        Ok(())
-    }
-
-    pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
-        let chunk = {
-            let mut scratch = ParseScratchGuard::new(&mut self.parse_scratch);
-            let exprs = scratch.parse(source)?;
-            compile_program(exprs, None, &mut self.syms, &self.globals)?
-        };
-        let mut runner = self.runner(None);
-        let last = runner.run_top_chunk(&chunk)?;
-        let exported = runner.pool.export(last);
-        runner.pool.release_val(last);
-        Ok(exported)
-    }
-
-    /// 定義済みの大域関数をソース再解析なしで直接呼び出す。
-    pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error> {
-        let Some(callee) = self
-            .syms
-            .get(fn_name)
-            .and_then(|id| self.globals.get(id as usize).copied().flatten())
-        else {
-            return Err(Error::runtime(
-                "expr.name",
-                Span::default(),
-                suggest(
-                    format!("unknown function '{fn_name}'"),
-                    fn_name,
-                    bound_names(&self.syms, &self.globals),
-                ),
-            ));
-        };
-        self.call_rval(callee, args)
-    }
-
-    /// 読み込み済みモジュールの公開関数をソース再解析なしで直接呼び出す。
-    pub fn call_in(
-        &mut self,
-        mod_name: &str,
-        fn_name: &str,
-        args: &[Value],
-    ) -> Result<Value, Error> {
-        let Some(&RVal::Obj(mod_id)) = self.modules.get(mod_name) else {
-            return Err(Error::runtime(
-                "expr.module",
-                Span::default(),
-                suggest(
-                    format!("unknown module '{mod_name}'"),
-                    mod_name,
-                    self.modules.keys().map(String::as_str),
-                ),
-            ));
-        };
-        let Obj::Module { exports, .. } = self.pool.get(mod_id) else {
-            unreachable!();
-        };
-        let Some(&callee) = exports.get(fn_name) else {
-            return Err(Error::runtime(
-                "expr.module",
-                Span::default(),
-                available(
-                    format!("module '{mod_name}' has no export '{fn_name}'"),
-                    "exports",
-                    exports.keys().map(|name| name.as_ref()),
-                ),
-            ));
-        };
-        self.call_rval(callee, args)
-    }
-
-    pub(super) fn call_rval(&mut self, callee: RVal, args: &[Value]) -> Result<Value, Error> {
-        let mut r_args = Vec::with_capacity(args.len());
-        for arg in args {
-            match self.pool.import(arg, Span::default()) {
-                Ok(rv) => r_args.push(rv),
-                Err(e) => {
-                    for v in r_args {
-                        self.pool.release_val(v);
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        self.pool.retain_val(callee);
-        let mut runner = self.runner(None);
-        let res = runner.apply(callee, &r_args, Span::default(), CallOrigin::Host);
-        runner.pool.release_val(callee);
-        runner.release_all(r_args);
-        let val = res?;
-        let exported = runner.pool.export(val);
-        runner.pool.release_val(val);
-        Ok(exported)
-    }
-}
-
-impl Drop for Machine<'_> {
-    fn drop(&mut self) {
-        let old_mods = std::mem::take(&mut self.modules);
-        for v in old_mods.into_values() {
-            self.pool.release_val(v);
-        }
-        let old_mod_envs = std::mem::take(&mut self.module_envs);
-        for env in old_mod_envs {
-            for v in env.into_iter().flatten() {
-                self.pool.release_val(v);
-            }
-        }
-        let old = std::mem::take(&mut self.globals);
-        for v in old.into_iter().flatten() {
-            self.pool.release_val(v);
-        }
-    }
-}
-
-impl<'a> Machine<'a> {
-    fn runner(&mut self, active_module: Option<u32>) -> Runner<'_, 'a> {
-        Runner {
-            limits: self.limits,
-            steps: 0,
-            depth: 0,
-            pool: &mut self.pool,
-            syms: &self.syms,
-            globals: &mut self.globals,
-            modules: &self.modules,
-            module_names: &self.module_names,
-            module_envs: &mut self.module_envs,
-            active_module,
-            export_list: None,
-            stack: Vec::with_capacity(64),
-        }
-    }
+    Ok(slots.as_mut_slice()[idx].replace(val))
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum CallOrigin<'a> {
+pub(super) enum CallOrigin {
     Rin(Span),
     Host,
-    Builtin { name: &'a str, at: Span },
+    Builtin { id: BuiltinId, at: Span },
 }
+
+/// 作業領域 (`WorkArena`) 上の値スタック（`if spilled` 分岐を無くしホットパスを最速化する）。
+pub(super) type ValueStack = crate::mem::RawVec<RVal>;
 
 pub(super) struct Runner<'a, 'p> {
     pub(super) limits: Limits,
-    pub(super) steps: usize,
+    pub(super) math_fma: MathFma,
+    pub(super) steps_left: usize,
     pub(super) depth: usize,
+    pub(super) frozen: bool,
     pub(super) pool: &'a mut Pool<'p>,
     pub(super) syms: &'a SymTable,
-    pub(super) globals: &'a mut Vec<Option<RVal>>,
-    pub(super) modules: &'a BTreeMap<String, RVal>,
-    pub(super) module_names: &'a [String],
-    pub(super) module_envs: &'a mut Vec<Vec<Option<RVal>>>,
+    pub(super) globals: &'a mut EnvSlots,
+    pub(super) modules: &'a mut ModuleTable,
     pub(super) active_module: Option<u32>,
-    pub(super) export_list: Option<Vec<String>>,
-    pub(super) stack: Vec<RVal>,
+    pub(super) export_list: Option<RawVec<RawStr>>,
+    /// 読み込み段階の 1 回の `eval` 中に新規追加した大域束縛 ID（失敗時に無確保で取り消す）。
+    pub(super) added_globals: RawVec<u32>,
+    pub(super) stack: ValueStack,
+    #[cfg(feature = "std-value")]
+    pub(super) check_failures: Vec<crate::test::CheckFailure>,
 }
 
-impl<'a, 'p> Runner<'a, 'p> {
-    #[inline(always)]
-    pub(super) fn tick(&mut self, chunk: &Chunk, start: u32, count: u32) -> Result<(), Error> {
-        let next = self.steps + count as usize;
-        if next > self.limits.steps {
-            let over = self.limits.steps.saturating_sub(self.steps);
-            let span = chunk.tick_spans[start as usize + over];
-            self.steps = next;
-            return Err(self.step_limit_err(span));
+/// 構造体フィールド `(name, val)` を `WorkArena` 上の安定マージソートで O(F log F) 整列する。
+/// 同名フィールドの相対順序（後ろ勝ち）を保つ。
+pub(super) fn sort_field_pairs_work<'s>(
+    slice: &mut [(&'s str, RVal)],
+    work: &mut WorkArena,
+    core: &mut AllocCore<'_>,
+) -> Option<()> {
+    const MIN_RUN: usize = 16;
+    let n = slice.len();
+    if n < 2 {
+        return Some(());
+    }
+    // すでに昇順（重複ありを含む）なら F-1 回の比較のみで即終了する。
+    if slice.windows(2).all(|w| w[0].0 <= w[1].0) {
+        return Some(());
+    }
+    if n <= MIN_RUN {
+        for cur in 1..n {
+            let item = slice[cur];
+            let mut lo = 0;
+            let mut hi = cur;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if slice[mid].0 > item.0 {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if lo < cur {
+                slice.copy_within(lo..cur, lo + 1);
+                slice[lo] = item;
+            }
         }
-        self.steps = next;
-        Ok(())
+        return Some(());
     }
+    let mark = work.mark(core);
+    let mut scratch = RawVec::<(&'s str, RVal)>::new();
+    scratch.resize_work(work, core, n, ("", RVal::Void))?;
+    let buf = scratch.as_mut_slice();
 
-    #[cold]
-    pub(super) fn step_limit_err(&self, span: Span) -> Error {
-        Error::new(
-            "eval.limits",
-            ErrorKind::TooManySteps,
-            span,
-            format!("step limit exceeded ({})", self.limits.steps),
-        )
-    }
-
-    pub(super) fn enter_depth(&mut self, span: Span) -> Result<(), Error> {
-        self.depth += 1;
-        if self.depth > self.limits.depth {
-            return Err(self.depth_limit_err(span));
+    // MIN_RUN ごとに安定二分挿入ソート
+    let mut start = 0;
+    while start < n {
+        let end = (start + MIN_RUN).min(n);
+        for cur in (start + 1)..end {
+            let item = slice[cur];
+            let mut lo = start;
+            let mut hi = cur;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if slice[mid].0 > item.0 {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if lo < cur {
+                slice.copy_within(lo..cur, lo + 1);
+                slice[lo] = item;
+            }
         }
-        Ok(())
+        start = end;
     }
 
-    #[cold]
-    pub(super) fn depth_limit_err(&self, span: Span) -> Error {
-        Error::new(
-            "eval.limits",
-            ErrorKind::TooDeep,
-            span,
-            format!("call depth limit exceeded ({})", self.limits.depth),
-        )
-    }
-
-    pub(super) fn leave_depth(&mut self) {
-        self.depth = self.depth.saturating_sub(1);
-    }
-
-    pub(super) fn lookup_global(
-        &mut self,
-        id: u32,
-        span: Span,
-        chunk: &Chunk,
-        ip: usize,
-    ) -> Result<RVal, Error> {
-        let idx = id as usize;
-        if let Some(mod_id) = self.active_module
-            && let Some(Some(v)) = self.module_envs[mod_id as usize].get(idx).copied()
-        {
-            self.pool.retain_val(v);
-            return Ok(v);
-        }
-        if let Some(Some(v)) = self.globals.get(idx).copied() {
-            self.pool.retain_val(v);
-            return Ok(v);
-        }
-        Err(self.unknown_name(id, span, chunk, ip))
-    }
-
-    #[cold]
-    fn unknown_name(&self, id: u32, span: Span, chunk: &Chunk, ip: usize) -> Error {
-        let name = self
-            .syms
-            .names
-            .get(id as usize)
-            .map(|s| s.as_ref())
-            .unwrap_or("?");
-        Error::runtime(
-            "expr.name",
-            span,
-            suggest(
-                format!("unknown name '{name}'"),
-                name,
-                chunk
-                    .visible_names(ip)
-                    .chain(bound_names(self.syms, self.globals))
-                    .chain(
-                        self.active_module
-                            .into_iter()
-                            .flat_map(|id| bound_names(self.syms, &self.module_envs[id as usize])),
-                    ),
-            ),
-        )
-    }
-
-    pub(super) fn define_top(&mut self, id: u32, val: RVal) {
-        let prev = if let Some(mod_id) = self.active_module {
-            set_slot(&mut self.module_envs[mod_id as usize], id, val)
+    // ピンポン安定マージ
+    let mut width = MIN_RUN;
+    let mut from_slice = true;
+    while width < n {
+        let (src, dst): (&[_], &mut [_]) = if from_slice {
+            (&*slice, &mut *buf)
         } else {
-            set_slot(self.globals, id, val)
+            (&*buf, &mut *slice)
         };
-        if let Some(p) = prev {
-            self.pool.release_val(p);
-        }
-    }
-
-    pub(super) fn release_all(&mut self, vals: impl IntoIterator<Item = RVal>) {
-        for v in vals {
-            self.pool.release_val(v);
-        }
-    }
-
-    pub(super) fn release_stack_from(&mut self, from: usize) {
-        while self.stack.len() > from {
-            let v = self.stack.pop().unwrap();
-            self.pool.release_val(v);
-        }
-    }
-
-    pub(super) fn build_closure(
-        &mut self,
-        proto: &Rc<FnProto>,
-        captures: &[RVal],
-        base: usize,
-        span: Span,
-    ) -> Result<RVal, Error> {
-        let cap_vals: Rc<[RVal]> = proto
-            .captures
-            .iter()
-            .map(|cap| {
-                let v = match cap {
-                    Capture::Local(slot) => self.stack[base + *slot as usize],
-                    Capture::Upvalue(idx) => captures[*idx as usize],
-                };
-                self.pool.retain_val(v);
-                v
-            })
-            .collect();
-        let id = self.pool.alloc_obj(
-            Obj::Closure {
-                proto: Rc::clone(proto),
-                captures: cap_vals,
-            },
-            span,
-        )?;
-        Ok(RVal::Obj(id))
-    }
-
-    pub(super) fn run_top_chunk(&mut self, chunk: &Chunk) -> Result<RVal, Error> {
-        let base = self.stack.len();
-        self.stack
-            .resize(base + chunk.local_count as usize, RVal::Void);
-        let res = self.exec_frame(
-            FrameSource::Top(chunk),
-            Rc::from([]),
-            base,
-            chunk.local_count as usize,
-            None,
-            self.active_module,
-        );
-        match res {
-            Ok(val) => {
-                debug_assert_eq!(self.stack.len(), base + chunk.local_count as usize);
-                self.release_stack_from(base);
-                Ok(val)
-            }
-            Err(e) => {
-                self.release_stack_from(base);
-                Err(e)
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    #[cold]
-    #[inline(never)]
-    pub(super) fn call_type_error(&self, callee: RVal, span: Span) -> Error {
-        Error::runtime(
-            "expr.call",
-            span,
-            format!("cannot call value of type {}", callee.type_name(self.pool)),
-        )
-    }
-
-    #[cfg(debug_assertions)]
-    #[cold]
-    #[inline(never)]
-    pub(super) fn call_arity_error(&self, expected: u32, actual: usize, span: Span) -> Error {
-        Error::runtime(
-            "expr.call",
-            span,
-            format!("expected {expected} arguments, got {actual}"),
-        )
-    }
-
-    pub(super) fn apply(
-        &mut self,
-        callee: RVal,
-        args: &[RVal],
-        span: Span,
-        origin: CallOrigin<'_>,
-    ) -> Result<RVal, Error> {
-        match callee {
-            RVal::Obj(id) => {
-                let (proto, captures) = match self.pool.get(id) {
-                    Obj::Closure { proto, captures } => (Rc::clone(proto), Rc::clone(captures)),
-                    _ => {
-                        #[cfg(debug_assertions)]
-                        return Err(self.call_type_error(callee, span));
-                        #[cfg(not(debug_assertions))]
-                        return Err(Error::runtime(
-                            "expr.call",
-                            span,
-                            format!("cannot call value of type {}", callee.type_name(self.pool)),
-                        ));
+        let mut left = 0;
+        while left < n {
+            let mid = (left + width).min(n);
+            let right = (left + 2 * width).min(n);
+            if mid >= right || src[mid - 1].0 <= src[mid].0 {
+                dst[left..right].copy_from_slice(&src[left..right]);
+            } else {
+                let mut i = left;
+                let mut j = mid;
+                let mut k = left;
+                while i < mid && j < right {
+                    if src[i].0 <= src[j].0 {
+                        dst[k] = src[i];
+                        i += 1;
+                    } else {
+                        dst[k] = src[j];
+                        j += 1;
                     }
-                };
-                if proto.arity as usize != args.len() {
-                    #[cfg(debug_assertions)]
-                    return Err(self.call_arity_error(proto.arity, args.len(), span));
-                    #[cfg(not(debug_assertions))]
-                    return Err(Error::runtime(
-                        "expr.call",
-                        span,
-                        format!("expected {} arguments, got {}", proto.arity, args.len()),
-                    ));
+                    k += 1;
                 }
-                self.enter_depth(span)?;
-                let prev_mod = std::mem::replace(&mut self.active_module, proto.module);
-                let base = self.stack.len();
-                let local_count = proto.local_count as usize;
-                self.stack.reserve(local_count);
-                for &val in args {
-                    self.pool.retain_val(val);
-                    self.stack.push(val);
+                if i < mid {
+                    let rem = mid - i;
+                    dst[k..k + rem].copy_from_slice(&src[i..mid]);
+                    k += rem;
                 }
-                self.stack.resize(base + local_count, RVal::Void);
-                let res = self.exec_frame(
-                    FrameSource::Proto(proto),
-                    captures,
-                    base,
-                    local_count,
-                    Some(origin),
-                    prev_mod,
-                );
-                self.active_module = prev_mod;
-                self.leave_depth();
-                match res {
-                    Ok(val) => {
-                        self.release_stack_from(base);
-                        Ok(val)
-                    }
-                    Err(e) => {
-                        self.release_stack_from(base);
-                        Err(e)
-                    }
+                if j < right {
+                    let rem = right - j;
+                    dst[k..k + rem].copy_from_slice(&src[j..right]);
                 }
             }
-            RVal::Builtin(b) => self.dispatch_builtin(b, args, span),
-            #[cfg(debug_assertions)]
-            other => Err(self.call_type_error(other, span)),
-            #[cfg(not(debug_assertions))]
-            other => Err(Error::runtime(
-                "expr.call",
-                span,
-                format!("cannot call value of type {}", other.type_name(self.pool)),
-            )),
+            left += 2 * width;
         }
+        width *= 2;
+        from_slice = !from_slice;
     }
+    if !from_slice {
+        slice.copy_from_slice(buf);
+    }
+    work.rewind(core, mark);
+    Some(())
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum FrameSource<'a> {
     Top(&'a Chunk),
-    Proto(Rc<FnProto>),
-}
-
-impl FrameSource<'_> {
-    #[inline(always)]
-    pub(super) fn chunk(&self) -> &Chunk {
-        match self {
-            FrameSource::Top(c) => c,
-            FrameSource::Proto(p) => &p.chunk,
-        }
-    }
+    Proto(FnProtoPtr),
 }

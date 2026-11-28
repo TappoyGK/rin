@@ -1,10 +1,10 @@
 //! ステップ上限を各実行位置で超えさせ、コンパイル後も正確な位置が残ることを確認する。
-use rin::{ErrorKind, HeapAllocator, Limits, Machine, Value};
+use rin::{Builder, ErrorKind, HeapAllocator, Limits, Value};
 
 fn check_every_limit(source: &str, positions: &[(usize, usize)], expected: Value) {
     for limit in 0..=positions.len() {
         let mut alloc = HeapAllocator;
-        let mut machine = Machine::new(
+        let mut machine = Builder::new(
             Limits {
                 steps: limit,
                 ..Limits::default()
@@ -44,16 +44,17 @@ fn exact_step_locations_across_branches_and_function_scopes() {
             (3, 8),
             (3, 10),
             (3, 12),
+            (3, 7),
         ],
         Value::Int(5),
     );
     check_every_limit(
         "(if false\n    (/ 1 0)\n    (+ 1 2))",
-        &[(1, 1), (1, 5), (3, 5), (3, 6), (3, 8), (3, 10)],
+        &[(1, 1), (1, 5), (3, 5), (3, 6), (3, 8), (3, 10), (3, 5)],
         Value::Int(3),
     );
     check_every_limit(
-        "(defn sq (x)\n  (* x x))\n(sq 7)",
+        "(defn sq ((x i64)) -> i64\n  (* x x))\n(sq 7)",
         &[
             (1, 1),
             (3, 1),
@@ -63,6 +64,7 @@ fn exact_step_locations_across_branches_and_function_scopes() {
             (2, 4),
             (2, 6),
             (2, 8),
+            (2, 3),
         ],
         Value::Int(49),
     );
@@ -77,18 +79,21 @@ fn exact_step_locations_across_branches_and_function_scopes() {
             (2, 14),
             (2, 16),
             (2, 18),
+            (2, 13),
             (3, 3),
             (3, 7),
             (3, 13),
             (3, 14),
             (3, 16),
             (3, 18),
+            (3, 13),
             (4, 3),
             (4, 10),
             (4, 15),
             (4, 16),
             (4, 18),
             (4, 20),
+            (4, 15),
         ],
         Value::Int(3),
     );
@@ -101,6 +106,6 @@ fn exact_step_locations_when_compiler_switches_to_iterative_traversal() {
     for line in 1..=12 {
         positions.extend([(line, 1), (line, 9)]);
     }
-    positions.extend([(13, 1), (13, 2), (13, 4), (13, 6)]);
+    positions.extend([(13, 1), (13, 2), (13, 4), (13, 6), (13, 1)]);
     check_every_limit(&source, &positions, Value::Int(3));
 }
