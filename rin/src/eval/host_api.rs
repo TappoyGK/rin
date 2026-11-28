@@ -56,6 +56,12 @@ impl EnvState<'_> {
                 &mut self.pool.core,
                 Span::default(),
             )?;
+            self.type_env.mark_boundary_ok(
+                &mut self.pool.perm,
+                &mut self.pool.core,
+                tid,
+                Span::default(),
+            )?;
             Ok::<_, ErrRecorded>(crate::TypeHandle(tid))
         })();
         self.pool.work.rewind(&mut self.pool.core, mark);
@@ -74,7 +80,7 @@ impl EnvState<'_> {
         ty: crate::TypeHandle,
         val: Val,
     ) -> Result<(), ErrorRef<'_>> {
-        if !self.type_env.is_valid_type_id(ty.0) {
+        if !self.type_env.is_boundary_type_id(ty.0) {
             self.pool.core.err_str(
                 "type.boundary",
                 ErrorKind::Runtime,
@@ -120,16 +126,8 @@ impl EnvState<'_> {
             return Err(self.pool.core.error.as_ref());
         }
         let mark = self.pool.work.mark(&self.pool.core);
-        let check_res = (|| {
-            reject_fn_in_perm_type(
-                ty.0,
-                &self.type_env,
-                &mut self.pool.work,
-                &mut self.pool.core,
-                Span::default(),
-            )?;
-            check_rval_against_type(val.0, ty.0, &self.type_env, &mut self.pool, Span::default())
-        })();
+        let check_res =
+            check_rval_against_type(val.0, ty.0, &self.type_env, &mut self.pool, Span::default());
         self.pool.work.rewind(&mut self.pool.core, mark);
         if check_res.is_err() {
             return Err(self.pool.core.error.as_ref());
@@ -293,8 +291,13 @@ impl EnvState<'_> {
                 &self.globals,
                 false,
             )?;
-            let mut runner = self.runner(None, false);
-            runner.run_top_chunk(&chunk)
+            self.reserve_global_sigs_for_exprs(exprs.as_slice())?;
+            let val = {
+                let mut runner = self.runner(None, false);
+                runner.run_top_chunk(&chunk)?
+            };
+            self.populate_global_sigs_for_exprs(exprs.as_slice());
+            Ok::<_, ErrRecorded>(val)
         })();
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
@@ -479,7 +482,7 @@ impl EnvState<'_> {
         }
         let mut extra_types = RawVec::<(&str, crate::typecheck::TypeId)>::new();
         for &(bname, bty, bval) in bindings {
-            if !self.type_env.is_valid_type_id(bty.0) {
+            if !self.type_env.is_boundary_type_id(bty.0) {
                 return Err(self.pool.core.err_str(
                     "type.boundary",
                     ErrorKind::Runtime,
@@ -487,13 +490,6 @@ impl EnvState<'_> {
                     "invalid type handle",
                 ));
             }
-            reject_fn_in_perm_type(
-                bty.0,
-                &self.type_env,
-                &mut self.pool.work,
-                &mut self.pool.core,
-                Span::default(),
-            )?;
             check_rval_against_type(
                 bval.0,
                 bty.0,
@@ -577,10 +573,10 @@ impl EnvState<'_> {
         frozen: bool,
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
         self.clear_last_result();
-        let Some(callee) = self
+        let Some((sym_id, callee)) = self
             .syms
             .get(fn_name)
-            .and_then(|id| global_slot(&self.globals, id))
+            .and_then(|id| global_slot(&self.globals, id).map(|v| (id, v)))
         else {
             let out =
                 self.pool
@@ -591,10 +587,7 @@ impl EnvState<'_> {
             write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
             return Err(self.pool.core.error.as_ref());
         };
-        let fn_sig = self
-            .type_env
-            .lookup_root_val(fn_name)
-            .and_then(|vb| vb.fn_sig);
+        let fn_sig = self.global_fn_sig(sym_id);
         self.call_rval_vals_ref(callee, fn_sig, args, frozen)
     }
 

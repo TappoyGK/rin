@@ -210,9 +210,69 @@ impl<'a> EnvState<'a> {
             pool: Pool::with_config(alloc, limits.memory_bytes, memory),
             syms: SymTable::new(),
             globals: EnvSlots::new(),
+            global_sigs: RawVec::new(),
             modules: ModuleTable::new(),
             type_env: TypeEnv::new(),
             last_result: RVal::Void,
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn global_fn_sig(&self, sym_id: u32) -> Option<FnSig> {
+        if sym_id >= STATIC_SYM_COUNT {
+            let idx = (sym_id - STATIC_SYM_COUNT) as usize;
+            if idx < self.global_sigs.len() {
+                self.global_sigs.get_copy(idx)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn reserve_global_sigs_for_exprs(
+        &mut self,
+        exprs: &[crate::ast::Expr],
+    ) -> Result<(), ErrRecorded> {
+        let mut max_idx = None::<usize>;
+        for e in exprs {
+            if let crate::ast::ExprKind::Defn(d) = &e.kind
+                && let Some(sym_id) = self.syms.get(d.name.as_str())
+                && sym_id >= STATIC_SYM_COUNT
+            {
+                let idx = (sym_id - STATIC_SYM_COUNT) as usize;
+                max_idx = Some(max_idx.map_or(idx, |m| m.max(idx)));
+            }
+        }
+        if let Some(target) = max_idx {
+            while self.global_sigs.len() <= target {
+                if self
+                    .global_sigs
+                    .push_perm(&mut self.pool.perm, &mut self.pool.core, None)
+                    .is_none()
+                {
+                    return Err(self.pool.core.err_oom(Span::default()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn populate_global_sigs_for_exprs(&mut self, exprs: &[crate::ast::Expr]) {
+        for e in exprs {
+            if let crate::ast::ExprKind::Defn(d) = &e.kind
+                && let Some(sym_id) = self.syms.get(d.name.as_str())
+                && sym_id >= STATIC_SYM_COUNT
+            {
+                let idx = (sym_id - STATIC_SYM_COUNT) as usize;
+                if let Some(slot) = self.global_sigs.as_mut_slice().get_mut(idx) {
+                    *slot = self
+                        .type_env
+                        .lookup_root_val(d.name.as_str())
+                        .and_then(|vb| vb.fn_sig);
+                }
+            }
         }
     }
 
@@ -345,8 +405,13 @@ impl<'a> EnvState<'a> {
                 &self.globals,
                 false,
             )?;
-            let mut runner = self.runner(None, false);
-            runner.run_top_chunk(&chunk)
+            self.reserve_global_sigs_for_exprs(exprs.as_slice())?;
+            let val = {
+                let mut runner = self.runner(None, false);
+                runner.run_top_chunk(&chunk)?
+            };
+            self.populate_global_sigs_for_exprs(exprs.as_slice());
+            Ok::<_, ErrRecorded>(val)
         })();
         self.pool.work.rewind(&mut self.pool.core, mark);
         let last = match res {
@@ -707,10 +772,10 @@ impl<'a> EnvState<'a> {
         args: &[Value],
         frozen: bool,
     ) -> Result<Value, Error> {
-        let Some(callee) = self
+        let Some((sym_id, callee)) = self
             .syms
             .get(fn_name)
-            .and_then(|id| global_slot(&self.globals, id))
+            .and_then(|id| global_slot(&self.globals, id).map(|v| (id, v)))
         else {
             let out =
                 self.pool
@@ -721,10 +786,7 @@ impl<'a> EnvState<'a> {
             write_suggest(out, fn_name, global_bound_names(&self.syms, &self.globals));
             return Err(self.pool.core.error.to_owned_error());
         };
-        let fn_sig = self
-            .type_env
-            .lookup_root_val(fn_name)
-            .and_then(|vb| vb.fn_sig);
+        let fn_sig = self.global_fn_sig(sym_id);
         self.call_rval(callee, fn_sig, args, frozen)
     }
 

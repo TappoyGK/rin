@@ -110,6 +110,7 @@ pub(crate) struct TypeEnvSnapshot {
 /// 永続領域 (`PermArena`) に保持する型環境。
 pub(crate) struct TypeEnv {
     types: RawVec<PermTypeNode>,
+    boundary_ok: RawVec<bool>,
     schemas: RawVec<SchemaDef>,
     root_types: RawMap<RawStr, u32>,
     root_type_slots: RawVec<Option<SchemaId>>,
@@ -126,6 +127,7 @@ impl TypeEnv {
     pub(crate) const fn new() -> Self {
         Self {
             types: RawVec::new(),
+            boundary_ok: RawVec::new(),
             schemas: RawVec::new(),
             root_types: RawMap::new(),
             root_type_slots: RawVec::new(),
@@ -170,6 +172,47 @@ impl TypeEnv {
             }
         }
         Ok(())
+    }
+
+    /// ホスト境界用として `resolve_type` で検証済みの `TypeId` を記録する。
+    pub(crate) fn mark_boundary_ok(
+        &mut self,
+        perm: &mut PermArena,
+        core: &mut AllocCore<'_>,
+        id: TypeId,
+        span: Span,
+    ) -> Result<(), ErrRecorded> {
+        let idx = id.0 as usize;
+        if idx < PRIMITIVE_TYPE_COUNT {
+            return Ok(());
+        }
+        while self.boundary_ok.len() <= idx {
+            if self.boundary_ok.push_perm(perm, core, false).is_none() {
+                return Err(core.err_str(
+                    "eval.limits",
+                    ErrorKind::TooMuchMemory,
+                    span,
+                    "memory limit exceeded",
+                ));
+            }
+        }
+        self.boundary_ok.as_mut_slice()[idx] = true;
+        Ok(())
+    }
+
+    /// ホスト境界 API に渡せる検証済み `TypeId` かを O(1) で判定する。
+    #[inline]
+    pub(crate) fn is_boundary_type_id(&self, id: TypeId) -> bool {
+        let idx = id.0 as usize;
+        if idx < PRIMITIVE_TYPE_COUNT {
+            true
+        } else {
+            self.boundary_ok
+                .as_slice()
+                .get(idx)
+                .copied()
+                .unwrap_or(false)
+        }
     }
 
     #[inline]

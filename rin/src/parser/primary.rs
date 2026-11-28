@@ -289,22 +289,46 @@ impl Parser<'_, '_, '_> {
                     self.advance()?; // def
                     let (name, _) = self.expect_ident("variable name")?;
                     // `(def name TypeExpr expr)` か `(def name expr)` かを先読みで判定する。
-                    let saved_lexer = self.lexer.save_state();
-                    let saved_cur = self.cur;
-                    let saved_next = self.next;
-                    let saved_mark = self.work.mark(self.core);
-                    let parsed_ty = match self.parse_type_expr(self.frames.len() + 1) {
-                        Ok((ty, ty_depth))
-                            if self.peek().kind != WorkTokenKind::RParen && !self.at_eof() =>
-                        {
-                            Some((self.alloc_box(ty, start)?, ty_depth))
-                        }
-                        _ => {
-                            self.lexer.restore_state(saved_lexer);
-                            self.cur = saved_cur;
-                            self.next = saved_next;
-                            self.work.rewind(self.core, saved_mark);
-                            None
+                    // `UpperIdent` の直後が `{` または `.` のときは構造体・バリアント式であり型注釈ではない。
+                    let starts_struct_or_variant = matches!(
+                        self.peek().kind,
+                        WorkTokenKind::Ident(id)
+                            if id.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+                    ) && matches!(
+                        self.peek_next()?.map(|t| t.kind),
+                        Some(WorkTokenKind::LBrace | WorkTokenKind::Dot)
+                    );
+                    // 3 引数位置の `any` は型エラー `[type.expr]` として報告する。
+                    let explicit_any_type = matches!(
+                        self.peek().kind,
+                        WorkTokenKind::Ident(id) if id.as_str() == "any"
+                    ) && !matches!(
+                        self.peek_next()?.map(|t| t.kind),
+                        Some(WorkTokenKind::RParen) | None
+                    );
+                    let parsed_ty = if starts_struct_or_variant {
+                        None
+                    } else if explicit_any_type {
+                        let (ty, ty_depth) = self.parse_type_expr(self.frames.len() + 1)?;
+                        Some((self.alloc_box(ty, start)?, ty_depth))
+                    } else {
+                        let saved_lexer = self.lexer.save_state();
+                        let saved_cur = self.cur;
+                        let saved_next = self.next;
+                        let saved_mark = self.work.mark(self.core);
+                        match self.parse_type_expr(self.frames.len() + 1) {
+                            Ok((ty, ty_depth))
+                                if self.peek().kind != WorkTokenKind::RParen && !self.at_eof() =>
+                            {
+                                Some((self.alloc_box(ty, start)?, ty_depth))
+                            }
+                            _ => {
+                                self.lexer.restore_state(saved_lexer);
+                                self.cur = saved_cur;
+                                self.next = saved_next;
+                                self.work.rewind(self.core, saved_mark);
+                                None
+                            }
                         }
                     };
                     let (ty, ty_depth) = match parsed_ty {

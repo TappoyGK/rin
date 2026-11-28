@@ -308,6 +308,7 @@ pub(super) struct EnvState<'a> {
     pool: Pool<'a>,
     syms: SymTable,
     globals: EnvSlots,
+    global_sigs: RawVec<Option<FnSig>>,
     modules: ModuleTable,
     type_env: TypeEnv,
     last_result: RVal,

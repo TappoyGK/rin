@@ -848,7 +848,7 @@ impl<'a> TypeChecker<'a, '_> {
         if self.opts.module_name.is_none() && self.env.lookup_root_val(name).is_some() {
             return Err(emit(self.core, "cannot redefine existing global name"));
         }
-        if name == "pi" || lookup_builtin_by_name(name).is_some() {
+        if crate::bytecode::static_sym_id(name).is_some() {
             return Err(emit(self.core, "cannot redefine builtin name"));
         }
         if self.opts.module_name.is_none() && self.env.lookup_module(name).is_some() {
@@ -2971,8 +2971,10 @@ impl<'a> TypeChecker<'a, '_> {
     }
 }
 
+#[inline]
 fn lookup_builtin_by_name(name: &str) -> Option<BuiltinId> {
-    BuiltinId::ALL.iter().find(|&&b| b.name() == name).copied()
+    let id = crate::bytecode::static_sym_id(name)?;
+    BuiltinId::ALL.get(id as usize).copied()
 }
 
 /// 入力 AST 節数と型式節数の合計 `N` を数える（非再帰）。

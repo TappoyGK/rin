@@ -9,7 +9,9 @@ use crate::pool::{CodeRegion, Pool};
 
 mod sym;
 
-pub(crate) use sym::{BuiltinId, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_name};
+pub(crate) use sym::{
+    BuiltinId, PI_SYM_ID, STATIC_SYM_COUNT, SymTable, static_sym_id, static_sym_name,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capture {

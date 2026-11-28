@@ -20,7 +20,7 @@ struct SpecCase {
     modules: Vec<(String, String)>,
     setup: Option<String>,
     failing_setup: Option<String>,
-    initial_bindings: Vec<(String, String)>,
+    initial_bindings: Vec<(String, String, String)>,
     source: String,
     limit_spec: String,
     expected_kind: String,
@@ -148,8 +148,8 @@ fn parse_single_case_rejects_malformed_headings_and_preserves_commas_in_bindings
     // 初期束縛の値にカンマを含む文字列を書いても 1 件のまま保持する
     let valid = [
         "主根拠：`[env.isolation]`",
-        "初期束縛：`s = \"a,b\"`",
-        "初期束縛：`x = 1`",
+        "初期束縛：`s text = \"a,b\"`",
+        "初期束縛：`x i64 = 1`",
         "**入力：**",
         "```rin",
         "s",
@@ -163,8 +163,8 @@ fn parse_single_case_rejects_malformed_headings_and_preserves_commas_in_bindings
     assert_eq!(
         parsed.initial_bindings,
         vec![
-            ("s".to_string(), "\"a,b\"".to_string()),
-            ("x".to_string(), "1".to_string()),
+            ("s".to_string(), "text".to_string(), "\"a,b\"".to_string()),
+            ("x".to_string(), "i64".to_string(), "1".to_string()),
         ]
     );
 
@@ -278,15 +278,23 @@ fn parse_single_case(id: String, lines: &[&str], file_label: &str) -> SpecCase {
                 .strip_prefix('`')
                 .and_then(|s| s.strip_suffix('`'))
                 .unwrap_or_else(|| panic!("{file_label} ({id}): 初期束縛 must use backticks"));
-            let (name, expr) = raw.split_once('=').unwrap_or_else(|| {
-                panic!("{file_label} ({id}): 初期束縛 entry must be `name = expr`")
+            let (lhs, expr) = raw.split_once('=').unwrap_or_else(|| {
+                panic!("{file_label} ({id}): 初期束縛 entry must be `name TypeExpr = expr`")
+            });
+            let (name, ty) = lhs.trim().split_once(char::is_whitespace).unwrap_or_else(|| {
+                panic!("{file_label} ({id}): 初期束縛 entry must specify type `name TypeExpr = expr`")
             });
             let name = name.trim();
+            let ty = ty.trim();
             assert!(
                 !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c == ','),
                 "{file_label} ({id}): invalid binding name '{name}' in 初期束縛 (use one `初期束縛：` line per binding)"
             );
-            initial_bindings.push((name.to_string(), expr.trim().to_string()));
+            assert!(
+                !ty.is_empty(),
+                "{file_label} ({id}): empty type in 初期束縛 for '{name}'"
+            );
+            initial_bindings.push((name.to_string(), ty.to_string(), expr.trim().to_string()));
         } else if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
             assert!(
                 pending.is_none(),
@@ -474,24 +482,14 @@ fn evaluate_case(case: &SpecCase) -> Result<Value, Error> {
             let evaluated: Vec<(String, String, Value)> = case
                 .initial_bindings
                 .iter()
-                .map(|(k, expr)| {
-                    let (name, explicit_ty) = match k.split_once(':') {
-                        Some((n, t)) => (n.trim().to_string(), Some(t.trim().to_string())),
-                        None => (k.clone(), None),
-                    };
+                .map(|(name, ty, expr)| {
                     let v = eval(expr).unwrap_or_else(|e| {
-                        panic!("{}: failed to eval binding '{k} = {expr}': {e}", case.id)
+                        panic!(
+                            "{}: failed to eval binding '{name} {ty} = {expr}': {e}",
+                            case.id
+                        )
                     });
-                    let ty = explicit_ty.unwrap_or_else(|| match &v {
-                        Value::Int(_) => "i64".to_string(),
-                        Value::Float(_) => "f64".to_string(),
-                        Value::Bool(_) => "bool".to_string(),
-                        Value::Char(_) => "char".to_string(),
-                        Value::Text(_) => "text".to_string(),
-                        Value::Ident(_) => "ident".to_string(),
-                        _ => "datum".to_string(),
-                    });
-                    (name, ty, v)
+                    (name.clone(), ty.clone(), v)
                 })
                 .collect();
             let refs: Vec<(&str, &str, Value)> = evaluated

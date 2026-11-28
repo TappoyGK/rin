@@ -38,12 +38,6 @@ impl<'a> TypeRef<'a> {
     pub(crate) fn new(env: &'a TypeEnv, id: TypeId) -> Self {
         Self { env, id }
     }
-
-    /// 対応する [`TypeHandle`] を返す。
-    #[inline]
-    pub fn handle(&self) -> TypeHandle {
-        TypeHandle(self.id)
-    }
 }
 
 impl fmt::Display for TypeRef<'_> {

@@ -92,6 +92,31 @@ fn typed_defn_fn_and_def_syntax_and_eval() {
     let err = eval("(defn untyped (a b) (+ a b))").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Type);
     assert_eq!(err.rule(), "expr.defn");
+
+    // 構造体リテラル・バリアントを型注釈なしの def 値に書ける（指摘 1 の回帰テスト）
+    let def_struct = r#"
+(defschema Pt (struct Pt (a i64)))
+(defschema Color (variant Color (Red) (Blue i64)))
+(def p1 Pt { a: 1 })
+(def p2 Pt Pt { a: 2 })
+(def c1 Color.Red)
+(def c2 Color Color.Blue(3))
+(tuple p1.a p2.a (match c1 (Color.Red 10) (Color.Blue(n) n)) (match c2 (Color.Red 0) (Color.Blue(n) n)))
+"#;
+    assert_eq!(
+        eval(def_struct).unwrap(),
+        Value::tuple(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(10),
+            Value::Int(3),
+        ])
+    );
+
+    // 3 引数 def の型注釈に `any` を書いた場合は type.expr 構文エラー（指摘 8 の回帰テスト）
+    let err = eval("(def x any 1)").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Parse);
+    assert_eq!(err.rule(), "type.expr");
 }
 
 #[test]
