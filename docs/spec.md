@@ -131,7 +131,7 @@ true false none some ok err inf nan
 
 **[type.expr]** 型式は `void`・`i64`・`f64`・`bool`・`char`・`text`・`ident`・`datum`、名前付き型（`Name` / `mod.Name`）、および `(list T)`・`(array T)`・`(option T)`・`(result T E)`・`(tuple T1 T2 ...)`・`(fn (P1 P2 ...) R)` とする。上記の形に当てはまらない型式（`any`、未知の小文字の型名、未知の型構築子を含む）は、`[type.expr]` の構文エラーである。名前付き型 `Name` が定義されていない場合は `[type.defschema]` の型エラー、`mod.Name` がモジュール `mod` の公開した型にない場合は `[expr.module]` の型エラーである。
 
-**[type.boundary]** ホスト境界（`Builder::bind` / `bind_val` / `bind_typed` / `rin_bind` / `rin_bind_typed`、`Machine::eval_with` / `eval_with_vals` / `eval_with_typed` / `eval_with_typed_vals` / `rin_eval_with` / `rin_eval_with_typed`、`Machine::call` / `call_in` / `rin_call` / `rin_call_in`）でホストから渡された値は、宣言された型式・事前解決済み型ハンドル・または関数仮引数型と実行時に照合する。型式に `fn` 型を含めること（ホストから関数値を渡せない）、無効な型ハンドルの使用、引数の個数不一致、または実行時の値が型と一致しない場合は `[type.boundary]` の実行時エラー（位置は `0:0`）を返す。
+**[type.boundary]** ホスト境界（`Builder::bind` / `bind_val` / `rin_bind` / `rin_bind_resolved`、`Machine::eval_with` / `eval_with_vals` / `rin_eval_with` / `rin_eval_with_resolved`、`Machine::call` / `call_in` / `rin_call` / `rin_call_in`）でホストから渡された値は、宣言された型式・事前解決済み型ハンドル・または関数仮引数型と実行時に照合する。型式に `fn` 型を含めること（ホストから関数値を渡せない）、無効な型ハンドルの使用、引数の個数不一致、または実行時の値が型と一致しない場合は `[type.boundary]` の実行時エラー（位置は `0:0`）を返す。
 
 **[value.display]** 値の表示（`Value`・`ValueRef` の `Display`）は型ごとに次の形式とし、関数値・`void`・`array`・`f64`（および `f64` を含む値）を除くデータ値はそのまま Rin のソースとして読み直したときに元の値と等しくなる表現を用いる。
 
@@ -163,7 +163,7 @@ true false none some ok err inf nan
 
 ### 5.1 定義と束縛
 
-**[expr.def]** `(def name expr)` または型注釈付きの `(def name TypeExpr expr)` は、`expr` を評価した値を現在のトップレベル環境（大域環境またはモジュール環境）の名前 `name` に束縛し、`void` を返す。型注釈を省略した場合は `expr` から型を推論し、型が確定しない場合（例：`(def x [])`）または注釈と `expr` の型が一致しない場合は型エラーである。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。同じ環境に同名の束縛がある場合、組み込み名と同名の場合、または大域環境において読み込み済みのモジュール名（`import` の有無を問わない）と同名の場合は、`[expr.def]` の実行時エラーである。ホスト API（`Builder::bind` / `bind_val` / `bind_typed` / `rin_bind` / `rin_bind_typed`）による大域束縛も同じ重複・衝突規則に従う（位置は `0:0`）。読み込み段階のトップレベル評価（`Builder::eval` / `rin_build`）が途中で失敗した場合、その評価中に追加した大域束縛（`def`・`defn`・`defschema`・`import`）は追加のメモリ確保なしで取り消される（永続領域への追記は `[eval.limits]` に従う）。`let`・仮引数・パターン束縛・`eval_with` の初期束縛など局所束縛によるシャドーイングは許可する。
+**[expr.def]** `(def name expr)` または型注釈付きの `(def name TypeExpr expr)` は、`expr` を評価した値を現在のトップレベル環境（大域環境またはモジュール環境）の名前 `name` に束縛し、`void` を返す。型注釈を省略した場合は `expr` から型を推論し、型が確定しない場合（例：`(def x [])`）または注釈と `expr` の型が一致しない場合は型エラーである。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。同じ環境に同名の束縛がある場合、組み込み名と同名の場合、または大域環境において読み込み済みのモジュール名（`import` の有無を問わない）と同名の場合は、`[expr.def]` の実行時エラーである。ホスト API（`Builder::bind` / `bind_val` / `rin_bind` / `rin_bind_resolved`）による大域束縛も同じ重複・衝突規則に従う（位置は `0:0`）。読み込み段階のトップレベル評価（`Builder::eval` / `rin_build`）が途中で失敗した場合、その評価中に追加した大域束縛（`def`・`defn`・`defschema`・`import`）は追加のメモリ確保なしで取り消される（永続領域への追記は `[eval.limits]` に従う）。`let`・仮引数・パターン束縛・`eval_with` の初期束縛など局所束縛によるシャドーイングは許可する。
 
 **[expr.defn]** `(defn name ((p1 T1) (p2 T2) ...) -> RetType body...)` は、型注釈付きの仮引数と戻り値型・本体 `body...` を持つ関数を定義し、現在のトップレベル環境の名前 `name` に束縛して `void` を返す。すべての仮引数型と戻り値型 `-> RetType` は必須であり、省略した場合は型エラーである。`defn` で定義した関数は、自身を含む大域環境・モジュール環境の名前を参照して再帰呼び出しできる。トップレベルにのみ記述でき、関数本体や式の中に書いた場合は構文エラーである。`[expr.def]` と同じく、同一環境での同名再定義・組み込み名の上書き・大域環境における読み込み済みモジュール名との衝突は、`[expr.defn]` の実行時エラーである。
 

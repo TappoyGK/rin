@@ -803,25 +803,178 @@ macro_rules! impl_val_constructors {
 impl_val_constructors!(Builder);
 impl_val_constructors!(Machine);
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for &str {}
+    impl Sealed for crate::TypeHandle {}
+}
+
+/// ホスト境界 API（[`Builder::bind`]・[`Builder::bind_val`]・[`Machine::eval_with`]・
+/// [`Machine::eval_with_vals`]）の型引数として渡せる型。
+///
+/// 型式文字列（`&str`）または [`Builder::resolve_type`] で事前解決した [`crate::TypeHandle`] を受け付ける。
+pub trait TypeArg: sealed::Sealed + Copy {
+    #[doc(hidden)]
+    fn bind_val_inner<'b>(
+        self,
+        builder: &'b mut Builder<'_>,
+        name: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'b>>;
+
+    #[doc(hidden)]
+    fn eval_with_vals_inner<'m>(
+        machine: &'m mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, Val)],
+    ) -> Result<ValueRef<'m>, ErrorRef<'m>>;
+
+    #[cfg(feature = "std-value")]
+    #[doc(hidden)]
+    fn bind_value_inner(
+        self,
+        builder: &mut Builder<'_>,
+        name: &str,
+        value: &crate::Value,
+    ) -> Result<(), crate::Error>;
+
+    #[cfg(feature = "std-value")]
+    #[doc(hidden)]
+    fn eval_with_values_inner(
+        machine: &mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, crate::Value)],
+    ) -> Result<crate::Value, crate::Error>;
+}
+
+impl TypeArg for &str {
+    #[inline]
+    fn bind_val_inner<'b>(
+        self,
+        builder: &'b mut Builder<'_>,
+        name: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'b>> {
+        builder.inner.bind_val(name, self, val)
+    }
+
+    #[inline]
+    fn eval_with_vals_inner<'m>(
+        machine: &'m mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, Val)],
+    ) -> Result<ValueRef<'m>, ErrorRef<'m>> {
+        machine.inner.eval_frozen_ref(source, bindings)
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn bind_value_inner(
+        self,
+        builder: &mut Builder<'_>,
+        name: &str,
+        value: &crate::Value,
+    ) -> Result<(), crate::Error> {
+        builder.inner.bind(name, self, value)
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn eval_with_values_inner(
+        machine: &mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, crate::Value)],
+    ) -> Result<crate::Value, crate::Error> {
+        machine.inner.eval_frozen(source, bindings)
+    }
+}
+
+impl TypeArg for crate::TypeHandle {
+    #[inline]
+    fn bind_val_inner<'b>(
+        self,
+        builder: &'b mut Builder<'_>,
+        name: &str,
+        val: Val,
+    ) -> Result<(), ErrorRef<'b>> {
+        builder.inner.bind_typed_val(name, self, val)
+    }
+
+    #[inline]
+    fn eval_with_vals_inner<'m>(
+        machine: &'m mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, Val)],
+    ) -> Result<ValueRef<'m>, ErrorRef<'m>> {
+        machine.inner.eval_frozen_typed_ref(source, bindings)
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn bind_value_inner(
+        self,
+        builder: &mut Builder<'_>,
+        name: &str,
+        value: &crate::Value,
+    ) -> Result<(), crate::Error> {
+        let imported = match builder.inner.pool.import(value, Span::default()) {
+            Ok(v) => Val(v),
+            Err(_) => return Err(builder.inner.pool.core.error.to_owned_error()),
+        };
+        let res = builder
+            .inner
+            .bind_typed_val(name, self, imported)
+            .map_err(|e| e.to_error());
+        builder.inner.pool.release_val(imported.0);
+        res
+    }
+
+    #[cfg(feature = "std-value")]
+    #[inline]
+    fn eval_with_values_inner(
+        machine: &mut Machine<'_>,
+        source: &str,
+        bindings: &[(&str, Self, crate::Value)],
+    ) -> Result<crate::Value, crate::Error> {
+        let mut imported: Vec<(&str, crate::TypeHandle, Val)> = Vec::with_capacity(bindings.len());
+        for (name, ty, val) in bindings {
+            match machine.inner.pool.import(val, Span::default()) {
+                Ok(rv) => imported.push((*name, *ty, Val(rv))),
+                Err(_) => {
+                    let err = machine.inner.pool.core.error.to_owned_error();
+                    for (_, _, v) in imported {
+                        machine.inner.pool.release_val(v.0);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        let res = machine
+            .inner
+            .eval_frozen_typed_ref(source, &imported)
+            .map(|vr| vr.to_value())
+            .map_err(|e| e.to_error());
+        for (_, _, v) in imported {
+            machine.inner.pool.release_val(v.0);
+        }
+        res
+    }
+}
+
 impl Builder<'_> {
     /// 型式文字列を事前解決し、反復評価・束縛に再利用できる [`crate::TypeHandle`] を返す（システムヒープ不使用）。
     pub fn resolve_type(&mut self, type_expr: &str) -> Result<crate::TypeHandle, ErrorRef<'_>> {
         self.inner.resolve_type(type_expr)
     }
 
-    /// マシン上で構築した [`Val`] を型式 `type_expr` 付きで大域変数として束縛する（システムヒープ不使用）。
-    pub fn bind_val(&mut self, name: &str, type_expr: &str, val: Val) -> Result<(), ErrorRef<'_>> {
-        self.inner.bind_val(name, type_expr, val)
-    }
-
-    /// 事前解決済みの [`crate::TypeHandle`] を使って [`Val`] を大域変数として束縛する（システムヒープ不使用）。
-    pub fn bind_typed(
+    /// マシン上で構築した [`Val`] を型 `ty`（型式文字列または事前解決済み [`crate::TypeHandle`]）付きで大域変数として束縛する（システムヒープ不使用）。
+    pub fn bind_val<T: TypeArg>(
         &mut self,
         name: &str,
-        ty: crate::TypeHandle,
+        ty: T,
         val: Val,
     ) -> Result<(), ErrorRef<'_>> {
-        self.inner.bind_typed_val(name, ty, val)
+        ty.bind_val_inner(self, name, val)
     }
 
     /// 大域関数 `defn` のシグネチャを取得する（システムヒープ不使用）。
@@ -881,22 +1034,13 @@ impl Machine<'_> {
         self.inner.eval_frozen_ref(source, &[])
     }
 
-    /// 凍結した環境で型式付き一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
-    pub fn eval_with_vals(
+    /// 凍結した環境で型（型式文字列または事前解決済み [`crate::TypeHandle`]）付き一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
+    pub fn eval_with_vals<T: TypeArg>(
         &mut self,
         source: &str,
-        bindings: &[(&str, &str, Val)],
+        bindings: &[(&str, T, Val)],
     ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
-        self.inner.eval_frozen_ref(source, bindings)
-    }
-
-    /// 凍結した環境で事前解決済み [`crate::TypeHandle`] 付き一時束縛 [`Val`] を与えて評価し、借用ビュー [`ValueRef`] を返す（システムヒープ不使用）。
-    pub fn eval_with_typed_vals(
-        &mut self,
-        source: &str,
-        bindings: &[(&str, crate::TypeHandle, Val)],
-    ) -> Result<ValueRef<'_>, ErrorRef<'_>> {
-        self.inner.eval_frozen_typed_ref(source, bindings)
+        T::eval_with_vals_inner(self, source, bindings)
     }
 
     /// 大域関数 `defn` のシグネチャを取得する（システムヒープ不使用）。

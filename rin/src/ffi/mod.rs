@@ -229,7 +229,7 @@ pub struct RinBinding {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RinTypedBinding {
+pub struct RinResolvedBinding {
     pub name: *const c_char,
     pub ty: RinType,
     pub value: *const RinValue,

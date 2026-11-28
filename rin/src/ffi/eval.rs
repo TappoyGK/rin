@@ -9,7 +9,7 @@ use crate::error::Span;
 use crate::value_ref::Val;
 
 use super::{
-    Rin, RinBinding, RinError, RinErrorKind, RinEvalResult, RinState, RinType, RinTypedBinding,
+    Rin, RinBinding, RinError, RinErrorKind, RinEvalResult, RinResolvedBinding, RinState, RinType,
     RinValue, begin_operation,
 };
 
@@ -603,7 +603,7 @@ pub unsafe extern "C" fn rin_resolve_type(
 /// # Safety
 /// `machine`・`name`・`val` は有効なポインタであること。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_bind_typed(
+pub unsafe extern "C" fn rin_bind_resolved(
     machine: *mut Rin,
     name: *const c_char,
     ty: RinType,
@@ -613,15 +613,15 @@ pub unsafe extern "C" fn rin_bind_typed(
         return false;
     };
     m.clear_error();
-    let Some(name_str) = (unsafe { read_c_str(m, name, "rin_bind_typed: name") }) else {
+    let Some(name_str) = (unsafe { read_c_str(m, name, "rin_bind_resolved: name") }) else {
         return false;
     };
-    let Some(v) = (unsafe { read_val(m, val, "rin_bind_typed: val") }) else {
+    let Some(v) = (unsafe { read_val(m, val, "rin_bind_resolved: val") }) else {
         return false;
     };
     let handle = crate::TypeHandle::from_raw(ty.id);
     match m.state.as_mut().expect("Rin state present") {
-        RinState::Building(b) => match b.bind_typed(name_str, handle, v) {
+        RinState::Building(b) => match b.bind_val(name_str, handle, v) {
             Ok(()) => true,
             Err(e) => {
                 m.last_error.set_from_ref(e);
@@ -641,26 +641,26 @@ pub unsafe extern "C" fn rin_bind_typed(
     }
 }
 
-/// 凍結後の環境で、事前解決済みの [`RinTypedBinding`] を与えてソースを評価する。
+/// 凍結後の環境で、事前解決済みの [`RinResolvedBinding`] を与えてソースを評価する。
 ///
 /// # Safety
 /// `machine`・`source` は有効なポインタ、`bindings` は `binding_count` 個の有効な要素を指すこと。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rin_eval_with_typed(
+pub unsafe extern "C" fn rin_eval_with_resolved(
     machine: *mut Rin,
     source: *const c_char,
-    bindings: *const RinTypedBinding,
+    bindings: *const RinResolvedBinding,
     binding_count: usize,
 ) -> RinEvalResult {
     let Some(m) = (unsafe { machine.as_mut() }) else {
         return RinEvalResult::failure();
     };
     m.clear_error();
-    let Some(src) = (unsafe { read_c_str(m, source, "rin_eval_with_typed: source") }) else {
+    let Some(src) = (unsafe { read_c_str(m, source, "rin_eval_with_resolved: source") }) else {
         return RinEvalResult::failure();
     };
     if binding_count > 0 && bindings.is_null() {
-        m.record_host_error("rin_eval_with_typed: bindings is NULL");
+        m.record_host_error("rin_eval_with_resolved: bindings is NULL");
         return RinEvalResult::failure();
     }
     if matches!(m.state_ref(), RinState::Building(_)) {
@@ -668,19 +668,19 @@ pub unsafe extern "C" fn rin_eval_with_typed(
             "env.phase",
             RinErrorKind::Runtime,
             Span::default(),
-            "rin_eval_with_typed requires a frozen Rin; call rin_freeze first or use rin_build",
+            "rin_eval_with_resolved requires a frozen Rin; call rin_freeze first or use rin_build",
         );
         return RinEvalResult::failure();
     }
 
-    type TypedEntry<'b> = (&'b str, crate::TypeHandle, Val);
-    let mut stack_buf: [TypedEntry<'_>; STACK_FFI_ARGS] =
+    type ResolvedEntry<'b> = (&'b str, crate::TypeHandle, Val);
+    let mut stack_buf: [ResolvedEntry<'_>; STACK_FFI_ARGS] =
         [("", crate::TypeHandle::from_raw(0), Val::void()); STACK_FFI_ARGS];
-    let mut heap_ptr: Option<(NonNull<TypedEntry<'_>>, Layout)> = None;
-    let slice_mut: &mut [TypedEntry<'_>] = if binding_count <= STACK_FFI_ARGS {
+    let mut heap_ptr: Option<(NonNull<ResolvedEntry<'_>>, Layout)> = None;
+    let slice_mut: &mut [ResolvedEntry<'_>] = if binding_count <= STACK_FFI_ARGS {
         &mut stack_buf[..binding_count]
     } else {
-        let Some(layout) = Layout::array::<TypedEntry<'_>>(binding_count).ok() else {
+        let Some(layout) = Layout::array::<ResolvedEntry<'_>>(binding_count).ok() else {
             m.record_simple_error(
                 "eval.limits",
                 RinErrorKind::TooMuchMemory,
@@ -699,7 +699,7 @@ pub unsafe extern "C" fn rin_eval_with_typed(
             );
             return RinEvalResult::failure();
         };
-        let typed = ptr.cast::<TypedEntry<'_>>();
+        let typed = ptr.cast::<ResolvedEntry<'_>>();
         heap_ptr = Some((typed, layout));
         unsafe { std::slice::from_raw_parts_mut(typed.as_ptr(), binding_count) }
     };
@@ -707,7 +707,7 @@ pub unsafe extern "C" fn rin_eval_with_typed(
     let mut filled = 0usize;
     for i in 0..binding_count {
         let entry = unsafe { &*bindings.add(i) };
-        let Some(bname) = (unsafe { read_c_str(m, entry.name, "rin_eval_with_typed: name") })
+        let Some(bname) = (unsafe { read_c_str(m, entry.name, "rin_eval_with_resolved: name") })
         else {
             for &(_, _, v) in &slice_mut[..filled] {
                 m.state_mut().release_val(v);
@@ -718,7 +718,7 @@ pub unsafe extern "C" fn rin_eval_with_typed(
             }
             return RinEvalResult::failure();
         };
-        let Some(v) = (unsafe { read_val(m, entry.value, "rin_eval_with_typed: value") }) else {
+        let Some(v) = (unsafe { read_val(m, entry.value, "rin_eval_with_resolved: value") }) else {
             for &(_, _, v) in &slice_mut[..filled] {
                 m.state_mut().release_val(v);
             }
@@ -734,7 +734,7 @@ pub unsafe extern "C" fn rin_eval_with_typed(
     }
 
     let ok = match m.state.as_mut().expect("Rin state present") {
-        RinState::Frozen(f) => match f.eval_with_typed_vals(src, slice_mut) {
+        RinState::Frozen(f) => match f.eval_with_vals(src, slice_mut) {
             Ok(_) => true,
             Err(e) => {
                 m.last_error.set_from_ref(e);

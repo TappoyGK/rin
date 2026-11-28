@@ -31,30 +31,15 @@ impl<'a> Builder<'a> {
         self.inner.math_fma
     }
 
-    /// ホストの値を型式 `type_expr` 付きで大域変数として束縛する（既存名・組み込み名・読み込み済みモジュール名との衝突はエラー）。
+    /// ホストの値を型 `ty`（型式文字列または事前解決済み [`crate::TypeHandle`]）付きで大域変数として束縛する（既存名・組み込み名・読み込み済みモジュール名との衝突はエラー）。
     #[cfg(feature = "std-value")]
-    pub fn bind(&mut self, name: &str, type_expr: &str, value: &Value) -> Result<(), Error> {
-        self.inner.bind(name, type_expr, value)
-    }
-
-    /// 事前解決済みの [`crate::TypeHandle`] 付きでホストの値を大域変数として束縛する。
-    #[cfg(feature = "std-value")]
-    pub fn bind_value_typed(
+    pub fn bind<T: super::TypeArg>(
         &mut self,
         name: &str,
-        ty: crate::TypeHandle,
+        ty: T,
         value: &Value,
     ) -> Result<(), Error> {
-        let imported = match self.inner.pool.import(value, Span::default()) {
-            Ok(v) => Val(v),
-            Err(_) => return Err(self.inner.pool.core.error.to_owned_error()),
-        };
-        let res = self
-            .inner
-            .bind_typed_val(name, ty, imported)
-            .map_err(|e| e.to_error());
-        self.inner.pool.release_val(imported.0);
-        res
+        ty.bind_value_inner(self, name, value)
     }
 
     /// ホスト提供のソースから名前付きモジュールを読み込んで評価する。
@@ -129,50 +114,19 @@ impl<'a> Machine<'a> {
     /// 読み込み済みのすべてのモジュールは `import` なしで `mod_name.symbol` として参照できる。
     #[cfg(feature = "std-value")]
     pub fn eval(&mut self, source: &str) -> Result<Value, Error> {
-        self.eval_with(source, &[])
+        self.inner.eval_frozen(source, &[])
     }
 
-    /// 凍結した環境で、この 1 回の評価にだけ有効な型式付き初期束縛 `bindings` を与えてソースを評価する。
+    /// 凍結した環境で、この 1 回の評価にだけ有効な型（型式文字列または事前解決済み [`crate::TypeHandle`]）付き初期束縛 `bindings` を与えてソースを評価する。
     ///
     /// 評価の成否にかかわらず、大域環境・読み込み済みモジュールは変更せず、一時束縛は終了時に解放する。
     #[cfg(feature = "std-value")]
-    pub fn eval_with(
+    pub fn eval_with<T: super::TypeArg>(
         &mut self,
         source: &str,
-        bindings: &[(&str, &str, Value)],
+        bindings: &[(&str, T, Value)],
     ) -> Result<Value, Error> {
-        self.inner.eval_frozen(source, bindings)
-    }
-
-    /// 凍結した環境で、事前解決済みの [`crate::TypeHandle`] 付き初期束縛 `bindings` を与えてソースを評価する。
-    #[cfg(feature = "std-value")]
-    pub fn eval_with_typed(
-        &mut self,
-        source: &str,
-        bindings: &[(&str, crate::TypeHandle, Value)],
-    ) -> Result<Value, Error> {
-        let mut imported: Vec<(&str, crate::TypeHandle, Val)> = Vec::with_capacity(bindings.len());
-        for (name, ty, val) in bindings {
-            match self.inner.pool.import(val, Span::default()) {
-                Ok(rv) => imported.push((*name, *ty, Val(rv))),
-                Err(_) => {
-                    let err = self.inner.pool.core.error.to_owned_error();
-                    for (_, _, v) in imported {
-                        self.inner.pool.release_val(v.0);
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        let res = self
-            .inner
-            .eval_frozen_typed_ref(source, &imported)
-            .map(|vr| vr.to_value())
-            .map_err(|e| e.to_error());
-        for (_, _, v) in imported {
-            self.inner.pool.release_val(v.0);
-        }
-        res
+        T::eval_with_values_inner(self, source, bindings)
     }
 
     /// 定義済みの大域関数をソース再解析なしで直接呼び出す。

@@ -31,7 +31,7 @@ pub use alloc::{Allocator, ArenaAllocator, HeapAllocator};
 #[cfg(feature = "std-value")]
 pub use error::{Error, StackFrame};
 pub use error::{ErrorKind, ErrorRef, Limits, Span};
-pub use eval::{Builder, Machine};
+pub use eval::{Builder, Machine, TypeArg};
 #[cfg(feature = "std-value")]
 pub use eval::{eval_with, eval_with_allocator};
 pub use math::MathFma;

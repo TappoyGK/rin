@@ -8,8 +8,8 @@ use super::types::{FnSig, PermTypeNode, TypeEnv, TypeId};
 
 /// 事前解決済みのホスト境界用型ハンドル。
 ///
-/// [`crate::Builder::resolve_type`] で取得し、[`crate::Builder::bind_typed`] や
-/// [`crate::Machine::eval_with_typed_vals`] / [`crate::Machine::eval_with_typed`] に渡すことで、
+/// [`crate::Builder::resolve_type`] で取得し、[`crate::Builder::bind`] / [`crate::Builder::bind_val`] や
+/// [`crate::Machine::eval_with`] / [`crate::Machine::eval_with_vals`] に渡すことで、
 /// 反復呼び出し時の型式文字列パースを省略できる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeHandle(pub(crate) TypeId);

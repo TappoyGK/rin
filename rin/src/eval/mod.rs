@@ -2,6 +2,7 @@
 
 mod builtins;
 mod host_api;
+pub use host_api::TypeArg;
 mod host_vals;
 mod machine;
 mod modules;
@@ -62,7 +63,7 @@ pub fn eval_with_allocator(
 ) -> Result<Value, Error> {
     let mut builder = Builder::new(limits, alloc);
     for (k, ty, v) in bindings {
-        builder.bind(k, ty, v)?;
+        builder.bind(k, *ty, v)?;
     }
     builder.eval(source)
 }

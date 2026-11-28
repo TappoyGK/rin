@@ -43,7 +43,7 @@ impl<'a> Builder<'a> {
     pub fn into_machine(self) -> Machine<'a>
 
     // std-value フィーチャ有効時（所有型 Value / Error を使用）
-    pub fn bind(&mut self, name: &str, type_expr: &str, value: &Value) -> Result<(), Error>
+    pub fn bind<T: TypeArg>(&mut self, name: &str, ty: T, value: &Value) -> Result<(), Error>
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error>
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
     pub fn freeze(self) -> Result<Machine<'a>, Error>
@@ -57,7 +57,7 @@ impl<'a> Machine<'a> {
 
     // std-value フィーチャ有効時（所有型 Value / Error を使用）
     pub fn eval(&mut self, source: &str) -> Result<Value, Error>
-    pub fn eval_with(&mut self, source: &str, bindings: &[(&str, &str, Value)]) -> Result<Value, Error>
+    pub fn eval_with<T: TypeArg>(&mut self, source: &str, bindings: &[(&str, T, Value)]) -> Result<Value, Error>
     pub fn call(&mut self, fn_name: &str, args: &[Value]) -> Result<Value, Error>
     pub fn call_in(&mut self, mod_name: &str, fn_name: &str, args: &[Value]) -> Result<Value, Error>
 }
@@ -102,8 +102,7 @@ pub fn value_ref(&self, v: Val) -> ValueRef<'_>
 
 // Builder
 pub fn resolve_type(&mut self, type_expr: &str) -> Result<TypeHandle, ErrorRef<'_>>
-pub fn bind_val(&mut self, name: &str, type_expr: &str, val: Val) -> Result<(), ErrorRef<'_>>
-pub fn bind_typed(&mut self, name: &str, ty: TypeHandle, val: Val) -> Result<(), ErrorRef<'_>>
+pub fn bind_val<T: TypeArg>(&mut self, name: &str, ty: T, val: Val) -> Result<(), ErrorRef<'_>>
 pub fn load_module_ref(&mut self, name: &str, source: &str) -> Result<(), ErrorRef<'_>>
 pub fn eval_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>>
 pub fn fn_sig(&self, fn_name: &str) -> Option<FnSigRef<'_>>
@@ -113,8 +112,7 @@ pub fn type_of_in(&self, mod_name: &str, name: &str) -> Option<TypeRef<'_>>
 
 // Machine
 pub fn eval_ref(&mut self, source: &str) -> Result<ValueRef<'_>, ErrorRef<'_>>
-pub fn eval_with_vals(&mut self, source: &str, bindings: &[(&str, &str, Val)]) -> Result<ValueRef<'_>, ErrorRef<'_>>
-pub fn eval_with_typed_vals(&mut self, source: &str, bindings: &[(&str, TypeHandle, Val)]) -> Result<ValueRef<'_>, ErrorRef<'_>>
+pub fn eval_with_vals<T: TypeArg>(&mut self, source: &str, bindings: &[(&str, T, Val)]) -> Result<ValueRef<'_>, ErrorRef<'_>>
 pub fn call_ref(&mut self, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
 pub fn call_in_ref(&mut self, mod_name: &str, fn_name: &str, args: &[Val]) -> Result<ValueRef<'_>, ErrorRef<'_>>
 pub fn fn_sig(&self, fn_name: &str) -> Option<FnSigRef<'_>>
@@ -366,7 +364,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 - `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
 - `RinType`：`{ uint32_t id; }`（`rin_resolve_type` で事前解決した型ハンドル）
 - `RinBinding`：`{ const char *name; const char *type_expr; const RinValue *value; }`
-- `RinTypedBinding`：`{ const char *name; RinType ty; const RinValue *value; }`
+- `RinResolvedBinding`：`{ const char *name; RinType ty; const RinValue *value; }`
 - `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。**`rin_drop` へ渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等への入力引数として渡せる）
 
 ### 2.2 `Rin` 操作
@@ -383,11 +381,11 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
 | `RinMathFma rin_math_fma(const Rin *rin)` | 現在の FMA 設定を返す（`NULL` は `RIN_MATH_FMA_STRICT`） |
 | `bool rin_resolve_type(Rin *rin, const char *type_expr, RinType *out)` | 読み込み段階で型式を事前解決して `*out` へ書き込む（`fn` 型を含む場合は `type.boundary`、凍結後は `env.frozen`） |
 | `bool rin_bind(Rin *rin, const char *name, const char *type_expr, const RinValue *val)` | 値を型式 `type_expr` で検証したうえで大域変数として束縛する（所有権は移動しない。凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、型不一致は `RIN_ERR_RUNTIME`・規則 `type.boundary`・位置 `0:0`、既存の大域束縛・組み込み名・読み込み済みモジュール名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.def`・位置 `0:0` を記録して `false`） |
-| `bool rin_bind_typed(Rin *rin, const char *name, RinType ty, const RinValue *val)` | 事前解決済み `RinType` を使って値を大域変数として束縛する |
+| `bool rin_bind_resolved(Rin *rin, const char *name, RinType ty, const RinValue *val)` | 事前解決済み `RinType` を使って値を大域変数として束縛する |
 | `RinEvalResult rin_build(Rin *rin, const char *source)` | 読み込み段階でソースを評価し大域定義を構築する（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0` を記録して失敗。評価が途中で失敗した場合は追加した大域束縛・`import` を取り消す） |
 | `RinEvalResult rin_eval(Rin *rin, const char *source)` | 凍結後の環境でソースを評価し結果を借用ポインタで返す（`[env.frozen]`・`[env.modules]` を適用。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
 | `RinEvalResult rin_eval_with(Rin *rin, const char *source, const RinBinding *bindings, size_t binding_count)` | 凍結後の環境で、この 1 回の評価にだけ有効な初期束縛 `bindings` を与えてソースを評価する（評価するソースの最外側のレキシカル束縛として導入され、そのソースおよびその中で生成されたクロージャからのみ参照でき、凍結済み関数からは参照されない。前提：`bindings` は `binding_count` 個の有効な `RinBinding` を指し、各要素の `name` は NUL 終端 UTF-8、`value` は同じ `Rin` で生成した有効な `RinValue *` で呼び出し中のみ有効であればよい。所有権は移動しない。同じ名前が重複した場合は後ろの束縛が有効になる。`binding_count == 0` なら `bindings == NULL` 可。`binding_count > 0` で `bindings == NULL`、要素の `name` / `value` が `NULL`、または `name` が不正 UTF-8 のときは `RIN_ERR_HOST`・規則 `host.argument`。凍結前は `RIN_ERR_RUNTIME`・規則 `env.phase`・位置 `0:0` を記録して失敗） |
-| `RinEvalResult rin_eval_with_typed(Rin *rin, const char *source, const RinTypedBinding *bindings, size_t binding_count)` | 事前解決済み `RinType` を使って `rin_eval_with` と同様に評価する（型式文字列の再パースを省略） |
+| `RinEvalResult rin_eval_with_resolved(Rin *rin, const char *source, const RinResolvedBinding *bindings, size_t binding_count)` | 事前解決済み `RinType` を使って `rin_eval_with` と同様に評価する（型式文字列の再パースを省略） |
 | `RinEvalResult rin_load(Rin *rin, const char *mod_name, const char *source)` | ホスト提供のソースを名前付きモジュールとして読み込む（凍結後は `RIN_ERR_RUNTIME`・規則 `env.frozen`・位置 `0:0`、読み込み済みモジュール名や既存の大域束縛・組み込み名との衝突は `RIN_ERR_RUNTIME`・規則 `expr.module`・位置 `0:0` を記録して失敗。失敗した読み込みは登録されず再試行可能） |
 | `RinEvalResult rin_call(Rin *rin, const char *fn_name, const RinValue *const *args, size_t argc)` | 定義済み関数を文字列再パースなしで直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |
 | `RinEvalResult rin_call_in(Rin *rin, const char *mod_name, const char *fn_name, const RinValue *const *args, size_t argc)` | 読み込んだモジュール内の公開関数を直接呼び出す（凍結前・凍結後のどちらでも呼び出せる） |

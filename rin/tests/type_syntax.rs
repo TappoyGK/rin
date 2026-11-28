@@ -339,7 +339,7 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
         "type.boundary"
     );
     let v10 = b.val_int(10);
-    b.bind_typed("k", ty_i64, v10).unwrap();
+    b.bind_val("k", ty_i64, v10).unwrap();
     b.release_val(v10);
 
     // Builder 段階でのシグネチャ・型照会
@@ -368,13 +368,13 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
     assert_eq!(sig_root.to_string(), "((w Wrap)) -> (option i64)");
     assert_eq!(m.type_of("k").unwrap().to_string(), "i64");
 
-    // 事前解決 TypeHandle を使った反復 eval_with_typed / eval_with_typed_vals
+    // 事前解決 TypeHandle を使った反復 eval_with / eval_with_vals
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("atk".to_string(), Value::Int(12));
     fields.insert("crit".to_string(), Value::Bool(true));
     let ctx_val = Value::structure("Ctx", fields);
     assert_eq!(
-        m.eval_with_typed(
+        m.eval_with(
             "(+ (combat.calc c k) n)",
             &[("c", ty_ctx, ctx_val.clone()), ("n", ty_i64, Value::Int(5))],
         )
@@ -383,12 +383,12 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
     );
     // 型不一致は type.boundary
     let err = m
-        .eval_with_typed("(+ n k)", &[("n", ty_i64, Value::text("bad"))])
+        .eval_with("(+ n k)", &[("n", ty_i64, Value::text("bad"))])
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Runtime);
     assert_eq!(err.rule(), "type.boundary");
 
-    // C FFI での rin_resolve_type / rin_bind_typed / rin_eval_with_typed / rin_fn_arity / rin_fn_sig_format
+    // C FFI での rin_resolve_type / rin_bind_resolved / rin_eval_with_resolved / rin_fn_arity / rin_fn_sig_format
     use rin::ffi::*;
     unsafe {
         let r = rin_new(
@@ -410,7 +410,7 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
         let mut ty = RinType { id: 0 };
         assert!(rin_resolve_type(r, c"i64".as_ptr(), &mut ty));
         let v7 = rin_int(r, 7);
-        assert!(rin_bind_typed(r, c"base".as_ptr(), ty, v7));
+        assert!(rin_bind_resolved(r, c"base".as_ptr(), ty, v7));
         rin_drop(r, v7);
 
         let mut arity = 0usize;
@@ -437,12 +437,12 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
 
         assert!(rin_freeze(r));
         let vx = rin_int(r, 3);
-        let binding = RinTypedBinding {
+        let binding = RinResolvedBinding {
             name: c"x".as_ptr(),
             ty,
             value: vx,
         };
-        let res = rin_eval_with_typed(r, c"(m.add base x)".as_ptr(), &binding, 1);
+        let res = rin_eval_with_resolved(r, c"(m.add base x)".as_ptr(), &binding, 1);
         assert!(res.ok);
         let mut out_i = 0i64;
         assert!(rin_as_int(r, res.value, &mut out_i));
