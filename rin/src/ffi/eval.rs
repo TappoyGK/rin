@@ -577,7 +577,12 @@ pub unsafe extern "C" fn rin_resolve_type(
     match m.state.as_mut().expect("Rin state present") {
         RinState::Building(b) => match b.resolve_type(ty_str) {
             Ok(handle) => {
-                unsafe { *out = RinType { id: handle.raw() } };
+                unsafe {
+                    *out = RinType {
+                        id: handle.raw_id(),
+                        env_id: handle.raw_env_id(),
+                    }
+                };
                 true
             }
             Err(e) => {
@@ -619,7 +624,7 @@ pub unsafe extern "C" fn rin_bind_resolved(
     let Some(v) = (unsafe { read_val(m, val, "rin_bind_resolved: val") }) else {
         return false;
     };
-    let handle = crate::TypeHandle::from_raw(ty.id);
+    let handle = crate::TypeHandle::from_raw(ty.id, ty.env_id);
     match m.state.as_mut().expect("Rin state present") {
         RinState::Building(b) => match b.bind_val(name_str, handle, v) {
             Ok(()) => true,
@@ -675,7 +680,7 @@ pub unsafe extern "C" fn rin_eval_with_resolved(
 
     type ResolvedEntry<'b> = (&'b str, crate::TypeHandle, Val);
     let mut stack_buf: [ResolvedEntry<'_>; STACK_FFI_ARGS] =
-        [("", crate::TypeHandle::from_raw(0), Val::void()); STACK_FFI_ARGS];
+        [("", crate::TypeHandle::from_raw(0, 0), Val::void()); STACK_FFI_ARGS];
     let mut heap_ptr: Option<(NonNull<ResolvedEntry<'_>>, Layout)> = None;
     let slice_mut: &mut [ResolvedEntry<'_>] = if binding_count <= STACK_FFI_ARGS {
         &mut stack_buf[..binding_count]
@@ -729,7 +734,11 @@ pub unsafe extern "C" fn rin_eval_with_resolved(
             return RinEvalResult::failure();
         };
         m.state_mut().retain_val(v);
-        slice_mut[i] = (bname, crate::TypeHandle::from_raw(entry.ty.id), v);
+        slice_mut[i] = (
+            bname,
+            crate::TypeHandle::from_raw(entry.ty.id, entry.ty.env_id),
+            v,
+        );
         filled += 1;
     }
 

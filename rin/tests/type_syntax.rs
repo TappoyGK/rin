@@ -388,6 +388,30 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
     assert_eq!(err.kind, ErrorKind::Runtime);
     assert_eq!(err.rule(), "type.boundary");
 
+    // 別環境（Builder）で取得した TypeHandle は bind / eval_with で type.boundary になる
+    {
+        let mut ha = HeapAllocator;
+        let mut hb = HeapAllocator;
+        let mut a = Builder::new(Limits::default(), &mut ha);
+        let mut b2 = Builder::new(Limits::default(), &mut hb);
+        let ta_list = a.resolve_type("(list text)").unwrap();
+        let ta_i64 = a.resolve_type("i64").unwrap();
+        let _tb_list = b2.resolve_type("(list i64)").unwrap();
+        let v_list = b2.eval("[5]").unwrap();
+        let err_list = b2.bind("x", ta_list, &v_list).unwrap_err();
+        assert_eq!(err_list.kind, ErrorKind::Runtime);
+        assert_eq!(err_list.rule(), "type.boundary");
+        let err_prim = b2.bind("y", ta_i64, &Value::Int(1)).unwrap_err();
+        assert_eq!(err_prim.kind, ErrorKind::Runtime);
+        assert_eq!(err_prim.rule(), "type.boundary");
+        let mut m2 = b2.freeze().unwrap();
+        let err_eval = m2
+            .eval_with("x", &[("x", ta_i64, Value::Int(1))])
+            .unwrap_err();
+        assert_eq!(err_eval.kind, ErrorKind::Runtime);
+        assert_eq!(err_eval.rule(), "type.boundary");
+    }
+
     // C FFI での rin_resolve_type / rin_bind_resolved / rin_eval_with_resolved / rin_fn_arity / rin_fn_sig_format
     use rin::ffi::*;
     unsafe {
@@ -407,10 +431,41 @@ fn fn_sig_query_and_preresolved_type_handle_rust_and_ffi() {
             )
             .ok
         );
-        let mut ty = RinType { id: 0 };
+        let mut ty = RinType { id: 0, env_id: 0 };
         assert!(rin_resolve_type(r, c"i64".as_ptr(), &mut ty));
         let v7 = rin_int(r, 7);
         assert!(rin_bind_resolved(r, c"base".as_ptr(), ty, v7));
+        // 未初期化（env_id == 0）や別 Rin の RinType は type.boundary で拒否される
+        assert!(!rin_bind_resolved(
+            r,
+            c"bad_zero".as_ptr(),
+            RinType { id: 1, env_id: 0 },
+            v7
+        ));
+        assert_eq!(
+            std::ffi::CStr::from_ptr((*rin_last_error(r)).rule)
+                .to_str()
+                .unwrap(),
+            "type.boundary"
+        );
+        let r_other = rin_new(
+            rin_limits_default(),
+            RinAllocator {
+                ctx: std::ptr::null_mut(),
+                alloc: None,
+                dealloc: None,
+            },
+        );
+        let mut ty_other = RinType { id: 0, env_id: 0 };
+        assert!(rin_resolve_type(r_other, c"i64".as_ptr(), &mut ty_other));
+        assert!(!rin_bind_resolved(r, c"bad_other".as_ptr(), ty_other, v7));
+        assert_eq!(
+            std::ffi::CStr::from_ptr((*rin_last_error(r)).rule)
+                .to_str()
+                .unwrap(),
+            "type.boundary"
+        );
+        rin_free(r_other);
         rin_drop(r, v7);
 
         let mut arity = 0usize;

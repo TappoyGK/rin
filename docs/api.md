@@ -64,7 +64,7 @@ impl<'a> Machine<'a> {
 ```
 
 - `Builder::new` / `Builder::with_memory_config`：読み込み段階の環境を生成する。`with_memory_config` で 3 領域（永続・オブジェクト・作業）のチャンクサイズ設定 `MemoryConfig` を指定できる。
-- `Builder::bind`：ホストの `Value` を型 `ty`（`TypeArg`：型式文字列 `&str` または `Builder::resolve_type` で事前解決した `TypeHandle`）で検証して内部プールに取り込み、大域変数 `name` として束縛する。型が一致しない場合や無効な `TypeHandle` の場合は `[type.boundary]` の実行時エラー（位置 `0:0`）、既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は `[expr.def]` の実行時エラー（位置 `0:0`）を返す。
+- `Builder::bind` / `Builder::bind_val`：ホストの値（`bind` は所有値 `Value` を内部プールへ取り込み、`bind_val` はプール上の `Val` を retain して共有参照する）を型 `ty`（`TypeArg`：型式文字列 `&str` または `Builder::resolve_type` で事前解決した `TypeHandle`）で検証し、大域変数 `name` として束縛する。型が一致しない場合や無効な `TypeHandle` の場合は `[type.boundary]` の実行時エラー（位置 `0:0`）、既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は `[expr.def]` の実行時エラー（位置 `0:0`）を返す。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。読み込み済みのモジュール名、または既存の大域束縛・組み込み名と衝突する場合は実行時エラー（`[expr.module]`、位置 `0:0`）を返す。読み込みに失敗したモジュールは登録されず、同じ名前で再試行できる。
 - `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。途中でエラーになった場合、その評価中に追加した大域束縛・`import` は追加のメモリ確保なしで取り消される。
 - **永続領域の追記特性**：読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（失敗した評価で追加された大域束縛の値スロットは取り消し時に解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
@@ -367,7 +367,7 @@ pub fn rin::fmt::format(source: &str) -> Result<String, Error>;
   - `size == 0` の要求では C の `alloc` / `dealloc` のいずれも呼び出さない。
   - `ctx` と `alloc` / `dealloc` が指す関数は、`rin_new`（または `rin_new_with_config`）の呼び出しから `rin_free` が戻るまで有効に保つこと（`rin_free` は `Rin` 本体の解放にも `dealloc` を使用する）。
 - `Rin` / `RinValue`：不透明ハンドル型。`Rin` 本体・`RinValue` ハンドル・`RinError` バッファはすべて `RinAllocator` 上に直接確保され、カスタムアロケータ使用時はシステムヒープを一切使わない。
-- `RinType`：`{ uint32_t id; }`（`rin_resolve_type` で事前解決した型ハンドル）
+- `RinType`：`{ uint32_t id; uint64_t env_id; }`（`rin_resolve_type` で事前解決した型ハンドル。取得元の `Rin` でのみ有効であり、別の `Rin` で取得したハンドルや範囲外・未初期化の値を `rin_bind_resolved` / `rin_eval_with_resolved` に渡すと `[type.boundary]` の実行時エラー（位置 `0:0`）となる）
 - `RinBinding`：`{ const char *name; const char *type_expr; const RinValue *value; }`
 - `RinResolvedBinding`：`{ const char *name; RinType ty; const RinValue *value; }`
 - `RinEvalResult`：`{ bool ok; const RinValue *value; }`（`value` は `Rin` が所有する借用ポインタ。同じ `Rin` に対する次の評価・呼び出し・解放まで有効。**`rin_drop` へ渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等への入力引数として渡せる）
@@ -428,7 +428,7 @@ typedef struct RinError {
 - `module` は発生モジュール（モジュール外なら NULL）、`backtrace` は整形済み履歴（なければ NULL）、`rule` は根拠となる規則名（角括弧なし、非 NULL）とする。
 - `kind` の先頭 6 種は Rust の `ErrorKind` に対応する。`RIN_ERR_HOST` は FFI の引数エラーである。今後の種別は末尾に追加する。
 - `line` / `col` は 1 始まりで、ソース位置がなければ 0 とする。
-- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_load` / `rin_call` / `rin_call_in` / `rin_bind` / `rin_freeze` / `rin_set_math_fma` の 9 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_text` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
+- 状態変更・評価操作は `rin_build` / `rin_eval` / `rin_eval_with` / `rin_eval_with_resolved` / `rin_load` / `rin_call` / `rin_call_in` / `rin_resolve_type` / `rin_bind` / `rin_bind_resolved` / `rin_freeze` / `rin_set_math_fma` の 12 関数であり、冒頭で前回のエラーをクリアし、失敗時に新しいエラーを記録する。また、値構築関数（`rin_int` / `rin_text` / `rin_cons` / `rin_struct` 等）・`rin_struct_set` の失敗（OOM・NULL 引数・不正 UTF-8 等）、および所有ハンドルを返す読み取り 5 関数（`rin_car` / `rin_cdr` / `rin_field` / `rin_unwrap` / `rin_tuple_get`）のハンドル確保失敗時にも `NULL` / `false` を返して `rin_last_error` を更新する。返却ポインタと文字列は、同じ `Rin` への次のこれら操作、または `rin_free` まで有効である。`rin_last_error` の再取得では無効化しない。同じ `Rin` の操作・解放と並行して参照してはならない。
 - 有効な `Rin` への状態変更・評価操作が失敗すると必ずエラーを記録し、成功すると `rin_last_error` は NULL を返す。`rin_bind` の内部処理の失敗も記録する。
 - NULL 引数・不正 UTF-8 は `RIN_ERR_HOST` とし、`module` / `backtrace` は NULL、`line` / `col` は 0、`rule` は `host.argument` とする。`message` は引数エラーの文言、`text` はその末尾に ` [host.argument]` を付けた文字列とする。`Rin` 自体が NULL の場合は記録先がないため記録せず、操作は失敗する。`rin_last_error(NULL)` は NULL を返す。
 - `RinEvalResult.value` は評価・関数呼び出し成功時には `Rin` が所有する借用ポインタ（`const RinValue *`）であり、同じ `Rin` への次の評価・呼び出し・解放まで有効である（**ホスト側で `rin_drop` に渡してはならない**。有効期間中であれば、そのまま後続の `rin_call` / `rin_bind` 等の入力値として渡せる）。`rin_load` 成功時は `{ true, NULL }`、失敗時は `{ false, NULL }` となる。
@@ -448,7 +448,7 @@ if (!result.ok) {
 生成関数は `Rin *rin` を第 1 引数に取り、`rin` のアロケータ上で値ハンドルを確保して返す。使い終わったら同じ `rin` に対して `rin_drop(rin, val)` で返却する。
 
 - **失敗時の挙動**：`rin == NULL`、必須引数の `NULL`、不正 UTF-8 文字列、`rin_struct_set` の第 2 引数がその `Rin` の生存中ハンドルでない場合、メモリ上限（`memory_bytes`）超過、またはアロケータの確保失敗時は `NULL`（`rin_struct_set` は `false`）を返し、`rin != NULL` であれば `rin_last_error(rin)` にエラー（`RIN_ERR_HOST` または `RIN_ERR_TOO_MUCH_MEMORY`）を記録する。
-- **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_call` / `rin_eval_with` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` や `rin_struct_set` の第 2 引数へ渡してはならない。
+- **所有権**：`rin_cons` / `rin_some` / `rin_struct_set` / `rin_variant` / `rin_bind` / `rin_bind_resolved` / `rin_call` / `rin_eval_with` / `rin_eval_with_resolved` は渡された `RinValue *` を内部で retain するため、呼び出し元の所有権は移動しない。呼び出し元は自身が構築した `RinValue *` を `rin_drop` で解放する。`RinEvalResult.value` の借用ポインタは `rin_drop` や `rin_struct_set` の第 2 引数へ渡してはならない。
 - **ハンドルの取り違えと解放済みハンドル**：次はホスト側の誤用であり、してはならない（`[eval.sandbox]` の対象ではなく、`rin_struct_set` の場合を除き `rin_last_error` にも記録されない）。
   - 同じハンドルを 2 回 `rin_drop` した場合は内部の生存フラグ（`alive`）により 2 回目は無視される。ただしスロットが新しいハンドルへ再利用された後に古いポインタを渡すと、`rin_drop` では新しいハンドルを解放してしまい、`rin_struct_set` の第 2 引数では再利用先のハンドルが持つ構造体を書き換えてしまう。
   - `rin_drop` 済みのハンドル（未再利用のもの）および `RinEvalResult.value` を `rin_struct_set` の第 2 引数に渡した場合は `RIN_ERR_HOST` を記録して `false` を返す。`rin_drop` 済みのハンドルを読み取り・入力に渡した場合は、`Void` またはスロット再利用後の別の値を読むことがある。

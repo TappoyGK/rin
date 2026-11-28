@@ -62,7 +62,10 @@ impl EnvState<'_> {
                 tid,
                 Span::default(),
             )?;
-            Ok::<_, ErrRecorded>(crate::TypeHandle(tid))
+            Ok::<_, ErrRecorded>(crate::TypeHandle {
+                id: tid,
+                env_id: self.type_env.env_id(),
+            })
         })();
         self.pool.work.rewind(&mut self.pool.core, mark);
         match res {
@@ -80,7 +83,7 @@ impl EnvState<'_> {
         ty: crate::TypeHandle,
         val: Val,
     ) -> Result<(), ErrorRef<'_>> {
-        if !self.type_env.is_boundary_type_id(ty.0) {
+        if !self.type_env.is_valid_handle(ty) {
             self.pool.core.err_str(
                 "type.boundary",
                 ErrorKind::Runtime,
@@ -126,8 +129,13 @@ impl EnvState<'_> {
             return Err(self.pool.core.error.as_ref());
         }
         let mark = self.pool.work.mark(&self.pool.core);
-        let check_res =
-            check_rval_against_type(val.0, ty.0, &self.type_env, &mut self.pool, Span::default());
+        let check_res = check_rval_against_type(
+            val.0,
+            ty.id,
+            &self.type_env,
+            &mut self.pool,
+            Span::default(),
+        );
         self.pool.work.rewind(&mut self.pool.core, mark);
         if check_res.is_err() {
             return Err(self.pool.core.error.as_ref());
@@ -140,7 +148,7 @@ impl EnvState<'_> {
                 &mut self.pool.core,
                 name,
                 ValBinding {
-                    ty: ty.0,
+                    ty: ty.id,
                     fn_sig: None,
                 },
                 Span::default(),
@@ -482,7 +490,7 @@ impl EnvState<'_> {
         }
         let mut extra_types = RawVec::<(&str, crate::typecheck::TypeId)>::new();
         for &(bname, bty, bval) in bindings {
-            if !self.type_env.is_boundary_type_id(bty.0) {
+            if !self.type_env.is_valid_handle(bty) {
                 return Err(self.pool.core.err_str(
                     "type.boundary",
                     ErrorKind::Runtime,
@@ -492,13 +500,13 @@ impl EnvState<'_> {
             }
             check_rval_against_type(
                 bval.0,
-                bty.0,
+                bty.id,
                 &self.type_env,
                 &mut self.pool,
                 Span::default(),
             )?;
             if extra_types
-                .push_work(&mut self.pool.work, &mut self.pool.core, (bname, bty.0))
+                .push_work(&mut self.pool.work, &mut self.pool.core, (bname, bty.id))
                 .is_none()
             {
                 return Err(self.pool.core.err_oom(Span::default()));

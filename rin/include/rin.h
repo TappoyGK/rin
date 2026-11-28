@@ -106,6 +106,7 @@ typedef struct RinError {
  */
 typedef struct RinType {
     uint32_t id;
+    uint64_t env_id;
 } RinType;
 
 typedef struct RinBinding {

@@ -12,17 +12,28 @@ use super::types::{FnSig, PermTypeNode, TypeEnv, TypeId};
 /// [`crate::Machine::eval_with`] / [`crate::Machine::eval_with_vals`] に渡すことで、
 /// 反復呼び出し時の型式文字列パースを省略できる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeHandle(pub(crate) TypeId);
+pub struct TypeHandle {
+    pub(crate) id: TypeId,
+    pub(crate) env_id: u64,
+}
 
 impl TypeHandle {
     #[inline]
-    pub(crate) const fn from_raw(id: u32) -> Self {
-        Self(TypeId(id))
+    pub(crate) const fn from_raw(id: u32, env_id: u64) -> Self {
+        Self {
+            id: TypeId(id),
+            env_id,
+        }
     }
 
     #[inline]
-    pub(crate) const fn raw(self) -> u32 {
-        self.0.0
+    pub(crate) const fn raw_id(self) -> u32 {
+        self.id.0
+    }
+
+    #[inline]
+    pub(crate) const fn raw_env_id(self) -> u64 {
+        self.env_id
     }
 }
 

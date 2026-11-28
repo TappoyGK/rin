@@ -107,8 +107,13 @@ pub(crate) struct TypeEnvSnapshot {
     root_import_slots_len: usize,
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ENV_ID: AtomicU64 = AtomicU64::new(1);
+
 /// 永続領域 (`PermArena`) に保持する型環境。
 pub(crate) struct TypeEnv {
+    env_id: u64,
     types: RawVec<PermTypeNode>,
     boundary_ok: RawVec<bool>,
     schemas: RawVec<SchemaDef>,
@@ -124,8 +129,9 @@ pub(crate) struct TypeEnv {
 }
 
 impl TypeEnv {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
+            env_id: NEXT_ENV_ID.fetch_add(1, Ordering::Relaxed),
             types: RawVec::new(),
             boundary_ok: RawVec::new(),
             schemas: RawVec::new(),
@@ -139,6 +145,17 @@ impl TypeEnv {
             root_imports: RawMap::new(),
             root_import_slots: RawVec::new(),
         }
+    }
+
+    #[inline]
+    pub(crate) fn env_id(&self) -> u64 {
+        self.env_id
+    }
+
+    /// ホスト境界 API に渡された [`crate::TypeHandle`] がこの環境で事前解決された有効なハンドルかを O(1) で判定する。
+    #[inline]
+    pub(crate) fn is_valid_handle(&self, handle: super::api::TypeHandle) -> bool {
+        handle.env_id == self.env_id && self.is_boundary_type_id(handle.id)
     }
 
     /// 組み込み 8 型ノード（ID `0..8`）を初期化する。

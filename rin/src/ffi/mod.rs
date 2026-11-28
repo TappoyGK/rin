@@ -217,6 +217,7 @@ unsafe fn begin_operation<'a>(machine: *mut Rin) -> Option<&'a mut Rin> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RinType {
     pub id: u32,
+    pub env_id: u64,
 }
 
 #[repr(C)]
