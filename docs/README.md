@@ -12,12 +12,16 @@
 | [数学関数の決定的な計算手順](math-spec.md) | `sin`・`cos` の手順・定数・テスト値（Suz との共有正本） |
 | [仕様例集](spec-cases.md) | 言語仕様の具体例と期待結果 |
 
-## 開発
+## 開発・運用
 
 | 文書 | 内容 |
 |---|---|
 | [内部構成](architecture.md) | 評価環境（`Builder`/`Machine`）・3 領域メモリ管理・コンパイル検査・名前解決の内部設計 |
 | [インタプリタ](../rin/README.md) | ビルド・利用方法・テスト方法 |
+| [開発への参加](../CONTRIBUTING.md) | イシューの書き方と更新ルール（正本：[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin)） |
+| [PR の作業手順](pr.md) | 作業 PR・スタック・レビュー対応の手順（正本：[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin)） |
+| [仕様の執筆・レビュー基準](spec-writing.md) | 仕様文書の正本配置・規則 ID・確認基準（共通正本：[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin)） |
+| [ソースの開発規約](development.md) | 配置・命名・コメント・診断・テスト・リント規約（共通正本：[TappoyGK/suzrin](https://github.com/TappoyGK/suzrin)） |
 
 ## リリース
 
