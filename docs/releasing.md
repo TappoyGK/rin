@@ -8,10 +8,7 @@
 
 リリース PR をマージしたら、その PR は完了とする。次のバージョンでは、同じ `release` ブランチから新しいドラフト PR を作る。PR のマージとタグの公開はユーザーが行う。
 
-1. 作業ブランチは `release` から作成し、仕様（`docs/spec.md` / `docs/schema.md` / `docs/api.md`）・実装（`rin/src/`）・仕様例（`docs/spec-cases/`）・テストを揃えて `release` 向けの PR を出す。
-2. コミットメッセージは `docs:` / `feat:` / `fix:` などの接頭辞に続けて日本語で書く。
-3. 作業 PR 本文では関連イシューを `Refs #番号` 等で紐づけ、自動クローズ（`Closes #番号`）は `main` 向けリリース PR でまとめて行う。
-4. 作業 PR は `work checks` の通過とレビュー後に squash merge で `release` へ取り込む。
+作業 PR の作成・レビュー・スタック管理は [PR の作業手順](pr.md) に従う。
 
 ## 2. リリース準備
 
