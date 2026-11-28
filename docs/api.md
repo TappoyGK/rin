@@ -64,7 +64,7 @@ impl<'a> Machine<'a> {
 ```
 
 - `Builder::new` / `Builder::with_memory_config`：読み込み段階の環境を生成する。`with_memory_config` で 3 領域（永続・オブジェクト・作業）のチャンクサイズ設定 `MemoryConfig` を指定できる。
-- `Builder::bind`：ホストの `Value` を内部プールに取り込み、大域変数 `name` として束縛する。既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は実行時エラー（`[expr.def]`、位置 `0:0`）を返す。
+- `Builder::bind`：ホストの `Value` を型 `ty`（`TypeArg`：型式文字列 `&str` または `Builder::resolve_type` で事前解決した `TypeHandle`）で検証して内部プールに取り込み、大域変数 `name` として束縛する。型が一致しない場合や無効な `TypeHandle` の場合は `[type.boundary]` の実行時エラー（位置 `0:0`）、既存の大域束縛・組み込み名・読み込み済みモジュール名と衝突する場合は `[expr.def]` の実行時エラー（位置 `0:0`）を返す。
 - `Builder::load_module`：名前付きモジュールを読み込んで評価する。読み込み済みのモジュール名、または既存の大域束縛・組み込み名と衝突する場合は実行時エラー（`[expr.module]`、位置 `0:0`）を返す。読み込みに失敗したモジュールは登録されず、同じ名前で再試行できる。
 - `Builder::eval`：読み込み段階でソースを評価する（トップレベルの `def`・`defn`・`import` 等を許可する）。途中でエラーになった場合、その評価中に追加した大域束縛・`import` は追加のメモリ確保なしで取り消される。
 - **永続領域の追記特性**：読み込み段階（`Builder`）の評価では、初めて現れる大域名とモジュール名（定義か参照かを問わず、エラーになった評価も含む）、構造体リテラルに初めて現れる構造体名・フィールド名、および関数リテラル（`fn` / `defn`）のたびに永続領域（`PermArena`）へ追記され、`Builder` / `Machine` が破棄されるまで回収されない（失敗した評価で追加された大域束縛の値スロットは取り消し時に解放される）。反復評価は凍結後の `Machine` で行い、ホットリロード時は新しい `Builder` を作り直すこと。
@@ -121,6 +121,11 @@ pub fn type_of(&self, name: &str) -> Option<TypeRef<'_>>
 pub fn type_of_in(&self, mod_name: &str, name: &str) -> Option<TypeRef<'_>>
 ```
 
+- **`TypeArg` と `TypeHandle`**：
+  - `TypeArg` は外部から実装できない sealed トレイトであり、`&str`（型式文字列）と `TypeHandle`（`Builder::resolve_type` の戻り値）の 2 型のみが実装する。
+  - `Machine::eval_with` / `Machine::eval_with_vals` の 1 回の呼び出しに渡す `bindings` は、型式文字列（`&str`）か型ハンドル（`TypeHandle`）のどちらか一方に揃える。
+  - `TypeHandle` は `resolve_type` を呼んだ `Builder` と、そこから凍結した `Machine` でのみ有効である。無効なハンドル（別の環境で取得したものや範囲外の値）を渡した場合は `[type.boundary]` の実行時エラー（位置 `0:0`）となる。
+  - 束縛がない場合は `eval_with(src, &[])` のように空スライスを渡すのではなく `Machine::eval` / `Machine::eval_ref` を使用する（空スライスでは `T: TypeArg` が推論できないため）。また、`String` を型式として渡す場合は `s.as_str()` を渡す。
 - **`Val` の所有権規約**：
   - `Val` はマシン所有のプール値への不透明ハンドル（`Copy` だが参照カウント管理）。スカラー（`val_void` / `val_int` / `val_float` / `val_bool` / `val_char` / `val_none`）はプールを確保しないが、ヒープオブジェクトを伴う値（`val_text` / `val_ident` / `val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）は呼び出し元が 1 参照を所有する。
   - コンテナ構築（`val_list` / `val_array` / `val_tuple` / `val_struct` / `val_variant` / `val_some` / `val_ok` / `val_err`）および `bind_val` / `call_ref` / `call_in_ref` / `eval_with_vals` は渡された `Val` を内部で retain して共有参照する。**所有権は移動しない**ため、呼び出し元は自分が生成した `Val` を使い終わったタイミングで必ず同じマシンの `release_val` へ返却する。
@@ -523,11 +528,12 @@ if (!result.ok) {
 | 凍結 | `rin_freeze(rin)` | `builder.into_machine()` / `builder.freeze()` | 読み込み → 実行段階へ不可逆遷移 |
 | FMA 設定 | `rin_set_math_fma(rin, mode)` | `builder.set_math_fma` / `machine.set_math_fma` | 両段階で利用可 |
 | FMA 取得 | `rin_math_fma(rin)` | `builder.math_fma` / `machine.math_fma` | 両段階で利用可 |
-| 大域束縛 | `rin_bind(rin, name, val)` | `builder.bind_val` / `builder.bind` | C は凍結後 `[env.frozen]` |
+| 型の事前解決 | `rin_resolve_type(rin, type_expr, out)` | `builder.resolve_type` | C は凍結後 `[env.frozen]` |
+| 大域束縛 | `rin_bind(rin, name, type_expr, val)` / `rin_bind_resolved(rin, name, ty, val)` | `builder.bind_val` / `builder.bind` | C は凍結後 `[env.frozen]`、Rust は `TypeArg` で統一 |
 | モジュール読込 | `rin_load(rin, mod_name, src)` | `builder.load_module_ref` / `builder.load_module` | C は凍結後 `[env.frozen]` |
 | 読み込み段階の評価 | `rin_build(rin, src)` | `builder.eval_ref` / `builder.eval` | C は凍結後 `[env.frozen]` |
 | 実行段階の評価 | `rin_eval(rin, src)` | `machine.eval_ref` / `machine.eval` | C は凍結前 `[env.phase]` |
-| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` | `machine.eval_with_vals` / `machine.eval_with` | C は凍結前 `[env.phase]` |
+| 一時束縛付き評価 | `rin_eval_with(rin, src, binds, n)` / `rin_eval_with_resolved(rin, src, binds, n)` | `machine.eval_with_vals` / `machine.eval_with` | C は凍結前 `[env.phase]`、Rust は `TypeArg` で統一 |
 | 関数直接呼出 | `rin_call(rin, fn_name, args, argc)` | `machine.call_ref` / `machine.call` | C は凍結前も呼べる |
 | モジュール関数呼出 | `rin_call_in(rin, mod, fn_name, args, argc)` | `machine.call_in_ref` / `machine.call_in` | C は凍結前も呼べる |
 | エラー取得 | `rin_last_error(rin)` | `Result<_, ErrorRef<'_>>` / `Result<_, Error>` | C は直前エラーを `Rin` 内に保持 |
