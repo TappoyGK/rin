@@ -4,9 +4,9 @@
 
 ## 未リリース
 
-- **破壊的変更（静的型付けへの移行）**：`defschema`・型注釈・`datum` 型と型パターン・モジュール修飾の構造体／バリアント構築とパターンを導入し、`defn` の型注釈と実行前のゼロヒープ型検査を必須とした（[PR #83](https://github.com/TappoyGK/rin/pull/83)）。
+- **破壊的変更（静的型付けへの移行）**：`defschema`・型注釈・`datum` 型と型パターン・モジュール修飾の構造体／バリアント構築とパターンを導入し、`defn` の型注釈を必須とし、実行前にゼロヒープの型検査を行う（[PR #83](https://github.com/TappoyGK/rin/pull/83)）。
 - **破壊的変更（ホスト境界の型検証と型照会 API）**：スキーマ DSL の `any` を `datum` に置き換え、`bind` / `eval_with` 系 API に型指定と実行時検証（`[type.boundary]`）を導入した。関数シグネチャ・型照会 API と事前解決型ハンドル（`TypeHandle` / `RinType`）も追加した（[PR #83](https://github.com/TappoyGK/rin/pull/83)）。
-- **破壊的変更（`eval_with` のレキシカルスコープ化と再定義の禁止）**：`eval_with` の初期束縛をレキシカルスコープに変更した。読み込み段階での同名再定義・組み込み名の上書き・モジュール再読込をエラーとし、失敗した評価の追加束縛はロールバックする（[PR #81](https://github.com/TappoyGK/rin/pull/81)）。
+- **破壊的変更（`eval_with` のレキシカルスコープ化と再定義の禁止）**：`eval_with` の初期束縛をレキシカルスコープに変更した。読み込み段階での同名再定義・組み込み名の上書き・ホストによるモジュールの再読み込み（`load_module` / `rin_load`）をエラーとし、失敗した評価の追加束縛はロールバックする（[PR #81](https://github.com/TappoyGK/rin/pull/81)）。
 - 複数行文字列リテラル `"""..."""`（閉じ行基準のインデント除去と `${式}` 埋め込み対応）を追加した（[PR #79](https://github.com/TappoyGK/rin/pull/79)）。
 - **破壊的変更（`text` 改名・テンプレート埋め込み・`f64` 表示統一）**：文字列型を `string` から `text` に改名し、`"..."` 内の `${式}` 埋め込み・添字・スライス・大小比較を追加した。`f64` の表示を Suz 共通の最短往復規則に統一した（[PR #78](https://github.com/TappoyGK/rin/pull/78)）。
 - **破壊的変更（文字リテラル `\` 形式への移行）**：文字リテラルを `'a'` から `\a` / `\u{H}` / 名前つき文字形式に変更し、`'` を `quote` 専用とした。文字列エスケープも Suz と共通化した（[PR #77](https://github.com/TappoyGK/rin/pull/77)）。
