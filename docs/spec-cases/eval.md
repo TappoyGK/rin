@@ -603,3 +603,58 @@ a
 | 上限 | 結果 | 値 |
 |---|---|---|
 | 既定 | 実行時エラー | `—` |
+
+### eval-030 他モジュールの構造体・バリアント値の構築と照合
+
+主根拠：`[expr.struct]`
+
+**モジュール `game`：**
+
+```rin
+(defschema Element (variant Element (Plain) (Fire) (Heat i64)))
+(defschema HitResult (struct HitResult (dmg i64) (effect text)))
+```
+
+**入力：**
+
+```rin
+(import game)
+(def h game.HitResult { dmg: 10 effect: "burn" })
+(def e game.Element.Fire)
+(def e2 game.Element.Heat(5))
+(tuple
+  h.dmg
+  (match e (game.Element.Fire 1) (game.Element.Plain 0) (game.Element.Heat(n) n))
+  (match e2 (game.Element.Fire 0) (game.Element.Plain 0) (game.Element.Heat(n) n)))
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 値 | `(tuple 10 1 5)` |
+
+### eval-031 他モジュールの型名を値の位置に書くと型エラー
+
+主根拠：`[expr.module]`
+
+期待規則：`[expr.module]`
+
+**モジュール `game`：**
+
+```rin
+(defschema HitResult (struct HitResult (dmg i64) (effect text)))
+```
+
+**入力：**
+
+```rin
+(import game)
+game.HitResult
+```
+
+**期待結果：**
+
+| 上限 | 結果 | 値 |
+|---|---|---|
+| 既定 | 型エラー | `—` |
