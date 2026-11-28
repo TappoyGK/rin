@@ -8,7 +8,7 @@ Suz / Rin 共通の原則（処理量・資源消費の定型文、正本配置�
 
 Rin では [言語仕様](spec.md) の `[eval.cost-resources]` に従い、ステップ上限・呼び出し深さ上限・メモリ上限（3 領域 `PermArena` / `ObjHeap` / `WorkArena` の論理使用量）およびステップに計上しない処理（構文解析・型検査・コンパイル・解放・診断）の扱いを明確にする。
 
-記述の定型文（「処理量の上限を定める。」「処理量の上限を定めない。」）と 4 項目の表の書き方は [共通基準 §1](https://github.com/TappoyGK/suzrin/blob/main/docs/spec-writing-common.md#1-処理量と資源消費の規定) に従う。
+記述の定型文（「処理量の上限を定める。」「処理量の上限を定めない。」）と 4 項目の表の書き方は [共通基準 §1](https://github.com/TappoyGK/suzrin/blob/main/docs/spec-writing-common.md#1-処理量と資源消費の規定) に従う。Rin では、共通基準の「外部処理」はホスト API の呼び出しを指し、現実装の技術的な根拠は [内部構成](architecture.md) へ置く。
 
 ## 2. 正本を置く場所
 
